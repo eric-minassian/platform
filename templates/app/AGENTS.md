@@ -13,8 +13,8 @@ reference over anything you remember about Effect 2 or 3.
 1. **No infrastructure code and no AWS SDK in this repo.** Declare what you need in `plat.config.ts`; use
    it through `@ericminassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
 2. **`plat.config.ts` is the source of truth for names and payload types.** `pnpm typecheck` fails unless
-   `src/worker.ts` handles exactly its queues, events and crons, and every queue, event, store and secret
-   name used in code is declared with the declared payload type. Declare message types there
+   `src/worker.ts` handles exactly its queues, events and crons, and every queue, event, store, secret and
+   realtime channel name used in code is declared with the declared payload type. Declare message types there
    (`queue<EmailJob>()`, `event<TodoCreated>()`) rather than annotating handlers, and keep the `Register`
    block at the end of the file.
 3. **All data has a schema.** Request bodies, responses, documents and messages are `Schema`s in
@@ -28,19 +28,19 @@ reference over anything you remember about Effect 2 or 3.
 
 ## Layout
 
-| Path                         | What                                                                                   |
-| ---------------------------- | -------------------------------------------------------------------------------------- |
-| `plat.config.ts`             | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env) |
-| `src/domain.ts`              | Schemas and tagged errors, shared by server, worker and web                            |
-| `src/api.ts`                 | The HTTP API as an `HttpApi` definition. The web app imports it: no server-only code   |
-| `src/todos.ts`               | The `Todos` service: the app's rules, over the platform's services                     |
-| `src/http.ts`                | Handlers for `src/api.ts` (`HttpLive`)                                                 |
-| `src/server.ts`              | `export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)))`          |
-| `src/worker.ts`              | Background handlers: `defineWorker({ layer, queues, events, crons })`                  |
-| `web/`                       | React SPA (Vite) on a client generated from `src/api.ts`; built into `web/dist`        |
-| `test/*.test.ts`             | Unit tests on the in-memory platform (`pnpm test`)                                     |
-| `test/*.integration.test.ts` | The real services against the AWS Emulator (`plat test`)                               |
-| `e2e/*.spec.ts`              | Browser tests (Playwright) against a running stage (`pnpm test:e2e`)                   |
+| Path                         | What                                                                                             |
+| ---------------------------- | ------------------------------------------------------------------------------------------------ |
+| `plat.config.ts`             | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env, realtime) |
+| `src/domain.ts`              | Schemas and tagged errors, shared by server, worker and web                                      |
+| `src/api.ts`                 | The HTTP API as an `HttpApi` definition. The web app imports it: no server-only code             |
+| `src/todos.ts`               | The `Todos` service: the app's rules, over the platform's services                               |
+| `src/http.ts`                | Handlers for `src/api.ts` (`HttpLive`)                                                           |
+| `src/server.ts`              | `export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)))`                    |
+| `src/worker.ts`              | Background handlers: `defineWorker({ layer, queues, events, crons })`                            |
+| `web/`                       | React SPA (Vite) on a client generated from `src/api.ts`; built into `web/dist`                  |
+| `test/*.test.ts`             | Unit tests on the in-memory platform (`pnpm test`)                                               |
+| `test/*.integration.test.ts` | The real services against the AWS Emulator (`plat test`)                                         |
+| `e2e/*.spec.ts`              | Browser tests (Playwright) against a running stage (`pnpm test:e2e`)                             |
 
 Requests for `/api/*` and `/__platform/*` go to the server; files go to `web/dist`. Any other path
 serves `index.html`, which is how client-side routing works. Change the server prefixes with
@@ -75,10 +75,12 @@ import {
   Metrics,
   Platform,
   Queues,
+  Realtime,
   Secrets,
   Storage,
 } from '@ericminassian/platform';
 import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platform/api'; // browser-safe
+import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 ```
 
 | Export                           | Example                                                                                                   |
@@ -94,6 +96,8 @@ import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platfo
 | `Storage`                        | `const uploads = storage.store('uploads')`: `put`, `get`, `getText` (`Option`), `list(prefix)`, `delete`  |
 |                                  | `yield* uploads.uploadUrl(key, { contentType })`: browser-direct upload URL (HTTP PUT); `downloadUrl`     |
 | `Secrets`                        | `yield* secrets.get('STRIPE_KEY')` → `Redacted` (a defect naming the fix if unset), `getOptional`         |
+| `Realtime`                       | `yield* realtime.publish('boards/b1', event)`, `publishMany`: to browsers subscribed right now            |
+| `RealtimeClient` (browser)       | `RealtimeClient.subscribe('boards/b1')` → `Stream` of events; `.status` → `Stream` of connection states   |
 | `Authentication`, `CurrentUser`  | `.middleware(Authentication)` on a group, then `yield* CurrentUser` in its handlers; signed out → 401     |
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
 | `loginUrl/logoutUrl`             | `loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                          |
@@ -137,6 +141,7 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 
   A failed handler retries the message; after `maxReceiveCount` (default 5) it goes to the dead-letter
   queue, which you can inspect and redrive from the console.
+
 - **Event subscription.** Add `'order.paid': event<OrderPaid>()` under `events`, then an
   `events['order.paid']` handler. Publish with `events.publish('order.paid', detail)`.
 - **Cron.** Add `digest: '0 8 * * 1-5'` under `crons` (5-field cron, UTC; or
@@ -155,6 +160,28 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   Not for secrets.
 - **Custom metric.** `yield* metrics.count('name')` or `metrics.value('name', n)`. It appears in the
   console and in `plat metrics`.
+- **Live updates (realtime).** For anything browsers should see without polling: shared boards, presence,
+  notifications.
+  1. Declare the channels and their event types under `realtime` in `plat.config.ts`:
+     `realtime: { channels: { 'boards/*': channel<BoardEvent>() } }` (`boards/<id>`; a plain `board` is one
+     channel). Names are 1-4 segments of a-z, 0-9 and hyphens: no underscores, dots or capitals.
+  2. After the change is saved, publish from an endpoint or a worker handler:
+     ``yield* realtime.publish(`boards/${id}`, { type: 'stroke', id: stroke.id })``.
+  3. In the browser, run ``RealtimeClient.subscribe(`boards/${id}`)`` (a `Stream`, e.g. in an atom) and re-read
+     the data whenever `RealtimeClient.status` becomes `connected`: events aren't stored, so a browser that
+     was offline or reconnecting missed them.
+
+  Who may subscribe:
+  - `subscribe: 'public'` (the default): anyone, on every channel.
+  - `subscribe: 'signed-in'` (needs `auth`): signed-in users of this app. Channels under `user/<user id>`
+    (declare `'user/*': channel<Notice>()`) reach only that user: ``realtime.publish(`user/${user.id}`, …)``.
+    For anything finer (rooms, teams), publish a hint and let the browser fetch through an endpoint that
+    checks access.
+
+  Browsers never publish; send through an endpoint. Each event reaches every subscriber and is billed per
+  5 KB delivered, so publish small hints (ids, small diffs) and batch fast streams such as cursors on the
+  server (a few per second, `publishMany`). Events over 240 KB are refused.
+
 - **Browser test.** Add a test to `e2e/`. Use it for what only a browser shows: rendering, styles, focus,
   client-side state.
   - CI runs the suite against the PR's preview and, after each deploy, production, with the stage's URL in
@@ -170,7 +197,7 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 - **Unit tests** (`test/*.test.ts`, `@effect/vitest`) run the whole app on `Platform.layerMemory()`: the
   platform's server wrapper, routing, validation, sign-in and handlers, with no emulator. In memory,
   `Authorization: Bearer <id>` signs a request in as the user with that id (`layerMemory({ users })`).
-  `Platform.Memory` returns what was sent, published and counted. The in-memory `Db` follows DynamoDB's
+  `Platform.Memory` returns what was sent, published (events and realtime) and counted. The in-memory `Db` follows DynamoDB's
   key, index, ordering and cursor rules.
 - **Integration tests** (`test/*.integration.test.ts`, `plat test`) use `Platform.layer` against the AWS
   Emulator with a provisioned `test` stage.
@@ -190,7 +217,8 @@ plat dev run-cron cleanup    # fire a cron in the running `plat dev`
 
 `plat dev` has these properties:
 
-- It provisions real (emulated) DynamoDB, SQS, EventBridge, S3, Cognito and SSM.
+- It provisions real (emulated) DynamoDB, SQS, EventBridge, S3, Cognito, SSM and realtime channels.
+  Signed-in realtime tokens aren't checked locally (the emulator skips the authorizer).
 - The worker runs as a real Lambda inside the emulator.
 - The server restarts when you edit, and so does the worker.
 - Sign-in uses a local page where any email works.
