@@ -1,11 +1,21 @@
 import { Context, Duration, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
-import type { EventDetail, EventType, QueueBody, QueueName, SecretName, StoreName } from './register.ts';
+import type {
+  ChannelEvent,
+  ChannelName,
+  EventDetail,
+  EventType,
+  QueueBody,
+  QueueName,
+  SecretName,
+  StoreName,
+} from './register.ts';
 import { app } from './runtime/app.ts';
 import { getUser } from './runtime/auth/index.ts';
 import { events } from './runtime/events.ts';
 import { queue } from './runtime/queue.ts';
+import { realtime } from './runtime/realtime.ts';
 import { secrets } from './runtime/secrets.ts';
 import { type StoredObject, storage } from './runtime/storage.ts';
 import { metrics } from './runtime/telemetry.ts';
@@ -96,6 +106,29 @@ export class Events extends Context.Service<
   static readonly layer: Layer.Layer<Events> = Layer.succeed(
     Events,
     Events.of({ publish: (type, detail) => Effect.promise(() => events.publish(type, detail)) }),
+  );
+}
+
+/**
+ * Live updates to browsers on the channels under `realtime.channels` in
+ * `plat.config.ts`; events have the declared types. Browsers subscribe with
+ * `RealtimeClient` from `@ericminassian/platform/client`.
+ */
+export class Realtime extends Context.Service<
+  Realtime,
+  {
+    /** Push `event` to every browser subscribed to `channel`. Not stored: absent browsers never see it. */
+    publish<C extends ChannelName>(channel: C, event: ChannelEvent<C>): Effect.Effect<void>;
+    /** Several events to one channel, in order. */
+    publishMany<C extends ChannelName>(channel: C, events: Iterable<ChannelEvent<C>>): Effect.Effect<void>;
+  }
+>()('@ericminassian/platform/Realtime') {
+  static readonly layer: Layer.Layer<Realtime> = Layer.succeed(
+    Realtime,
+    Realtime.of({
+      publish: (channel, event) => Effect.promise(() => realtime.publish(channel, event)),
+      publishMany: (channel, events) => Effect.promise(() => realtime.publishMany(channel, events)),
+    }),
   );
 }
 

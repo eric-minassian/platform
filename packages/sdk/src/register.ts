@@ -7,8 +7,9 @@ import type { AppConfig, PayloadOf } from '@ericminassian/platform-core';
  *     interface Register { app: typeof app }
  *   }
  *
- * Queue, event, cron, store and secret names (and declared payload types) are
- * then checked wherever the SDK takes one. Without it they're plain strings.
+ * Queue, event, cron, store, secret and channel names (and declared payload
+ * types) are then checked wherever the SDK takes one. Without it they're
+ * plain strings.
  */
 export interface Register {
   // Module augmentation needs an interface, and an empty one would accept any
@@ -25,6 +26,10 @@ type Items<A> = A extends readonly (infer S extends string)[] ? S : never;
 
 type Queues = App extends { queues: infer Q } ? Q : Record<never, never>;
 type Events = App extends { events: infer E } ? E : readonly [];
+type Channels = App extends { realtime: { channels: infer C } } ? C : Record<never, never>;
+type ChannelPattern = Keys<Channels>;
+/** The concrete channels a declared pattern covers: `board` → `board`; `boards/*` → `boards/${string}`. */
+type ChannelsOf<P extends string> = P extends `${infer Prefix}/*` ? `${Prefix}/${string}` : P;
 
 /** Payloads the config doesn't type: handlers choose their own (`QueueMessage<MyJob>`). */
 // biome-ignore lint/suspicious/noExplicitAny: handlers choose their own payload types
@@ -62,4 +67,17 @@ export type EventDetail<K extends string> = Registered extends true
     : K extends keyof Events
       ? PayloadOf<Events[K]>
       : unknown
+  : AnyPayload;
+
+/** A channel the server and worker can publish to: one declared under `realtime.channels`, or below a `prefix/*` one. */
+export type ChannelName = Registered extends true ? ChannelsOf<ChannelPattern> : string;
+
+/** What a browser can subscribe to: a channel, or a declared `prefix/*` pattern (every channel below it). */
+export type ChannelSubscription = Registered extends true
+  ? ChannelName | Extract<ChannelPattern, `${string}/*`>
+  : string;
+
+/** Event type declared with `channel<T>()` for a channel (a union when several declared patterns cover it). */
+export type ChannelEvent<C extends string> = Registered extends true
+  ? { [P in ChannelPattern]: C extends ChannelsOf<P> ? PayloadOf<Channels[P]> : never }[ChannelPattern]
   : AnyPayload;

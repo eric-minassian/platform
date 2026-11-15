@@ -1,17 +1,20 @@
 // The SDK against the registered config in ./plat.config.ts. Every
 // expected error below is a mistake the registered config must catch.
 import {
+  type ChannelEvent,
   Db,
   defineWorker,
   Events,
   Platform,
   type QueueMessage,
   Queues,
+  Realtime,
   Secrets,
   Storage,
 } from '@ericminassian/platform';
-import { Context, Effect, Schema } from 'effect';
-import type { EmailJob } from './plat.config.ts';
+import { RealtimeClient, type RealtimeStatus } from '@ericminassian/platform/client';
+import { Context, Effect, Schema, Stream } from 'effect';
+import type { BoardEvent, Cursor, EmailJob, Notice } from './plat.config.ts';
 
 export const usage = Effect.gen(function* () {
   const queues = yield* Queues;
@@ -37,6 +40,37 @@ export const usage = Effect.gen(function* () {
   yield* secrets.get('STRIPE_KEY');
   // @ts-expect-error undeclared secret
   yield* secrets.getOptional('STRIPE');
+
+  const realtime = yield* Realtime;
+  yield* realtime.publish('board', { stroke: [1, 2] });
+  yield* realtime.publish(`boards/${'b1' as string}`, { stroke: [] });
+  yield* realtime.publishMany(`user/${'u1' as string}`, [{ text: 'hi' }]);
+  // @ts-expect-error event doesn't match channel<BoardEvent>()
+  yield* realtime.publish('board', { text: 'hi' });
+  // @ts-expect-error event doesn't match channel<Notice>()
+  yield* realtime.publish('user/u1', { stroke: [] });
+  // @ts-expect-error undeclared channel
+  yield* realtime.publish('boardz', { stroke: [] });
+  // @ts-expect-error `board` is exact, not a prefix
+  yield* realtime.publish('board/b1', { stroke: [] });
+  // A channel under two declared patterns takes either declared type.
+  const both: ChannelEvent<'boards/cursors/c1'> = { x: 1, y: 2 } satisfies Cursor;
+  const alsoBoard: ChannelEvent<'boards/cursors/c1'> = { stroke: [] } satisfies BoardEvent;
+  return [both, alsoBoard];
+});
+
+export const browserStreams = Effect.gen(function* () {
+  const board: Stream.Stream<BoardEvent> = RealtimeClient.subscribe('board');
+  const below: Stream.Stream<BoardEvent | Cursor> = RealtimeClient.subscribe('boards/*');
+  const notices: Stream.Stream<Notice> = RealtimeClient.subscribe('user/u1');
+  // @ts-expect-error the stream's type disagrees with channel<BoardEvent>()
+  const wrong: Stream.Stream<Notice> = RealtimeClient.subscribe('board');
+  // @ts-expect-error undeclared channel
+  RealtimeClient.subscribe('nowhere');
+  const status: Stream.Stream<RealtimeStatus> = RealtimeClient.status;
+  yield* Stream.runDrain(Stream.merge(Stream.merge(board, below), notices));
+  yield* Stream.runDrain(status);
+  return wrong;
 });
 
 const handlers = {

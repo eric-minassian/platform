@@ -9,6 +9,7 @@
 import type { Bindings, TelemetryEvent } from '@ericminassian/platform-core';
 import { setBindings } from './runtime/bindings.ts';
 import { resetClients, type SendClient, setClient } from './runtime/clients.ts';
+import { setRealtimeTransport } from './runtime/realtime.ts';
 import { clearSecretsCache } from './runtime/secrets.ts';
 import { setTelemetrySink, uninstallInstrumentation } from './runtime/telemetry.ts';
 
@@ -64,9 +65,30 @@ export function captureTelemetry(): { events: TelemetryEvent[]; stop(): void } {
   return { events, stop: () => setTelemetrySink(null) };
 }
 
-/** Reset all SDK module state (bindings, clients, caches, telemetry sink). */
+/** An event the `Realtime` service sent, as subscribers would receive it (after a JSON round trip). */
+export interface CapturedRealtimeEvent {
+  channel: string;
+  event: unknown;
+}
+
+/**
+ * Record what `Realtime` publishes instead of sending it to AppSync. Channels
+ * are still checked against the bindings' `realtime` (see `testBindings`).
+ * Call `stop()` to restore.
+ */
+export function captureRealtime(): { published: CapturedRealtimeEvent[]; stop(): void } {
+  const published: CapturedRealtimeEvent[] = [];
+  setRealtimeTransport(async (r, path, events) => {
+    const channel = path.slice(r.namespace.length + 2);
+    for (const e of events) published.push({ channel, event: JSON.parse(e) });
+  });
+  return { published, stop: () => setRealtimeTransport(undefined) };
+}
+
+/** Reset all SDK module state (bindings, clients, caches, telemetry sink, realtime capture). */
 export function resetPlatform(): void {
   setBindings(undefined);
+  setRealtimeTransport(undefined);
   resetClients();
   clearSecretsCache();
   setTelemetrySink(null);

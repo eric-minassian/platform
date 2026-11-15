@@ -7,7 +7,7 @@
  *
  * and bundles it to `index.mjs`. startServer listens on
  * `AWS_LAMBDA_HTTP_ENDPOINT` (Web Function contract; `plat dev` sets it too),
- * adds `/__platform/*` routes (health, auth), auto-instruments every request
+ * adds `/__platform/*` routes (health, auth, realtime token), auto-instruments every request
  * (telemetry `req`/`err`/`span` lines, traces) and maps `x-platform-host` to
  * the public URL the app sees.
  *
@@ -25,6 +25,7 @@ import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
 import { newContext, parseTraceparent, runWithContext } from './context.ts';
 import { createNodeServer, parseEndpoint } from './http.ts';
+import { handleRealtimeRoute } from './realtime.ts';
 import { emit, emitError, installConsoleCapture, installFetchInstrumentation, toError } from './telemetry.ts';
 
 /** A web-standard fetch: what `toFetchHandler` returns, or a bare function. */
@@ -125,6 +126,8 @@ async function platformRoute(request: Request): Promise<Response> {
   }
   const authResponse = await handleAuthRoute(request);
   if (authResponse) return authResponse;
+  const realtimeResponse = await handleRealtimeRoute(request);
+  if (realtimeResponse) return realtimeResponse;
   return Response.json({ error: { code: 'not_found', message: 'Not found' } }, { status: 404 });
 }
 

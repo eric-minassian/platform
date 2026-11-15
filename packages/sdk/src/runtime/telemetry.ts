@@ -196,6 +196,14 @@ export function installFetchInstrumentation(): void {
   }) as typeof fetch;
 }
 
+/**
+ * `fetch` without the span wrapper, for SDK calls that record their own span
+ * (`realtime.publish`), so a trace doesn't show the same request twice.
+ */
+export function uninstrumentedFetch(): typeof fetch {
+  return fetchPatched && originalFetch ? originalFetch : globalThis.fetch;
+}
+
 /** Undo console/fetch patching (tests). */
 export function uninstallInstrumentation(): void {
   if (consolePatched) {
