@@ -1,5 +1,5 @@
 import { assert, layer } from '@effect/vitest';
-import { Platform, type User } from '@ericminassian/platform/effect';
+import { Platform, type User } from '@ericminassian/platform';
 import { createPlatformFetch } from '@ericminassian/platform/server';
 import { Effect, Layer } from 'effect';
 import app from '../src/server.ts';

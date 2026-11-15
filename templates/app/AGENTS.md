@@ -11,7 +11,7 @@ reference over anything you remember about Effect 2 or 3.
 ## Golden rules
 
 1. **No infrastructure code and no AWS SDK in this repo.** Declare what you need in `plat.config.ts`; use
-   it through `@ericminassian/platform/effect`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
+   it through `@ericminassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
 2. **`plat.config.ts` is the source of truth for names and payload types.** `pnpm typecheck` fails unless
    `src/worker.ts` handles exactly its queues, events and crons, and every queue, event, store and secret
    name used in code is declared with the declared payload type. Declare message types there
@@ -62,7 +62,7 @@ serves `index.html`, which is how client-side routing works. Change the server p
 - **Functions.** Write service methods with `Effect.fn('Service.method')` and inline code with `Effect.gen`.
   Use `DateTime` and `Clock` rather than `Date`, so tests control time.
 
-## SDK reference (`@ericminassian/platform/effect`)
+## SDK reference (`@ericminassian/platform`)
 
 ```ts
 import {
@@ -71,13 +71,14 @@ import {
   CurrentUser,
   Db,
   Events,
+  Jobs,
   Metrics,
   Platform,
   Queues,
   Secrets,
   Storage,
-} from '@ericminassian/platform/effect';
-import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platform/effect/api'; // browser-safe
+} from '@ericminassian/platform';
+import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platform/api'; // browser-safe
 ```
 
 | Export                           | Example                                                                                                   |
@@ -96,9 +97,10 @@ import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platfo
 | `Authentication`, `CurrentUser`  | `.middleware(Authentication)` on a group, then `yield* CurrentUser` in its handlers; signed out → 401     |
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
 | `loginUrl/logoutUrl`             | `loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                          |
+| `Jobs`                           | `yield* jobs.invoke('reindex', { id })`: runs the worker's `invoke.reindex` handler asynchronously        |
 | `Metrics`                        | `yield* metrics.count('signups')`, `metrics.value('cart.total', 42.5, 'usd')`: free, shown in the console |
 | `Effect.log*`                    | `Effect.logInfo('charged').pipe(Effect.annotateLogs({ orderId }))`: structured, traced, searchable        |
-| `defineWorker`                   | `defineWorker({ layer: Platform.layer, queues: { emails: (msg) => Effect... }, events, crons })`          |
+| `defineWorker`                   | `defineWorker({ layer: Platform.layer, queues: { emails: (msg) => Effect... }, events, crons, invoke })`  |
 | `toFetchHandler`                 | `export default toFetchHandler(layer)` in `src/server.ts`                                                 |
 | `Platform.layer` / `layerMemory` | Every service for real, or in memory for tests; `Platform.Memory` shows what was sent and published       |
 

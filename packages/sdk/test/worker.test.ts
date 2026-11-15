@@ -1,8 +1,7 @@
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { invokeJob } from '../src/index.ts';
+import { createWorkerHandler, invokeJob } from '../src/runtime/worker.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
-import { createWorkerHandler, defineWorker } from '../src/worker.ts';
 
 const QUEUE_ARN = 'arn:aws:sqs:us-east-1:000000000000:app--test--emails';
 
@@ -34,16 +33,14 @@ describe('worker dispatch', () => {
 
   it('routes SQS records and reports partial batch failures', async () => {
     const seen: unknown[] = [];
-    const handler = createWorkerHandler(
-      defineWorker({
-        queues: {
-          emails: (msg, ctx) => {
-            seen.push({ body: msg.body, attempt: msg.attempt, trace: ctx.trace });
-            if ((msg.body as { fail?: boolean }).fail) throw new Error('boom');
-          },
+    const handler = createWorkerHandler({
+      queues: {
+        emails: (msg, ctx) => {
+          seen.push({ body: msg.body, attempt: msg.attempt, trace: ctx.trace });
+          if ((msg.body as { fail?: boolean }).fail) throw new Error('boom');
         },
-      }),
-    );
+      },
+    });
     const out = await handler(
       { Records: [sqsRecord('m1', { to: 'a' }), sqsRecord('m2', { fail: true })] },
       {},

@@ -1,4 +1,4 @@
-import { defineWorker, Metrics, Platform } from '@ericminassian/platform/effect';
+import { defineWorker, Metrics, Platform } from '@ericminassian/platform';
 import { Effect, Schema } from 'effect';
 import { EmailJob, TodoCreated } from './domain.ts';
 

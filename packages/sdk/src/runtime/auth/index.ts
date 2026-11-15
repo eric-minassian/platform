@@ -6,7 +6,6 @@ import {
   type AuthBindings,
   type Bindings,
   loginPath,
-  logoutPath,
   type PlatformUser,
   safeRedirect,
   UNAUTHORIZED_BODY,
@@ -24,16 +23,6 @@ import {
   type Tokens,
   verifyToken,
 } from './tokens.ts';
-
-export interface Auth {
-  /** The signed-in user for this request, or null. */
-  getUser(request: Request): Promise<PlatformUser | null>;
-  /** Like getUser but throws a 401 Response when signed out. */
-  requireUser(request: Request): Promise<PlatformUser>;
-  /** Path to start sign-in, returning to `redirect` afterwards. */
-  loginUrl(redirect?: string): string;
-  logoutUrl(redirect?: string): string;
-}
 
 const SESSION_MAX_AGE = 30 * 24 * 3600;
 const FLOW_MAX_AGE = 600;
@@ -104,16 +93,8 @@ export function unauthorized(): Response {
   return Response.json(UNAUTHORIZED_BODY, { status: 401, headers: { 'cache-control': 'no-store' } });
 }
 
-export const auth: Auth = {
-  getUser: (request) => resolveUser(request),
-  async requireUser(request) {
-    const user = await resolveUser(request);
-    if (!user) throw unauthorized();
-    return user;
-  },
-  loginUrl: loginPath,
-  logoutUrl: logoutPath,
-};
+/** The signed-in user for this request (session cookie or bearer ID token), or null. */
+export const getUser = (request: Request): Promise<PlatformUser | null> => resolveUser(request);
 
 /**
  * `auth.required`: redirect signed-out browsers to sign-in and 401 everything
@@ -125,7 +106,7 @@ export async function authGate(request: Request): Promise<Response | null> {
   if (await resolveUser(request)) return null;
   const url = new URL(request.url);
   const wantsHtml = request.method === 'GET' && (request.headers.get('accept') ?? '').includes('text/html');
-  if (wantsHtml) return redirect(auth.loginUrl(url.pathname + url.search));
+  if (wantsHtml) return redirect(loginPath(url.pathname + url.search));
   return unauthorized();
 }
 

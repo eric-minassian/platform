@@ -1,13 +1,14 @@
 import { Context, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
-import { objectKey, type StoredObject } from '../storage.ts';
 import type { User } from './api.ts';
 import { Db } from './db.ts';
+import { objectKey, type StoredObject } from './runtime/storage.ts';
 import {
   AppInfo,
   Auth,
   delaySeconds,
   Events,
+  Jobs,
   Metrics,
   Queues,
   Secrets,
@@ -26,6 +27,11 @@ export interface PublishedEvent {
   readonly detail: unknown;
 }
 
+export interface InvokedJob {
+  readonly name: string;
+  readonly payload: unknown;
+}
+
 export interface RecordedMetric {
   readonly name: string;
   readonly value: number;
@@ -39,6 +45,8 @@ export class PlatformMemory extends Context.Service<
     readonly sent: Effect.Effect<ReadonlyArray<SentMessage>>;
     readonly published: Effect.Effect<ReadonlyArray<PublishedEvent>>;
     readonly metrics: Effect.Effect<ReadonlyArray<RecordedMetric>>;
+    /** Jobs invoked with `Jobs.invoke`; nothing runs them. */
+    readonly invoked: Effect.Effect<ReadonlyArray<InvokedJob>>;
   }
 >()('@ericminassian/platform/PlatformMemory') {}
 
@@ -55,7 +63,7 @@ export interface MemoryOptions {
 /** Every platform service in memory, plus `PlatformMemory`. Each build starts empty. */
 export const layerMemory = (
   options: MemoryOptions = {},
-): Layer.Layer<AppInfo | Auth | Db | Events | Metrics | Queues | Secrets | Storage | PlatformMemory> =>
+): Layer.Layer<AppInfo | Auth | Db | Events | Jobs | Metrics | Queues | Secrets | Storage | PlatformMemory> =>
   Layer.mergeAll(
     Db.layerMemory(),
     Layer.effectContext(
@@ -63,6 +71,7 @@ export const layerMemory = (
         const sent: SentMessage[] = [];
         const published: PublishedEvent[] = [];
         const recorded: RecordedMetric[] = [];
+        const invoked: InvokedJob[] = [];
         const users = new Map((options.users ?? []).map((u) => [u.id, u]));
         const secrets = new Map(Object.entries(options.secrets ?? {}));
 
@@ -137,11 +146,16 @@ export const layerMemory = (
             }),
           ),
           Context.add(
+            Jobs,
+            Jobs.of({ invoke: (name, payload) => Effect.sync(() => void invoked.push({ name, payload })) }),
+          ),
+          Context.add(
             PlatformMemory,
             PlatformMemory.of({
               sent: Effect.sync(() => [...sent]),
               published: Effect.sync(() => [...published]),
               metrics: Effect.sync(() => [...recorded]),
+              invoked: Effect.sync(() => [...invoked]),
             }),
           ),
         );

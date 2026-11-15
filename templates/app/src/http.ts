@@ -1,4 +1,4 @@
-import { AppInfo, Auth, CurrentUser } from '@ericminassian/platform/effect';
+import { AppInfo, Auth, CurrentUser } from '@ericminassian/platform';
 import { Effect, Layer, Option } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { Api } from './api.ts';

@@ -1,7 +1,7 @@
 import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
+import type { StoreName } from '../register.ts';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
-import type { StoreName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface StoredObject {

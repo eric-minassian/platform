@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { newContext, runWithContext } from '../src/context.ts';
-import { events, log, metrics, queue, secrets, storage } from '../src/index.ts';
-import { span } from '../src/telemetry.ts';
+import { newContext, runWithContext } from '../src/runtime/context.ts';
+import { events } from '../src/runtime/events.ts';
+import { queue } from '../src/runtime/queue.ts';
+import { secrets } from '../src/runtime/secrets.ts';
+import { storage } from '../src/runtime/storage.ts';
+import { log, metrics, span } from '../src/runtime/telemetry.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 describe('queue / events / storage / secrets', () => {

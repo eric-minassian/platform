@@ -1,14 +1,15 @@
 import { Context, Duration, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
-import { app } from '../app.ts';
-import { auth } from '../auth/index.ts';
-import { events } from '../events.ts';
-import { queue } from '../queue.ts';
-import type { EventDetail, EventType, QueueBody, QueueName, SecretName, StoreName } from '../register.ts';
-import { secrets } from '../secrets.ts';
-import { type StoredObject, storage } from '../storage.ts';
-import { metrics } from '../telemetry.ts';
 import type { User } from './api.ts';
+import type { EventDetail, EventType, QueueBody, QueueName, SecretName, StoreName } from './register.ts';
+import { app } from './runtime/app.ts';
+import { getUser } from './runtime/auth/index.ts';
+import { events } from './runtime/events.ts';
+import { queue } from './runtime/queue.ts';
+import { secrets } from './runtime/secrets.ts';
+import { type StoredObject, storage } from './runtime/storage.ts';
+import { metrics } from './runtime/telemetry.ts';
+import { invokeJob } from './runtime/worker.ts';
 
 /** Facts about the running stage. */
 export class AppInfo extends Context.Service<
@@ -50,7 +51,7 @@ export class Auth extends Context.Service<
     Auth.of({
       currentUser: HttpServerRequest.HttpServerRequest.pipe(
         Effect.flatMap((request) => Effect.orDie(HttpServerRequest.toWeb(request))),
-        Effect.flatMap((request) => Effect.promise(() => auth.getUser(request))),
+        Effect.flatMap((request) => Effect.promise(() => getUser(request))),
         Effect.map(Option.fromNullishOr),
       ),
     }),
@@ -98,7 +99,7 @@ export class Events extends Context.Service<
   );
 }
 
-export type { StoredObject } from '../storage.ts';
+export type { StoredObject } from './runtime/storage.ts';
 
 /** A file store declared under `storage` in `plat.config.ts`. */
 export interface Store {
@@ -190,6 +191,24 @@ export class Secrets extends Context.Service<
           (v) => Option.map(Option.fromUndefinedOr(v), (s) => Redacted.make(s)),
         ),
     }),
+  );
+}
+
+/** Direct jobs on this stage's worker: the `invoke` handlers in `defineWorker`. */
+export class Jobs extends Context.Service<
+  Jobs,
+  {
+    /**
+     * Runs the worker's `invoke[name]` handler with `payload`, asynchronously:
+     * this returns once the job is queued, and the job's failures show up in
+     * the worker's telemetry, not here.
+     */
+    invoke(name: string, payload: unknown): Effect.Effect<void>;
+  }
+>()('@ericminassian/platform/Jobs') {
+  static readonly layer: Layer.Layer<Jobs> = Layer.succeed(
+    Jobs,
+    Jobs.of({ invoke: (name, payload) => Effect.promise(() => invokeJob(name, payload)) }),
   );
 }
 

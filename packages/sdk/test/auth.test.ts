@@ -1,9 +1,10 @@
 import { safeRedirect } from '@ericminassian/platform-core';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { parseCookies, serializeCookie } from '../src/auth/cookies.ts';
-import { challengeFor, decodeFlow, encodeFlow } from '../src/auth/pkce.ts';
-import { auth } from '../src/index.ts';
+import { loginUrl, logoutUrl } from '../src/api.ts';
+import { parseCookies, serializeCookie } from '../src/runtime/auth/cookies.ts';
+import { getUser, unauthorized } from '../src/runtime/auth/index.ts';
+import { challengeFor, decodeFlow, encodeFlow } from '../src/runtime/auth/pkce.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 describe('cookie + pkce helpers', () => {
@@ -106,7 +107,7 @@ describe('cognito hosted-login flow', () => {
       .join('; ');
 
   it('signs in with PKCE, sets session cookies and resolves the user', async () => {
-    const f = createPlatformFetch((req) => auth.requireUser(req).then((u) => Response.json(u)));
+    const f = createPlatformFetch((req) => getUser(req).then((u) => (u ? Response.json(u) : unauthorized())));
     const login = await f(new Request('https://todo.example.com/__platform/auth/login?redirect=/dash'));
     expect(login.status).toBe(302);
     const location = new URL(login.headers.get('location')!);
@@ -160,9 +161,7 @@ describe('cognito hosted-login flow', () => {
   it('refreshes an expired id token and sets the new cookie on the response', async () => {
     const expired = await sign({}, -60);
     nextIdToken = await sign({}, 3600);
-    const f = createPlatformFetch((req) =>
-      auth.getUser(req).then((u) => Response.json({ user: u?.id ?? null })),
-    );
+    const f = createPlatformFetch((req) => getUser(req).then((u) => Response.json({ user: u?.id ?? null })));
     const res = await f(
       new Request('https://todo.example.com/x', {
         headers: { cookie: `__plat_id=${expired}; __plat_rt=r0` },
@@ -199,7 +198,7 @@ describe('cognito hosted-login flow', () => {
   });
 
   it('builds login/logout paths', () => {
-    expect(auth.loginUrl('/a?b=1')).toBe('/__platform/auth/login?redirect=%2Fa%3Fb%3D1');
-    expect(auth.logoutUrl('//evil')).toBe('/__platform/auth/logout?redirect=%2F');
+    expect(loginUrl('/a?b=1')).toBe('/__platform/auth/login?redirect=%2Fa%3Fb%3D1');
+    expect(logoutUrl('//evil')).toBe('/__platform/auth/logout?redirect=%2F');
   });
 });

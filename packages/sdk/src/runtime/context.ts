@@ -16,7 +16,7 @@ export interface RequestContext {
   user?: PlatformUser | null;
   /** Job name for error attribution in workers. */
   job?: string;
-  /** Error a framework handled itself (e.g. a Hono app's onError), for telemetry. */
+  /** The error behind a response the app answered itself (`toFetchHandler` records it), for telemetry. */
   error?: unknown;
   /** Whether `error` was a defect (an unexpected failure) rather than an expected one. */
   errorIsDefect?: boolean;
@@ -64,7 +64,7 @@ export function recordError(error: unknown, options: { defect: boolean }): void 
 
 /**
  * Record the route pattern (e.g. `/api/todos/:id`) for the current request's
- * telemetry. Hono apps get this automatically; other frameworks can call it.
+ * telemetry. `toFetchHandler` calls it with the matched `HttpRouter` route.
  */
 export function setRoute(pattern: string): void {
   const ctx = storage.getStore();

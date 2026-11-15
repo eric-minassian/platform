@@ -1,18 +1,10 @@
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
-import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { setRoute } from '../src/context.ts';
-import { db } from '../src/db.ts';
-import { createNodeServer, parseEndpoint } from '../src/http.ts';
-import { normalizePath } from '../src/server.ts';
-import {
-  captureTelemetry,
-  createPlatformFetch,
-  mockClient,
-  resetPlatform,
-  useTestBindings,
-} from '../src/testing.ts';
+import { setRoute } from '../src/runtime/context.ts';
+import { createNodeServer, parseEndpoint } from '../src/runtime/http.ts';
+import { normalizePath } from '../src/runtime/server.ts';
+import { captureTelemetry, createPlatformFetch, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 const AUTH = {
   mode: 'cognito' as const,
@@ -24,18 +16,18 @@ const AUTH = {
   required: false,
 };
 
+/** A small app as a bare fetch function (what the wrapper sees of `toFetchHandler`). */
 function app() {
-  const h = new Hono();
-  h.get('/api/todos/:id', (c) => c.json({ id: c.req.param('id'), url: c.req.url }));
-  h.get('/api/cached', (c) => c.text('ok', 200, { 'cache-control': 'public, max-age=60' }));
-  h.get('/api/boom', () => {
-    throw new Error('kaboom 42');
-  });
-  h.get('/api/teapot', () => {
-    throw new Response('short and stout', { status: 418 });
-  });
-  h.get('/api/bad', (c) => c.text('upstream down', 503));
-  return h;
+  return async (req: Request): Promise<Response> => {
+    const { pathname } = new URL(req.url);
+    const todo = /^\/api\/todos\/([^/]+)$/.exec(pathname);
+    if (todo) return Response.json({ id: todo[1], url: req.url });
+    if (pathname === '/api/cached')
+      return new Response('ok', { headers: { 'cache-control': 'public, max-age=60' } });
+    if (pathname === '/api/boom') throw new Error('kaboom 42');
+    if (pathname === '/api/bad') return new Response('upstream down', { status: 503 });
+    return new Response('not found', { status: 404 });
+  };
 }
 
 describe('createPlatformFetch', () => {
@@ -88,7 +80,7 @@ describe('createPlatformFetch', () => {
     expect(cached.headers.get('cache-control')).toBe('public, max-age=60');
   });
 
-  it('turns thrown errors into 500s with telemetry and passes thrown Responses through', async () => {
+  it('turns thrown errors into 500s with telemetry', async () => {
     const f = createPlatformFetch(app());
     const res = await f(new Request('http://x/api/boom'));
     expect(res.status).toBe(500);
@@ -99,10 +91,6 @@ describe('createPlatformFetch', () => {
       message: 'kaboom 42',
       route: '/api/boom',
     });
-
-    const tea = await f(new Request('http://x/api/teapot'));
-    expect(tea.status).toBe(418);
-    expect(await tea.text()).toBe('short and stout');
   });
 
   it('records 5xx responses as errors', async () => {
@@ -119,46 +107,6 @@ describe('createPlatformFetch', () => {
     expect(await (await f(new Request('http://x/custom/abc'))).text()).toBe('/custom/abc');
     expect(tel.events.find((e) => e.t === 'req')).toMatchObject({ route: '/custom/:x' });
     expect((await f(new Request('http://x/__platform/nope'))).status).toBe(404);
-  });
-
-  it('answers a bad db cursor with 400 and no error group, whatever the onError handler', async () => {
-    useTestBindings({ table: 'todo--prod' });
-    mockClient('ddb', () => ({ Items: [], LastEvaluatedKey: { pk: 'todos#u1', sk: 't1' } }));
-    const todos = db.collection<{ userId: string; id: string }>('todos', { partition: 'userId', sort: 'id' });
-    const list = async (req: Request) => {
-      const cursor = new URL(req.url).searchParams.get('cursor') ?? undefined;
-      return Response.json(await todos.query({ userId: 'u1' }, { cursor }));
-    };
-    const honoApp = (onError?: (err: Error) => Response) => {
-      const h = new Hono();
-      h.get('/api/todos', (c) => list(c.req.raw));
-      if (onError) h.onError(onError);
-      return h;
-    };
-    const handlers = [
-      honoApp(),
-      honoApp(() => Response.json({ error: 'catch-all' }, { status: 500 })),
-      honoApp((err) => {
-        throw err;
-      }),
-      list,
-    ];
-
-    for (const handler of handlers) {
-      const f = createPlatformFetch(handler);
-      const first = (await (await f(new Request('http://x/api/todos'))).json()) as { cursor: string };
-      expect((await f(new Request(`http://x/api/todos?cursor=${first.cursor}`))).status).toBe(200);
-
-      const bad = await f(new Request('http://x/api/todos?cursor=eyJwayI6InRvZG9zI3UyIn0'));
-      expect(bad.status).toBe(400);
-      expect(await bad.json()).toEqual({
-        error: { code: 'invalid_cursor', message: expect.stringMatching(/^Invalid cursor/) },
-      });
-    }
-    expect(tel.events.filter((e) => e.t === 'err')).toEqual([]);
-    expect(tel.events.filter((e) => e.t === 'req').map((e) => (e as { status: number }).status)).toEqual(
-      handlers.flatMap(() => [200, 200, 400]),
-    );
   });
 
   it('gates every app route when auth is required', async () => {

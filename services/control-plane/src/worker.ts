@@ -2,7 +2,7 @@
  * Control plane worker: the deployer, stage destroyer, scheduled jobs, and the
  * telemetry processor (target of the account-level log subscription).
  */
-import { defineWorker } from '@ericminassian/platform/effect';
+import { defineWorker } from '@ericminassian/platform';
 import { Effect, Layer, Schema } from 'effect';
 import { Artifacts } from './artifacts.ts';
 import { Deployer, StageEngine } from './deploy.ts';

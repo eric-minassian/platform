@@ -7,14 +7,14 @@
  * the AWS Emulator, provisions the app and sets PLATFORM_BINDINGS for vitest.
  */
 import type { Bindings, TelemetryEvent } from '@ericminassian/platform-core';
-import { setBindings } from './bindings.ts';
-import { resetClients, type SendClient, setClient } from './clients.ts';
-import { clearSecretsCache } from './secrets.ts';
-import { setTelemetrySink, uninstallInstrumentation } from './telemetry.ts';
+import { setBindings } from './runtime/bindings.ts';
+import { resetClients, type SendClient, setClient } from './runtime/clients.ts';
+import { clearSecretsCache } from './runtime/secrets.ts';
+import { setTelemetrySink, uninstallInstrumentation } from './runtime/telemetry.ts';
 
-export type { SendClient } from './clients.ts';
-export { createPlatformFetch } from './server.ts';
-export { createWorkerHandler } from './worker.ts';
+export type { SendClient } from './runtime/clients.ts';
+export { createPlatformFetch } from './runtime/server.ts';
+export { createWorkerHandler } from './runtime/worker.ts';
 
 /** Complete bindings with sensible test defaults. */
 export function testBindings(overrides: Partial<Bindings> = {}): Bindings {

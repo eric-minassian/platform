@@ -1,31 +1,45 @@
 /**
- * @ericminassian/platform — the only thing app code imports. Cloud-neutral
- * interfaces backed by AWS (DynamoDB, SQS, EventBridge, S3, SSM, Cognito)
- * through bindings the engine injects. Under `plat dev` the same code talks to
- * the AWS Emulator, so there is exactly one implementation.
+ * `@ericminassian/platform`: what app code imports. Every platform resource
+ * as an Effect service, the web server and worker entry points, and an
+ * in-memory platform for unit tests. Backed by AWS (DynamoDB, SQS,
+ * EventBridge, S3, SSM, Cognito) through the bindings the engine injects; under
+ * `plat dev` the same code talks to the AWS Emulator.
  *
- * This is the promise API, for apps not written with Effect. Effect apps (the
- * template, the control plane) use `@ericminassian/platform/effect`, which is
- * built on it.
+ *   // src/server.ts
+ *   export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)));
  *
- * CONTRACT: used by apps outside this repo and the Effect SDK. Keep signatures stable.
+ *   // src/worker.ts
+ *   export default defineWorker({ layer: Platform.layer, queues: { ... }, ... });
+ *
+ * The browser-safe pieces an `HttpApi` definition needs (`Authentication`,
+ * `CurrentUser`, `User`) are in `@ericminassian/platform/api`.
+ *
+ * CONTRACT: documented in templates/app/AGENTS.md and used by every app.
  */
 export type { PlatformUser } from '@ericminassian/platform-core';
-export { type AppInfo, app } from './app.ts';
-export { type Auth, auth } from './auth/index.ts';
-export { setRoute } from './context.ts';
-export { InvalidCursorError } from './cursor.ts';
+export {
+  Authentication,
+  CurrentUser,
+  InvalidCursor,
+  loginUrl,
+  logoutUrl,
+  Unauthorized,
+  User,
+} from './api.ts';
 export {
   type Collection,
   type CollectionOptions,
-  type Db,
-  db,
+  Db,
+  DocumentExists,
+  DocumentNotFound,
+  type DocumentSchema,
   type KeyValue,
   type Page,
   type QueryOptions,
 } from './db.ts';
-export { type Events, events } from './events.ts';
-export { type Queue, queue } from './queue.ts';
+export { AuthenticationLayer, toFetchHandler } from './http.ts';
+export { observability } from './observability.ts';
+export * as Platform from './platform.ts';
 export type {
   CronName,
   EventDetail,
@@ -36,19 +50,18 @@ export type {
   SecretName,
   StoreName,
 } from './register.ts';
-export { type Secrets, secrets } from './secrets.ts';
-export { type Store, type StoredObject, storage } from './storage.ts';
-export { log, metrics } from './telemetry.ts';
-export { invokeJob } from './worker.ts';
-
-export interface Metrics {
-  count(name: string, n?: number): void;
-  value(name: string, value: number, unit?: string): void;
-}
-
-export interface Logger {
-  debug(msg: string, fields?: Record<string, unknown>): void;
-  info(msg: string, fields?: Record<string, unknown>): void;
-  warn(msg: string, fields?: Record<string, unknown>): void;
-  error(msg: string, fields?: Record<string, unknown> | unknown): void;
-}
+export type { JobContext, LogsBatch, PlatformEvent, QueueMessage } from './runtime/worker.ts';
+export {
+  AppInfo,
+  Auth,
+  Events,
+  Jobs,
+  Metrics,
+  Queues,
+  Secrets,
+  type SendOptions,
+  Storage,
+  type Store,
+  type StoredObject,
+} from './services.ts';
+export { defineWorker, type WorkerDefinition } from './worker.ts';

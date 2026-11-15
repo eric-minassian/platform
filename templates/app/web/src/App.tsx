@@ -1,5 +1,5 @@
 import { useAtomSet, useAtomValue } from '@effect/atom-react';
-import { loginUrl, logoutUrl, type User } from '@ericminassian/platform/effect/api';
+import { loginUrl, logoutUrl, type User } from '@ericminassian/platform/api';
 import { Exit } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
 import { type FormEvent, useState } from 'react';

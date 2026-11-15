@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/plat",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "CLI for the platform: init, dev (AWS Emulator), build, deploy, logs, metrics, errors, data.",
   "type": "module",
   "license": "MIT",

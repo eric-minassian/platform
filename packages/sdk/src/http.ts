@@ -1,82 +1,57 @@
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
+import { Effect, Layer, Option } from 'effect';
+import { HttpRouter, HttpServer } from 'effect/http';
+import { Authentication, CurrentUser, Unauthorized } from './api.ts';
+import { observability } from './observability.ts';
+import { setRoute } from './runtime/context.ts';
+import { Auth } from './services.ts';
+
+/** Server side of `Authentication`: `Auth.currentUser`, or `Unauthorized`. */
+export const AuthenticationLayer: Layer.Layer<Authentication, never, Auth> = Layer.effect(
+  Authentication,
+  Effect.gen(function* () {
+    const auth = yield* Auth;
+    return Authentication.of((httpEffect) =>
+      Effect.gen(function* () {
+        const user = yield* auth.currentUser;
+        if (Option.isNone(user)) return yield* Unauthorized.signedOut();
+        return yield* Effect.provideService(httpEffect, CurrentUser, user.value);
+      }),
+    );
+  }),
+);
+
+/** Records the matched route pattern (`/api/todos/:id`) for the request's telemetry. */
+const routePatterns = HttpRouter.middleware((httpEffect) =>
+  Effect.flatMap(HttpRouter.RouteContext, ({ route }) => {
+    setRoute(route.path);
+    return httpEffect;
+  }),
+);
+
+/** What `HttpServer.layerServices` provides to the routes (platform, file system, etags). */
+type ServerServices = Layer.Success<typeof HttpServer.layerServices>;
 
 /**
- * Minimal Node `http` ⇄ web `fetch` adapter (no framework dependency).
- * Streams request and response bodies, preserves multiple Set-Cookie headers.
+ * The web server's entry: `export default toFetchHandler(layer)` in the app's
+ * `web.server` file, where `layer` registers routes (usually
+ * `HttpApiBuilder.layer(Api)` with its handlers and `Platform.layer`).
+ *
+ * The platform's server wrapper already logs every request (`req` lines), so
+ * Effect's request logger is off. Route patterns and the error behind a 500
+ * reach the platform's telemetry, and `Effect.log*` writes platform log lines.
+ * Services are built on the first request and live as long as the instance.
  */
-export type FetchFn = (request: Request) => Promise<Response>;
-
-export function toRequest(req: IncomingMessage, signal?: AbortSignal): Request {
-  const host = req.headers.host ?? 'localhost';
-  const url = new URL(req.url ?? '/', `http://${host}`);
-  const headers = new Headers();
-  for (let i = 0; i < req.rawHeaders.length; i += 2) {
-    const k = req.rawHeaders[i]!;
-    const v = req.rawHeaders[i + 1]!;
-    if (k.startsWith(':')) continue;
-    headers.append(k, v);
-  }
-  const method = req.method ?? 'GET';
-  const hasBody = method !== 'GET' && method !== 'HEAD';
-  return new Request(url, {
-    method,
-    headers,
-    ...(hasBody ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } : {}),
-    ...(signal ? { signal } : {}),
-  } as RequestInit);
-}
-
-export async function writeResponse(res: ServerResponse, response: Response): Promise<void> {
-  const headers: Record<string, string | string[]> = {};
-  response.headers.forEach((value, key) => {
-    if (key === 'set-cookie') return;
-    headers[key] = value;
-  });
-  const cookies = response.headers.getSetCookie();
-  if (cookies.length) headers['set-cookie'] = cookies;
-  res.writeHead(response.status, response.statusText || undefined, headers);
-  if (!response.body) {
-    res.end();
-    return;
-  }
-  const reader = response.body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!res.write(value)) await new Promise<void>((r) => res.once('drain', r));
-    }
-  } finally {
-    res.end();
-  }
-}
-
-export function createNodeServer(fetchFn: FetchFn): Server {
-  return createServer((req, res) => {
-    const controller = new AbortController();
-    res.once('close', () => {
-      if (!res.writableFinished) controller.abort();
-    });
-    fetchFn(toRequest(req, controller.signal))
-      .then((response) => writeResponse(res, response))
-      .catch((e) => {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'content-type': 'application/json' });
-          res.end(
-            JSON.stringify({ error: { code: 'internal', message: String((e as Error)?.message ?? e) } }),
-          );
-        } else res.destroy(e as Error);
-      });
-  });
-}
-
-/** Parse `host:port` (IPv6 in brackets allowed). */
-export function parseEndpoint(endpoint: string): { host: string; port: number } {
-  const i = endpoint.lastIndexOf(':');
-  if (i <= 0) throw new Error(`Invalid listen endpoint "${endpoint}" (expected host:port)`);
-  const host = endpoint.slice(0, i).replace(/^\[|\]$/g, '');
-  const port = Number(endpoint.slice(i + 1));
-  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(`Invalid port in "${endpoint}"`);
-  return { host, port };
+export function toFetchHandler<E>(layer: Layer.Layer<never, E, HttpRouter.HttpRouter | ServerServices>): {
+  readonly fetch: (request: Request) => Promise<Response>;
+  readonly dispose: () => Promise<void>;
+} {
+  const { handler, dispose } = HttpRouter.toWebHandler(
+    layer.pipe(
+      Layer.provide(routePatterns.layer),
+      Layer.provideMerge(observability),
+      Layer.provide(HttpServer.layerServices),
+    ),
+    { disableLogger: true },
+  );
+  return { fetch: (request) => handler(request), dispose };
 }

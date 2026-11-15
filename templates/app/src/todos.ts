@@ -1,4 +1,4 @@
-import { Db, Events, Metrics, Queues, type User } from '@ericminassian/platform/effect';
+import { Db, Events, Metrics, Queues, type User } from '@ericminassian/platform';
 import { Context, DateTime, Effect, Layer, Random } from 'effect';
 import { type NewTodo, Todo, TodoId, TodoNotFound, type TodoPatch } from './domain.ts';
 

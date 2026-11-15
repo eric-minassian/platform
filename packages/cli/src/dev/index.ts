@@ -228,7 +228,7 @@ export async function spawnWebServer(
     PLATFORM_LOG_PRETTY: '1',
     PLATFORM_ENTRY: resolve(root, manifest.web.server),
     PLATFORM_SDK_SERVER: resolveFromApp(root, SDK_SERVER),
-    // `invokeJob` locally: the SDK posts here instead of invoking the emulator's sandboxed Lambda.
+    // `Jobs.invoke` locally: the SDK posts here instead of invoking the emulator's sandboxed Lambda.
     ...(opts.workerUrl ? { PLATFORM_LOCAL_WORKER_URL: opts.workerUrl } : {}),
   });
   const child = spawn(process.execPath, tsxArgs('server-entry', opts.watch !== false), {

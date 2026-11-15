@@ -3,7 +3,7 @@
  * in-memory `Store` that behaves like the DynamoDB one, and the API served
  * through the platform's server wrapper on whatever services a test gives it.
  */
-import { toFetchHandler } from '@ericminassian/platform/effect';
+import { toFetchHandler } from '@ericminassian/platform';
 import { createPlatformFetch } from '@ericminassian/platform/testing';
 import {
   type AppRecord,

@@ -3,9 +3,10 @@ import type { Authentication } from './api.ts';
 import { Db } from './db.ts';
 import { AuthenticationLayer } from './http.ts';
 import { type MemoryOptions, layerMemory as memory, type PlatformMemory } from './memory.ts';
-import { AppInfo, Auth, Events, Metrics, Queues, Secrets, Storage } from './services.ts';
+import { AppInfo, Auth, Events, Jobs, Metrics, Queues, Secrets, Storage } from './services.ts';
 
 export {
+  type InvokedJob,
   type MemoryOptions,
   PlatformMemory as Memory,
   type PublishedEvent,
@@ -14,13 +15,24 @@ export {
 } from './memory.ts';
 
 /** Every platform service an app can use. */
-export type Services = AppInfo | Auth | Authentication | Db | Events | Metrics | Queues | Secrets | Storage;
+export type Services =
+  | AppInfo
+  | Auth
+  | Authentication
+  | Db
+  | Events
+  | Jobs
+  | Metrics
+  | Queues
+  | Secrets
+  | Storage;
 
 /** The stage's real resources, through its bindings. Provide it once, at the entry point. */
 export const layer: Layer.Layer<Services> = Layer.mergeAll(
   AppInfo.layer,
   Db.layer,
   Events.layer,
+  Jobs.layer,
   Metrics.layer,
   Queues.layer,
   Secrets.layer,
@@ -29,7 +41,7 @@ export const layer: Layer.Layer<Services> = Layer.mergeAll(
 
 /**
  * Every service in memory, for unit tests: no emulator, no AWS. `Memory`
- * exposes what was sent, published and counted.
+ * exposes what was sent, published, invoked and counted.
  */
 export const layerMemory = (options?: MemoryOptions): Layer.Layer<Services | PlatformMemory> =>
   AuthenticationLayer.pipe(Layer.provideMerge(memory(options)));

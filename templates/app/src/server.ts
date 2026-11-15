@@ -1,4 +1,4 @@
-import { Platform, toFetchHandler } from '@ericminassian/platform/effect';
+import { Platform, toFetchHandler } from '@ericminassian/platform';
 import { Layer } from 'effect';
 import { HttpLive } from './http.ts';
 
