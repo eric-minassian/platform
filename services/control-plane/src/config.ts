@@ -62,7 +62,6 @@ export interface GithubAppSettings {
   clientSecret: string;
   appId?: string;
   privateKey?: string;
-  installationId?: string;
 }
 
 /** GitHub App used for console sign-in and (optionally) error issues. Null until configured. */
@@ -88,7 +87,6 @@ const githubApp = cached(async (): Promise<GithubAppSettings | null> => {
     clientSecret: values.client_secret,
     ...(values.app_id ? { appId: values.app_id } : {}),
     ...(values.private_key ? { privateKey: values.private_key } : {}),
-    ...(values.installation_id ? { installationId: values.installation_id } : {}),
   };
 });
 

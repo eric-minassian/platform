@@ -52,20 +52,40 @@ export async function exchangeCode(
   return body.access_token;
 }
 
-async function installationToken(app: GithubAppSettings): Promise<string | null> {
-  if (!app.appId || !app.privateKey || !app.installationId) return null;
+/** A short-lived JWT that authenticates as the App itself (not an installation). */
+async function appJwt(app: GithubAppSettings & { appId: string; privateKey: string }): Promise<string> {
   // GitHub App keys are PKCS#1 PEM; node:crypto parses both PKCS#1 and PKCS#8.
   const key = createPrivateKey(app.privateKey);
   const now = Math.floor(Date.now() / 1000);
-  const jwt = await new SignJWT({})
+  return new SignJWT({})
     .setProtectedHeader({ alg: 'RS256' })
     .setIssuer(app.appId)
     .setIssuedAt(now - 60)
     .setExpirationTime(now + 540)
     .sign(key);
-  const res = await fetch(`${API}/app/installations/${app.installationId}/access_tokens`, {
-    method: 'POST',
+}
+
+/**
+ * Installation token scoped to `repo`. The installation is looked up per repo
+ * (GET /repos/{repo}/installation) instead of being configured, so nobody has
+ * to dig up an installation id, and repos owned by other members work as soon
+ * as they install the App on their account. Returns null when the App isn't
+ * configured or isn't installed on that repo.
+ */
+async function installationToken(app: GithubAppSettings, repo: string): Promise<string | null> {
+  if (!app.appId || !app.privateKey) return null;
+  const jwt = await appJwt({ ...app, appId: app.appId, privateKey: app.privateKey });
+  const found = await fetch(`${API}/repos/${repo}/installation`, {
     headers: headers(jwt),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (found.status === 404) return null;
+  if (!found.ok) throw new Error(`GitHub App installation lookup for ${repo} failed (${found.status})`);
+  const { id } = (await found.json()) as { id: number };
+  const res = await fetch(`${API}/app/installations/${id}/access_tokens`, {
+    method: 'POST',
+    headers: { ...headers(jwt), 'content-type': 'application/json' },
+    body: JSON.stringify({ repositories: [repo.split('/')[1]] }),
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`GitHub App token request failed (${res.status})`);
@@ -78,7 +98,7 @@ export async function openIssue(
   repo: string,
   issue: { title: string; body: string; labels?: string[] },
 ): Promise<string | null> {
-  const token = await installationToken(app);
+  const token = await installationToken(app, repo);
   if (!token) return null;
   const res = await fetch(`${API}/repos/${repo}/issues`, {
     method: 'POST',
