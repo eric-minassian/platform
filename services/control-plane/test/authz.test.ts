@@ -84,6 +84,27 @@ describe('CI deploy rules', () => {
     expect(checkCiStageAccess(ci(), app, 'pr-12', config)).toMatchObject({ ok: false });
   });
 
+  it("lets a merged PR's closed run destroy its preview, but not deploy one", () => {
+    // A merged PR's `closed` event runs with the base branch as its ref.
+    const closed = ci({ eventName: 'pull_request', ref: 'refs/heads/main' });
+    expect(checkCiStageAccess(closed, app, 'pr-12', config, 'destroy').ok).toBe(true);
+    expect(checkCiStageAccess(closed, app, 'pr-12', config, 'deploy')).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/refs\/pull\/12\/merge/),
+    });
+    expect(checkCiStageAccess(closed, app, 'prod', config, 'destroy')).toMatchObject({ ok: false });
+    expect(checkCiStageAccess(closed, app, 'staging', config, 'destroy')).toMatchObject({ ok: false });
+    // Still bound to the app's repo, and to pull_request events.
+    expect(
+      checkCiStageAccess({ ...closed, repository: 'dev/other' }, app, 'pr-12', config, 'destroy'),
+    ).toMatchObject({ ok: false });
+    expect(checkCiStageAccess(ci(), app, 'pr-12', config, 'destroy')).toMatchObject({ ok: false });
+    // An open PR's run tears down its own preview the usual way.
+    const open = ci({ eventName: 'pull_request', ref: 'refs/pull/12/merge' });
+    expect(checkCiStageAccess(open, app, 'pr-12', config, 'destroy').ok).toBe(true);
+    expect(checkStageAccess(closed, app, 'pr-12', config, 'destroy').ok).toBe(true);
+  });
+
   it('rejects other repos, non-member owners and custom stages', () => {
     expect(checkCiStageAccess(ci({ repository: 'dev/other' }), app, 'prod', config)).toMatchObject({
       ok: false,

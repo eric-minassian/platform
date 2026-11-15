@@ -198,7 +198,9 @@ CI polls, streams events, comments the URL on the PR.
 
 - The API accepts a deploy from CI only if the token's `repository` matches
   the registered app's repo and its owner is a member.
-- `prod` deploys only from `refs/heads/main`; `pr-N` only from that PR.
+- `prod` deploys only from `refs/heads/main`; `pr-N` only from that PR. A
+  merged PR's `closed` run carries the base branch as its ref, so it may
+  destroy previews but never deploy one.
 - A failure before the route flip leaves the live version untouched. Rollback
   routes traffic to the previous Web Function revision and static prefix.
 - Stages: `main` → `prod`. Each PR → `pr-<n>`, destroyed when the PR closes.
