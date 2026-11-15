@@ -4,9 +4,9 @@ import { resolve } from 'node:path';
 import { LOCAL_STAGE, type ResolvedManifest } from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import pc from 'picocolors';
-import { SDK_SERVER, withLocalBin } from '../build.ts';
+import { SDK_SERVER } from '../build.ts';
 import { loadProject, resolveFromApp } from '../project.ts';
-import { freePort, waitForPort } from '../util/net.ts';
+import { freePort, portFree, waitForPort } from '../util/net.ts';
 import { CliError, info, step, success, warn } from '../util/output.ts';
 import { type LocalCron, scheduleCrons } from './crons.ts';
 import { tsxArgs } from './entries.ts';
@@ -14,6 +14,7 @@ import { type LocalStage, localEnv, startLocalStage } from './local-stage.ts';
 import { prefixer } from './pretty.ts';
 import { killTree } from './proc.ts';
 import { type Interceptor, type LocalRouterState, localRouteRecord, startLocalRouter } from './router.ts';
+import { startWebDev } from './web-dev.ts';
 import { type Dispatcher, startLocalWorker, startWorkerDispatch } from './worker.ts';
 
 export interface DevOptions {
@@ -36,6 +37,12 @@ export const DEV_CONTROL_PREFIX = '/__plat_dev/';
  */
 export async function runDev(opts: DevOptions): Promise<void> {
   const { root, manifest } = await loadProject(opts.cwd);
+  // The router binds last, after the slow emulator start; find out now.
+  if (!(await portFree(opts.port))) {
+    throw new CliError(`port ${opts.port} is in use`, {
+      hint: 'another `plat dev` may be running; pick a free port with --port <port> or PLAT_DEV_PORT',
+    });
+  }
   const children: ChildProcess[] = [];
   const cleanups: Array<() => void | Promise<void>> = [];
   let stage: LocalStage | undefined;
@@ -144,25 +151,26 @@ export async function runDev(opts: DevOptions): Promise<void> {
 
   // ------------------------------------------------------------ frontend dev server
   if (manifest.web?.dev) {
-    const { command, port } = manifest.web.dev;
-    const child = spawn(command, {
-      cwd: root,
-      shell: true,
-      detached: true,
-      env: withLocalBin(root, { ...process.env, PLATFORM_DEV_ROUTER: `http://localhost:${opts.port}` }),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    const preferred = manifest.web.dev.port;
+    const { child, port, ready } = await startWebDev(root, manifest.web.dev, opts.port);
     children.push(child);
+    if (preferred && port !== preferred) {
+      info(pc.dim(`  web.dev.port ${preferred} is in use; the frontend dev server gets port ${port}`));
+    }
     const out = prefixer(pc.blue('front │'), (s) => process.stdout.write(s));
     child.stdout!.on('data', out);
     child.stderr!.on('data', out);
+    child.once('exit', (code) => {
+      if (!shuttingDown && state.webDev) warn(`frontend dev server exited (code ${code})`);
+    });
     state.webDevStarting = true;
-    // Dev servers often bind `localhost` (::1 on many systems); connect the same way.
-    void waitForPort(port, 'localhost', 60_000)
+    void ready
       .then(() => {
         state.webDev = { host: 'localhost', port };
       })
-      .catch((err) => warn(`frontend dev server did not start: ${(err as Error).message}`))
+      .catch((err) => {
+        if (!shuttingDown) warn(`frontend dev server did not start: ${(err as Error).message}`);
+      })
       .finally(() => {
         state.webDevStarting = false;
       });

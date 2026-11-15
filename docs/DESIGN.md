@@ -79,7 +79,7 @@ const app = defineApp({
     server: 'src/server.ts',
     static: 'web/dist',
     build: 'pnpm --dir web build',
-    dev: { command: 'pnpm --dir web dev', port: 5173 },
+    dev: { command: 'pnpm --dir web dev' }, // listens on $PLATFORM_DEV_WEB_PORT
     spa: true,
     serverRoutes: ['/api/'],
   },
@@ -223,7 +223,9 @@ CI polls, streams events, comments the URL on the PR.
    webMode: 'external' })`. The same engine that provisions AWS provisions the
    emulator, so every local run exercises it.
 3. Run the server like a Web Function would (`AWS_LAMBDA_HTTP_ENDPOINT`, same
-   bindings) with hot reload, plus the frontend dev server.
+   bindings) with hot reload, plus the frontend dev server on a free port it
+   gets in `PLATFORM_DEV_WEB_PORT` (`web.dev.port` if that is free), so
+   several apps run side by side.
 4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
 5. The worker runs as a local Node process with hot reload.
    - The engine still creates the real worker Lambda, queues, event source
