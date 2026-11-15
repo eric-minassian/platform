@@ -20,6 +20,7 @@ const app = defineApp({
   events: { 'todo.created': event<TodoCreated>() },
   crons: { cleanup: '0 3 * * *' },
   storage: ['uploads'],
+  email: { name: 'Todo' },
 });
 
 export default app;
