@@ -244,10 +244,10 @@ function tenantState(t: Pick<Tenant, 'TenantName' | 'TenantId' | 'TenantArn'>): 
 }
 
 function sameSuppression(a: TenantSuppressionAttributes | undefined): boolean {
-  const reasons = [...(a?.SuppressedReasons ?? [])].sort().join(',');
+  const reasons = (a?.SuppressedReasons ?? []).toSorted().join(',');
   return (
     a?.SuppressionScope === TENANT_SUPPRESSION.SuppressionScope &&
-    reasons === [...TENANT_SUPPRESSION.SuppressedReasons].sort().join(',')
+    reasons === TENANT_SUPPRESSION.SuppressedReasons.toSorted().join(',')
   );
 }
 

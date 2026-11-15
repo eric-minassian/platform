@@ -150,7 +150,7 @@ export const ManageLive = HttpApiBuilder.group(
           const { app, stage } = yield* emailScope(params.app, query.stage);
           const address = params.address.trim();
           if (!isEmailAddress(address)) return yield* BadRequest.of(`"${address}" is not an email address`);
-          yield* email.unsuppress(app, stage, address);
+          return yield* email.unsuppress(app, stage, address);
         }),
 
       resumeEmail: ({ params, query }) =>

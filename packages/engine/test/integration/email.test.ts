@@ -67,7 +67,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
     const associated = () =>
       ses()
         .send(new ListTenantResourcesCommand({ TenantName: tenantName }))
-        .then((r) => (r.TenantResources ?? []).map((x) => x.ResourceArn).sort());
+        .then((r) => (r.TenantResources ?? []).flatMap((x) => x.ResourceArn ?? []).toSorted());
     const configurationSet = () =>
       ses().send(new GetConfigurationSetCommand({ ConfigurationSetName: tenantName }));
     const rolePolicy = () =>
@@ -104,12 +104,9 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
 
       const t = await tenant();
       expect(t?.SuppressionAttributes?.SuppressionScope).toBe('TENANT');
-      expect([...(t?.SuppressionAttributes?.SuppressedReasons ?? [])].sort()).toEqual([
-        'BOUNCE',
-        'COMPLAINT',
-      ]);
+      expect((t?.SuppressionAttributes?.SuppressedReasons ?? []).toSorted()).toEqual(['BOUNCE', 'COMPLAINT']);
       expect(t?.Tags).toContainEqual({ Key: TAGS.app, Value: app });
-      expect(await associated()).toEqual([configurationSetArn(), platform.email!.identityArn].sort());
+      expect(await associated()).toEqual([configurationSetArn(), platform.email!.identityArn].toSorted());
       const cs = await configurationSet();
       expect(cs.ReputationOptions?.ReputationMetricsEnabled).toBe(true);
       expect(cs.Tags).toContainEqual({ Key: TAGS.stage, Value: stage });

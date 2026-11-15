@@ -1,12 +1,12 @@
 // A web server that sends mail the way an app's does: the SDK's Email service
 // on Platform.layer, run by the SDK's server wrapper with the stage's bindings.
 // POST a message: 200 { id }, or 409 { reason, message } when it wasn't sent.
-import { Email, Platform } from '@ericminassian/platform';
+import { Email, type EmailMessage, Platform } from '@ericminassian/platform';
 import { Effect } from 'effect';
 
 export default {
   fetch: async (req: Request): Promise<Response> => {
-    const message = await req.json();
+    const message = (await req.json()) as EmailMessage;
     return Effect.runPromise(
       Effect.gen(function* () {
         const { id } = yield* (yield* Email).send(message);

@@ -147,7 +147,9 @@ async function deliverWithSes(b: Bindings, e: EmailBindings, m: Normalized): Pro
   try {
     const { SendEmailCommand } = await import('@aws-sdk/client-sesv2');
     const trace = currentContext()?.trace;
-    const out = await (await client('sesv2')).send(
+    const out = await (
+      await client('sesv2')
+    ).send(
       new SendEmailCommand({
         FromEmailAddress: sesMailbox(e.from, e.name),
         Destination: { ToAddresses: to },
