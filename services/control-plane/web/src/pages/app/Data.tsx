@@ -32,87 +32,91 @@ function Collections() {
       api.items(app, scope.stage, selected!, applied || undefined, pageParam || undefined),
     initialPageParam: '' as string,
     getNextPageParam: (last) => last.cursor,
-    enabled: Boolean(selected),
+    enabled: Boolean(selected) && collections.data?.database === true,
   });
   const rows = items.data?.pages.flatMap((p) => p.items) ?? [];
 
   return (
     <Card title="Database">
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-[200px_minmax(0,1fr)]">
-        <div>
-          <Loaded q={collections}>
-            {(cs) =>
-              cs.length === 0 ? (
-                <Empty>No data yet.</Empty>
-              ) : (
-                <ul className="space-y-0.5">
-                  {cs.map((c) => (
-                    <li key={c.name}>
-                      <button
-                        type="button"
-                        onClick={() => setSelected(c.name)}
-                        className={cx(
-                          'flex w-full justify-between rounded px-2 py-1 text-left text-[12px] hover:bg-panel-2',
-                          selected === c.name && 'bg-panel-2 font-medium',
-                        )}
-                      >
-                        <Mono>{c.name}</Mono>
-                        <span className="text-muted">{c.sampled}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )
-            }
-          </Loaded>
-        </div>
-        <div className="min-w-0">
-          {!selected ? (
-            <Empty>Pick a collection.</Empty>
+      <Loaded q={collections}>
+        {(d) =>
+          !d.database ? (
+            <Empty>No database declared in plat.config.ts.</Empty>
           ) : (
-            <div className="space-y-2">
-              <form
-                className="flex items-center gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setApplied(partition.trim());
-                }}
-              >
-                <Input
-                  value={partition}
-                  onChange={(e) => setPartition(e.target.value)}
-                  placeholder="partition key value (optional)"
-                  className="w-72"
-                />
-                <Button type="submit">Filter</Button>
-              </form>
-              <ErrorBox error={items.error} />
-              {items.isPending ? (
-                <Spinner />
-              ) : rows.length === 0 ? (
-                <Empty>No items.</Empty>
-              ) : (
-                <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
-                  {rows.map((item, i) => (
-                    <pre
-                      // biome-ignore lint/suspicious/noArrayIndexKey: items are displayed in scan order
-                      key={i}
-                      className="overflow-x-auto rounded-md bg-panel-2 p-2 font-mono text-[11px]"
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-[200px_minmax(0,1fr)]">
+              <div>
+                {d.collections.length === 0 ? (
+                  <Empty>No data yet.</Empty>
+                ) : (
+                  <ul className="space-y-0.5">
+                    {d.collections.map((c) => (
+                      <li key={c.name}>
+                        <button
+                          type="button"
+                          onClick={() => setSelected(c.name)}
+                          className={cx(
+                            'flex w-full justify-between rounded px-2 py-1 text-left text-[12px] hover:bg-panel-2',
+                            selected === c.name && 'bg-panel-2 font-medium',
+                          )}
+                        >
+                          <Mono>{c.name}</Mono>
+                          <span className="text-muted">{c.sampled}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="min-w-0">
+                {!selected ? (
+                  <Empty>Pick a collection.</Empty>
+                ) : (
+                  <div className="space-y-2">
+                    <form
+                      className="flex items-center gap-2"
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        setApplied(partition.trim());
+                      }}
                     >
-                      {JSON.stringify(item, null, 2)}
-                    </pre>
-                  ))}
-                </div>
-              )}
-              {items.hasNextPage && (
-                <Button onClick={() => items.fetchNextPage()} disabled={items.isFetchingNextPage}>
-                  Load more
-                </Button>
-              )}
+                      <Input
+                        value={partition}
+                        onChange={(e) => setPartition(e.target.value)}
+                        placeholder="partition key value (optional)"
+                        className="w-72"
+                      />
+                      <Button type="submit">Filter</Button>
+                    </form>
+                    <ErrorBox error={items.error} />
+                    {items.isPending ? (
+                      <Spinner />
+                    ) : rows.length === 0 ? (
+                      <Empty>No items.</Empty>
+                    ) : (
+                      <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
+                        {rows.map((item, i) => (
+                          <pre
+                            // biome-ignore lint/suspicious/noArrayIndexKey: items are displayed in scan order
+                            key={i}
+                            className="overflow-x-auto rounded-md bg-panel-2 p-2 font-mono text-[11px]"
+                          >
+                            {JSON.stringify(item, null, 2)}
+                          </pre>
+                        ))}
+                      </div>
+                    )}
+                    {items.hasNextPage && (
+                      <Button onClick={() => items.fetchNextPage()} disabled={items.isFetchingNextPage}>
+                        Load more
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          )}
-        </div>
-      </div>
+          )
+        }
+      </Loaded>
     </Card>
   );
 }

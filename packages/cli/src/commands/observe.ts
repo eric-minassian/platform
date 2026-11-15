@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { LogLine, TelemetryEvent } from '@ericminassian/platform-core';
+import type { DataCollections, LogLine, TelemetryEvent } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { formatEvent } from '../dev/pretty.ts';
@@ -217,7 +217,7 @@ export function registerObserve(program: Command): void {
         }
         if (!collection) {
           const cols = await api.collections(app, { stage: opts.stage });
-          result(cols, (c) => (c.length ? c.join('\n') : pc.dim('(no collections yet)')));
+          result(cols, (c) => formatCollections(c, opts.stage));
           return;
         }
         const page = await api.items(app, {
@@ -235,6 +235,11 @@ export function registerObserve(program: Command): void {
       },
     ),
   );
+}
+
+export function formatCollections(d: DataCollections, stage: string): string {
+  if (!d.database) return pc.dim(`(no database on ${stage}; set db: true in plat.config.ts and deploy)`);
+  return d.collections.length ? d.collections.map((c) => c.name).join('\n') : pc.dim('(no collections yet)');
 }
 
 /** `["userId=1", "kind=a"]` → `"userId=1&kind=a"` (URL-encoded pairs, as the API expects). */

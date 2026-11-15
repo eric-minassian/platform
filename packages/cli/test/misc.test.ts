@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parsePartition } from '../src/commands/observe.ts';
+import { formatCollections, parsePartition } from '../src/commands/observe.ts';
 import { nextRun } from '../src/dev/crons.ts';
 import { readDotEnv } from '../src/dev/local-stage.ts';
 import { prettyLine } from '../src/dev/pretty.ts';
@@ -44,6 +44,25 @@ describe('time and output helpers', () => {
   it('encodes partition filters', () => {
     expect(parsePartition(['userId=u 1', 'kind=a=b'])).toBe('userId=u+1&kind=a%3Db');
     expect(() => parsePartition(['oops'])).toThrow(/key=value/);
+  });
+
+  it('tells a stage without a database from an empty one', () => {
+    expect(formatCollections({ database: false, collections: [] }, 'pr-3')).toContain(
+      'no database on pr-3; set db: true in plat.config.ts',
+    );
+    expect(formatCollections({ database: true, collections: [] }, 'prod')).toContain('no collections yet');
+    expect(
+      formatCollections(
+        {
+          database: true,
+          collections: [
+            { name: 'todos', sampled: 3 },
+            { name: 'users', sampled: 1 },
+          ],
+        },
+        'prod',
+      ),
+    ).toBe('todos\nusers');
   });
 });
 
