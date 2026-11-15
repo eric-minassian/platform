@@ -42,5 +42,5 @@ jobs:
       - name: Deploy the platform
         env:
           DNS_DELEGATION_ROLE_ARN: ${{ vars.DNS_DELEGATION_ROLE_ARN }}
-          ALERT_EMAIL: ${{ vars.ALERT_EMAIL }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
         run: pnpm platform:deploy
