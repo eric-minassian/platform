@@ -201,7 +201,36 @@ exists, so:
    the package versions, merge, then run the `release` workflow. It publishes
    only versions that aren't on npm yet.
 
-## 11. Smoke test
+## 11. Email: SES production access
+
+A new account's SES is in the sandbox: 200 emails a day, and only to
+addresses verified in SES. Apps that declare `email` deploy and send, but a
+send to anyone else fails with `EmailNotSent` (`rejected`), and the user pool
+keeps Cognito's own sender (50 emails a day for the whole pool).
+
+After the foundation deploy has verified `mail.platform.ericminassian.com`,
+ask AWS for production access:
+
+```sh
+aws sesv2 put-account-details --profile platform-prod --region us-east-1 \
+  --production-access-enabled --mail-type TRANSACTIONAL \
+  --website-url https://platform.ericminassian.com --contact-language EN \
+  --use-case-description '<who receives mail, how bounces and complaints are handled, volume>'
+aws sesv2 get-account --profile platform-prod --region us-east-1 --query Details.ReviewDetails
+```
+
+AWS answers in the account's Support Center case (the `CaseId` above),
+usually within a day. A denial can be answered there with more detail. Once
+`ProductionAccessEnabled` is true, the next platform deploy moves the user
+pool's mail to SES (`login@mail.platform.ericminassian.com`).
+
+While in the sandbox, verify an address to test with:
+
+```sh
+aws sesv2 create-email-identity --profile platform-prod --region us-east-1 --email-identity you@example.com
+```
+
+## 12. Smoke test
 
 ```sh
 npm install -g @ericminassian/plat
