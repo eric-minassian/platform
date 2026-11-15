@@ -88,11 +88,12 @@ describe('stage role policy', () => {
     expect(create?.Resource).toBe('arn:aws:iam::1:role/platform/apps/*');
   });
 
-  it('pins CI trust to the main branch of the platform repo', () => {
-    const t = policies.githubCiTrustPolicy({ accountId: '1', owner: 'o', repo: 'r' });
-    expect(t.Statement[0]?.Condition?.StringEquals?.['token.actions.githubusercontent.com:sub']).toBe(
+  it('pins CI trust to the main branch of the platform repo, in both OIDC subject formats', () => {
+    const t = policies.githubCiTrustPolicy({ accountId: '1', owner: 'o', repo: 'r', ownerId: 7, repoId: 42 });
+    expect(t.Statement[0]?.Condition?.StringEquals?.['token.actions.githubusercontent.com:sub']).toEqual([
       'repo:o/r:ref:refs/heads/main',
-    );
+      'repo:o@7/r@42:ref:refs/heads/main',
+    ]);
   });
 });
 

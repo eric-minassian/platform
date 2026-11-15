@@ -371,11 +371,21 @@ export function controlPlanePolicy(input: {
 }
 
 /** Trust for the platform repo's CI role: GitHub Actions OIDC, main branch only. */
+/**
+ * Trust GitHub Actions on `main` of one repo. Accepts both OIDC subject
+ * formats: the legacy `repo:<owner>/<repo>:...` and GitHub's immutable
+ * `repo:<owner>@<ownerId>/<repo>@<repoId>:...`, which repos created since the
+ * immutable-subject change use. Trusting both keeps CI working if the repo
+ * setting is ever toggled.
+ */
 export function githubCiTrustPolicy(input: {
   accountId: string;
   owner: string;
   repo: string;
+  ownerId: number;
+  repoId: number;
 }): PolicyDocument {
+  const ref = 'ref:refs/heads/main';
   return policy({
     Effect: 'Allow',
     Principal: {
@@ -385,7 +395,10 @@ export function githubCiTrustPolicy(input: {
     Condition: {
       StringEquals: {
         'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
-        'token.actions.githubusercontent.com:sub': `repo:${input.owner}/${input.repo}:ref:refs/heads/main`,
+        'token.actions.githubusercontent.com:sub': [
+          `repo:${input.owner}/${input.repo}:${ref}`,
+          `repo:${input.owner}@${input.ownerId}/${input.repo}@${input.repoId}:${ref}`,
+        ],
       },
     },
   });

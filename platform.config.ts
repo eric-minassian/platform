@@ -13,7 +13,7 @@ export default definePlatformConfig({
   consoleHost: 'platform.ericminassian.com',
   edgeHost: 'edge.platform.ericminassian.com',
   loginHost: 'login.platform.ericminassian.com',
-  github: { owner: 'eric-minassian', repo: 'platform' },
+  github: { owner: 'eric-minassian', repo: 'platform', ownerId: 51006625, repoId: 1458054906 },
   members: [{ github: 'eric-minassian', role: 'admin' }],
   // Names already taken in the ericminassian.com root zone (github.com/eric-minassian/aws).
   // Delegated subdomains and static records beat the platform's `*` wildcard.

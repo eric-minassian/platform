@@ -18,7 +18,7 @@ const config: PlatformConfig = definePlatformConfig({
   consoleHost: 'platform.example.com',
   edgeHost: 'edge.platform.example.com',
   loginHost: 'login.platform.example.com',
-  github: { owner: 'owner', repo: 'platform' },
+  github: { owner: 'owner', repo: 'platform', ownerId: 1, repoId: 2 },
   members: [
     { github: 'Admin', role: 'admin' },
     { github: 'dev', role: 'member' },

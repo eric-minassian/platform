@@ -436,11 +436,7 @@ export const STEPS: Step[] = [
         name: platformNames.ciRole,
         path: '/platform/',
         description: `GitHub Actions for ${f.config.github.owner}/${f.config.github.repo} (main)`,
-        trust: policies.githubCiTrustPolicy({
-          accountId: acct,
-          owner: f.config.github.owner,
-          repo: f.config.github.repo,
-        }),
+        trust: policies.githubCiTrustPolicy({ accountId: acct, ...f.config.github }),
         managedPolicyArns: [ADMINISTRATOR_ACCESS],
         maxSessionDurationSeconds: 3600,
         tags: platformTags('ci'),
