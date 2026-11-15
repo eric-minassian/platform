@@ -40,7 +40,7 @@ aws sts get-caller-identity --profile platform-prod
 ```sh
 gh variable set AWS_ACCOUNT_ID --body <platform-prod account id>
 gh variable set DNS_DELEGATION_ROLE_ARN --body arn:aws:iam::<management account id>:role/route53-delegation-platform-ericminassian-com
-gh variable set ALERT_EMAIL --body <where platform alerts go>   # optional, see step 6
+gh secret set ALERT_EMAIL --body <where platform alerts go>     # a secret: variables show in public logs
 ```
 
 ## 3. First foundation run (local)
@@ -100,7 +100,7 @@ From now on, every merge to `main` re-runs this through
 Without `ALERT_EMAIL`, the `platform-alerts` topic exists but nobody is
 subscribed. To subscribe:
 
-1. Set the `ALERT_EMAIL` variable (step 2).
+1. Set the `ALERT_EMAIL` secret (step 2).
 2. Re-run `pnpm platform:deploy` with it exported.
 3. Click the confirmation link SNS sends.
 

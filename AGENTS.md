@@ -36,8 +36,9 @@ existing stages would be orphaned.
 ## Public repo
 
 No AWS account ids, ARNs, emails or secrets in commits. They come from GitHub
-Actions variables (`AWS_ACCOUNT_ID`, `DNS_DELEGATION_ROLE_ARN`, `ALERT_EMAIL`)
-and SSM (`/platform/config/*`).
+Actions variables (`AWS_ACCOUNT_ID`, `DNS_DELEGATION_ROLE_ARN`), Actions
+secrets (`ALERT_EMAIL`; variables are printed in public workflow logs) and SSM
+(`/platform/config/*`).
 
 ## Testing
 
