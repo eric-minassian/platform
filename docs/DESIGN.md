@@ -141,8 +141,10 @@ declare module '@ericminassian/platform/config' {
   `Db.collection()` maps collections onto the stage's single table
   (partition/sort keys, up to three pinned index slots, TTL), so adding a
   collection needs no deploy-time provisioning; documents are encoded and
-  decoded with a schema. `@ericminassian/platform/api` holds the browser-safe
-  pieces an `HttpApi` definition shares with its web client.
+  decoded with a schema. `db.transact` writes across collections all or none
+  (TransactWriteItems); `putMany`/`deleteMany` batch writes that needn't be.
+  `@ericminassian/platform/api` holds the browser-safe pieces an `HttpApi`
+  definition shares with its web client.
 - **Realtime**: the server and worker publish with the `Realtime` service; the
   browser subscribes with `RealtimeClient` from `@ericminassian/platform/client`.
   See [Realtime](#realtime).

@@ -1,10 +1,14 @@
 import {
+  BatchWriteCommand,
+  type BatchWriteCommandInput,
   DeleteCommand,
   type DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
   QueryCommand,
   type QueryCommandInput,
+  TransactWriteCommand,
+  type TransactWriteCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
@@ -93,11 +97,35 @@ export interface Page<T> {
   cursor?: string;
 }
 
+/** One write of a `transact` call. */
+export interface TransactItem {
+  readonly collection: string;
+  /** The item's `pk` and `sk`: a transaction may touch each item once. */
+  readonly id: string;
+  readonly write: NonNullable<TransactWriteCommandInput['TransactItems']>[number];
+}
+
 export interface Collection<T extends Record<string, unknown>> {
   get(key: Partial<T>, opts?: GetOptions): Promise<T | undefined>;
   put(item: T, opts?: { ifNotExists?: boolean }): Promise<T>;
   update(key: Partial<T>, patch: Partial<T>): Promise<T>;
   delete(key: Partial<T>): Promise<void>;
+  /**
+   * Puts in BatchWriteItem calls of 25, retrying what DynamoDB leaves
+   * unprocessed. Not atomic. A key given twice is written once, with the last item.
+   */
+  putMany(items: readonly T[]): Promise<void>;
+  /** Deletes in BatchWriteItem calls of 25, like `putMany`. */
+  deleteMany(keys: readonly Partial<T>[]): Promise<void>;
+  /** The writes `transact` takes. They throw on a bad key or patch, before anything is sent. */
+  readonly transactItem: {
+    put(item: T, opts?: { ifNotExists?: boolean }): TransactItem;
+    /** Fails the transaction when the item doesn't exist; see `derivedForPatch` for index fields. */
+    update(key: Partial<T>, patch: Partial<T>): TransactItem;
+    delete(key: Partial<T>): TransactItem;
+    /** Writes nothing; fails the transaction unless the item exists (`exists: false`: unless it doesn't). */
+    check(key: Partial<T>, exists: boolean): TransactItem;
+  };
   /** One page of the items sharing the given partition-key values. Continue while `cursor` is set. */
   query(partition: Partial<T>, opts?: QueryOptions): Promise<Page<T>>;
   /** Every matching item, following pages until the last one. */
@@ -106,8 +134,58 @@ export interface Collection<T extends Record<string, unknown>> {
 
 export interface Db {
   collection<T extends Record<string, unknown>>(name: string, opts: CollectionOptions<T>): Collection<T>;
+  /**
+   * TransactWriteItems: all of `items` or none. A failed condition rejects
+   * with DynamoDB's TransactionCanceledException, whose `CancellationReasons`
+   * line up with `items`; a conflict with another transaction, or throttling, is retried.
+   */
+  transact(items: readonly TransactItem[]): Promise<void>;
   /** Escape hatch (AWS-specific): the DynamoDB document client and table name. */
   raw(): { client: unknown; table: string };
+}
+
+/** DynamoDB's limit on the writes in one TransactWriteItems call. */
+export const MAX_TRANSACT_ITEMS = 100;
+const BATCH_WRITE_SIZE = 25;
+/** Tries per call before a conflict or unprocessed items become an error. */
+const MAX_ATTEMPTS = 8;
+
+/** Full-jitter exponential backoff before try `attempt + 1`: up to 50 ms, 100 ms, … capped at 1 s. */
+const backoff = (attempt: number) =>
+  new Promise((resolve) => setTimeout(resolve, Math.random() * Math.min(1000, 25 * 2 ** attempt)));
+
+const errorName = (e: unknown) => (e as { name?: unknown } | null)?.name;
+
+/** Cancellation codes a retry can clear: another transaction held an item, or throttling. */
+const TRANSIENT_CANCELLATIONS = new Set([
+  'TransactionConflict',
+  'ThrottlingError',
+  'ProvisionedThroughputExceeded',
+]);
+
+function isTransient(e: unknown): boolean {
+  // A single-item write that hit an item mid-transaction. The AWS SDK doesn't retry it.
+  if (errorName(e) === 'TransactionConflictException') return true;
+  if (errorName(e) !== 'TransactionCanceledException') return false;
+  const codes = ((e as { CancellationReasons?: { Code?: string }[] }).CancellationReasons ?? []).map(
+    (r) => r.Code ?? 'None',
+  );
+  return (
+    codes.some((c) => TRANSIENT_CANCELLATIONS.has(c)) &&
+    codes.every((c) => c === 'None' || TRANSIENT_CANCELLATIONS.has(c))
+  );
+}
+
+/** Runs `call`, retrying with backoff while it fails only because of a transaction conflict or throttling. */
+async function retryTransient<A>(call: () => Promise<A>): Promise<A> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await call();
+    } catch (e) {
+      if (attempt >= MAX_ATTEMPTS || !isTransient(e)) throw e;
+      await backoff(attempt);
+    }
+  }
 }
 
 export const INTERNAL_ATTRIBUTES = [
@@ -243,6 +321,76 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
     return ix;
   };
 
+  /**
+   * The gsi/ttl attributes an update can set (or remove, `null`) without
+   * reading the item: an index whose fields the patch changes is rebuilt from
+   * the key fields and the patch when they give all of its fields, and dropped
+   * when the patch removes one. Otherwise the index is `unresolved`: it needs
+   * the stored item's other fields. Only key fields are taken from `key`, so a
+   * stale document passed as the key can't stand in for them.
+   */
+  const planDerived = (key: Record<string, unknown>, patch: Record<string, unknown>) => {
+    const set: Record<string, string | number | null> = {};
+    const unresolved: { index: (typeof indexes)[number]; changed: string[]; missing: string[] }[] = [];
+    const known: Record<string, unknown> = { ...patch };
+    for (const f of keyFields) known[f] = key[f];
+    for (const ix of indexes) {
+      const fields = [...ix.partition, ...ix.sort];
+      const changed = fields.filter((f) => Object.hasOwn(patch, f));
+      if (!changed.length) continue;
+      if (!hasAll(patch, changed)) {
+        set[`gsi${ix.slot}pk`] = null;
+        set[`gsi${ix.slot}sk`] = null;
+        continue;
+      }
+      const missing = fields.filter((f) => !hasAll(known, [f]));
+      if (missing.length) {
+        unresolved.push({ index: ix, changed, missing });
+        continue;
+      }
+      set[`gsi${ix.slot}pk`] = `${name}#${ix.name}#${keyPart(known, ix.partition, what)}`;
+      set[`gsi${ix.slot}sk`] = ix.sort.length ? keyPart(known, ix.sort, what) : '#';
+    }
+    if (opts.ttl && Object.hasOwn(patch, opts.ttl)) {
+      const v = patch[opts.ttl];
+      set._ttl = typeof v === 'number' ? Math.floor(v) : null;
+    }
+    return { set, unresolved };
+  };
+
+  /**
+   * `planDerived`'s attributes for an update that can't read the item at all,
+   * as in a transaction. Throws when an index is unresolved: the patch must
+   * give all of the fields of an index it changes.
+   */
+  const derivedForPatch = (
+    key: Record<string, unknown>,
+    patch: Record<string, unknown>,
+  ): Record<string, string | number | null> => {
+    const { set, unresolved } = planDerived(key, patch);
+    const first = unresolved[0];
+    if (first)
+      throw new Error(
+        `${what}: a transaction's update that changes ${quoted(first.changed)} must also set ${quoted(first.missing)}, ` +
+          `so index "${first.index.name}" can be rebuilt without reading the document`,
+      );
+    return set;
+  };
+
+  /** Identifies the item `key` addresses: its `pk` and `sk`, unambiguously. */
+  const itemId = (key: Record<string, unknown>): string => {
+    const { pk, sk } = primaryKey(key);
+    return JSON.stringify([pk, sk]);
+  };
+
+  /** Throws when `patch` changes a key field. */
+  const assertKeyUnchanged = (key: Record<string, unknown>, patch: Record<string, unknown>) => {
+    for (const k of Object.keys(patch)) {
+      if (keyFields.has(k) && patch[k] !== key[k])
+        throw new Error(`${what}: cannot change key attribute "${k}"`);
+    }
+  };
+
   const queryInput = (values: Partial<T>, q: QueryOptions, tableName: string): QueryCommandInput => {
     let pkAttr = 'pk';
     let skAttr = 'sk';
@@ -299,10 +447,6 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
   };
 
   const keyFields = new Set([...partition, ...sort]);
-  const derivedSources = new Set([
-    ...indexes.flatMap((i) => [...i.partition, ...i.sort]),
-    ...(opts.ttl ? [opts.ttl] : []),
-  ]);
 
   return {
     name,
@@ -310,20 +454,62 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
     sort,
     indexes,
     primaryKey,
+    itemId,
     derived,
+    planDerived,
+    derivedForPatch,
+    assertKeyUnchanged,
     toItem,
     queryIndex,
     queryInput,
     keyFields,
-    derivedSources,
   };
 }
+
+const quoted = (fields: string[]) => fields.map((f) => `"${f}"`).join(', ');
 
 function collection<T extends Record<string, unknown>>(
   name: string,
   opts: CollectionOptions<T>,
 ): Collection<T> {
   const m = createKeyMapper(name, opts);
+
+  const putInput = (item: T, putOpts?: { ifNotExists?: boolean }) => ({
+    TableName: table(),
+    Item: m.toItem(item),
+    ...(putOpts?.ifNotExists ? { ConditionExpression: 'attribute_not_exists(pk)' } : {}),
+  });
+
+  type WriteRequest = NonNullable<BatchWriteCommandInput['RequestItems']>[string][number];
+
+  /**
+   * Sends `requests` 25 at a time, one span per call. BatchWriteItem rejects a
+   * call naming an item twice, so a later request for the same item replaces
+   * an earlier one, as if they had been sent one by one.
+   */
+  const batchWrite = async (op: string, requests: { id: string; request: WriteRequest }[]) => {
+    const latest = [...new Map(requests.map((r) => [r.id, r.request])).values()];
+    if (!latest.length) return;
+    const tableName = table();
+    for (let i = 0; i < latest.length; i += BATCH_WRITE_SIZE) {
+      let pending = latest.slice(i, i + BATCH_WRITE_SIZE);
+      await span(op, name, async () => {
+        for (let attempt = 1; ; attempt++) {
+          // Puts and deletes are idempotent, so a call rejected for a conflict can go again whole.
+          const input = { RequestItems: { [tableName]: pending } };
+          const out = await retryTransient(() => ddb().send(new BatchWriteCommand(input)));
+          pending = out.UnprocessedItems?.[tableName] ?? [];
+          if (!pending.length) return;
+          if (attempt >= MAX_ATTEMPTS)
+            throw new Error(
+              `collection "${name}": DynamoDB left ${pending.length} write(s) unprocessed after ${attempt} tries`,
+            );
+          await backoff(attempt);
+        }
+      });
+    }
+  };
+
   return {
     get: (key, getOpts) =>
       span('db.get', name, async () => {
@@ -339,59 +525,138 @@ function collection<T extends Record<string, unknown>>(
 
     put: (item, putOpts) =>
       span('db.put', name, async () => {
-        await ddb().send(
-          new PutCommand({
-            TableName: table(),
-            Item: m.toItem(item),
-            ...(putOpts?.ifNotExists ? { ConditionExpression: 'attribute_not_exists(pk)' } : {}),
-          }),
-        );
+        const input = putInput(item, putOpts);
+        await retryTransient(() => ddb().send(new PutCommand(input)));
         return item;
       }),
 
     update: (key, patch) =>
       span('db.update', name, async () => {
-        for (const k of Object.keys(patch)) {
-          if (m.keyFields.has(k) && patch[k] !== key[k])
-            throw new Error(`collection "${name}": cannot change key attribute "${k}"`);
-        }
+        m.assertKeyUnchanged(key, patch);
         const tableName = table();
         const Key = m.primaryKey(key);
-        const { expr, names, values } = setExpression(patch, m.keyFields);
-        const out = await ddb().send(
-          new UpdateCommand({
-            TableName: tableName,
-            Key,
-            UpdateExpression: expr,
-            ExpressionAttributeNames: { ...names, '#pk': 'pk' },
-            ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
-            ConditionExpression: 'attribute_exists(#pk)',
-            ReturnValues: 'ALL_NEW',
-          }),
-        );
-        let item = out.Attributes ?? {};
-        if (Object.keys(patch).some((k) => m.derivedSources.has(k))) {
-          const d = setExpression(m.derived(item), new Set());
-          const again = await ddb().send(
+        // Indexes the key and patch determine are written with the patch, atomically.
+        const plan = m.planDerived(key, patch);
+        const { expr, names, values } = setExpression({ ...patch, ...plan.set }, m.keyFields);
+        const out = await retryTransient(() =>
+          ddb().send(
             new UpdateCommand({
               TableName: tableName,
               Key,
-              UpdateExpression: d.expr,
-              ExpressionAttributeNames: { ...d.names, '#pk': 'pk' },
-              ...(Object.keys(d.values).length ? { ExpressionAttributeValues: d.values } : {}),
+              UpdateExpression: expr,
+              ExpressionAttributeNames: { ...names, '#pk': 'pk' },
+              ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
               ConditionExpression: 'attribute_exists(#pk)',
               ReturnValues: 'ALL_NEW',
             }),
+          ),
+        );
+        const item = out.Attributes ?? {};
+        // The rest need the item's other fields: each is rebuilt from the item the first
+        // call returned, in its own write, if that index's fields still hold. A failed
+        // condition means a later write changed them, and every write that changes an
+        // index field writes that index too, so there is nothing left to fix. One write
+        // per index keeps a later write to one index from cancelling another's rebuild.
+        const all = m.derived(item);
+        for (const { index } of plan.unresolved) {
+          const d = setExpression(
+            {
+              [`gsi${index.slot}pk`]: all[`gsi${index.slot}pk`],
+              [`gsi${index.slot}sk`]: all[`gsi${index.slot}sk`],
+            },
+            new Set(),
           );
-          item = again.Attributes ?? item;
+          const rebuildNames: Record<string, string> = { ...d.names, '#pk': 'pk' };
+          const rebuildValues: Record<string, unknown> = { ...d.values };
+          const unchanged = [...index.partition, ...index.sort]
+            .filter((f) => !m.keyFields.has(f))
+            .map((f, i) => {
+              rebuildNames[`#c${i}`] = f;
+              if (item[f] === undefined) return `attribute_not_exists(#c${i})`;
+              rebuildValues[`:c${i}`] = item[f];
+              return `#c${i} = :c${i}`;
+            });
+          try {
+            await retryTransient(() =>
+              ddb().send(
+                new UpdateCommand({
+                  TableName: tableName,
+                  Key,
+                  UpdateExpression: d.expr,
+                  ExpressionAttributeNames: rebuildNames,
+                  ...(Object.keys(rebuildValues).length ? { ExpressionAttributeValues: rebuildValues } : {}),
+                  ConditionExpression: ['attribute_exists(#pk)', ...unchanged].join(' AND '),
+                }),
+              ),
+            );
+          } catch (e) {
+            if (errorName(e) !== 'ConditionalCheckFailedException') throw e;
+          }
         }
+        // The document as this update left it; the rebuilds only touch index attributes.
         return stripInternal(item) as T;
       }),
 
     delete: (key) =>
       span('db.delete', name, async () => {
-        await ddb().send(new DeleteCommand({ TableName: table(), Key: m.primaryKey(key) }));
+        const input = { TableName: table(), Key: m.primaryKey(key) };
+        await retryTransient(() => ddb().send(new DeleteCommand(input)));
       }),
+
+    putMany: (items) =>
+      batchWrite(
+        'db.putMany',
+        items.map((item) => ({ id: m.itemId(item), request: { PutRequest: { Item: m.toItem(item) } } })),
+      ),
+
+    deleteMany: (keys) =>
+      batchWrite(
+        'db.deleteMany',
+        keys.map((key) => ({ id: m.itemId(key), request: { DeleteRequest: { Key: m.primaryKey(key) } } })),
+      ),
+
+    transactItem: {
+      put: (item, putOpts) => ({
+        collection: name,
+        id: m.itemId(item),
+        write: { Put: putInput(item, putOpts) },
+      }),
+      update: (key, patch) => {
+        m.assertKeyUnchanged(key, patch);
+        const derived = m.derivedForPatch(key, patch);
+        const { expr, names, values } = setExpression({ ...patch, ...derived }, m.keyFields);
+        return {
+          collection: name,
+          id: m.itemId(key),
+          write: {
+            Update: {
+              TableName: table(),
+              Key: m.primaryKey(key),
+              UpdateExpression: expr,
+              ExpressionAttributeNames: { ...names, '#pk': 'pk' },
+              ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
+              ConditionExpression: 'attribute_exists(#pk)',
+            },
+          },
+        };
+      },
+      delete: (key) => ({
+        collection: name,
+        id: m.itemId(key),
+        write: { Delete: { TableName: table(), Key: m.primaryKey(key) } },
+      }),
+      check: (key, exists) => ({
+        collection: name,
+        id: m.itemId(key),
+        write: {
+          ConditionCheck: {
+            TableName: table(),
+            Key: m.primaryKey(key),
+            ConditionExpression: exists ? 'attribute_exists(pk)' : 'attribute_not_exists(pk)',
+          },
+        },
+      }),
+    },
 
     query: (values, q = {}) =>
       span('db.query', name, async () => {
@@ -452,7 +717,17 @@ export function setExpression(
   return { expr: parts.join(' '), names, values };
 }
 
+function transact(items: readonly TransactItem[]): Promise<void> {
+  if (!items.length) return Promise.resolve();
+  const collections = [...new Set(items.map((i) => i.collection))].join(',');
+  return span('db.transact', collections, async () => {
+    const input = { TransactItems: items.map((i) => i.write) };
+    await retryTransient(() => ddb().send(new TransactWriteCommand(input)));
+  });
+}
+
 export const db: Db = {
   collection,
+  transact,
   raw: () => ({ client: ddb(), table: table() }),
 };

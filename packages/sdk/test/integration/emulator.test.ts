@@ -43,7 +43,7 @@ import {
 } from '../../src/index.ts';
 import { setBindings } from '../../src/runtime/bindings.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
-import { dbContract } from '../effect-db-contract.ts';
+import { batchContract, dbContract, transactContract } from '../effect-db-contract.ts';
 
 const region = process.env.AWS_REGION ?? 'us-east-1';
 const endpoint = process.env.AWS_ENDPOINT_URL;
@@ -219,6 +219,12 @@ const run = <A, E>(effect: Effect.Effect<A, E, Platform.Services>) =>
 describe('against the AWS Emulator', () => {
   it('db: behaves like the in-memory store', () =>
     Effect.runPromise(dbContract('notes-effect').pipe(Effect.provide(Db.layer))));
+
+  it('db: putMany/deleteMany write batches like the in-memory store', () =>
+    Effect.runPromise(batchContract('notes-batch').pipe(Effect.provide(Db.layer))));
+
+  it('db: transact applies all writes or, when one condition fails, none', () =>
+    Effect.runPromise(transactContract('notes-tx').pipe(Effect.provide(Db.layer))));
 
   it('queue: send carries the body and trace', async () => {
     await run(Effect.flatMap(Queues, (queues) => queues.send('emails', { to: 'eric@example.com' })));

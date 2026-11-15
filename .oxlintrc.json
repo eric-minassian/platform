@@ -76,7 +76,9 @@
               "assertType",
               "template.hasResourceProperties",
               "template.resourceCountIs",
-              "dbContract"
+              "dbContract",
+              "batchContract",
+              "transactContract"
             ]
           }
         ],

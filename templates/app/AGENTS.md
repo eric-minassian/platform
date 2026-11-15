@@ -93,6 +93,8 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `.insert/.update`                | `todos.insert(t)` fails `DocumentExists`; `todos.update(key, { done: true })` fails `DocumentNotFound`    |
 | `.query`                         | `yield* todos.query({ userId }, { beginsWith: '2026', limit: 20, reverse: true })` → `{ items, cursor }`  |
 | `.queryAll`                      | `yield* todos.queryAll({ userId })` → every matching document, across all pages                           |
+| `.putMany/.deleteMany`           | `yield* tiles.putMany(copies)`, `yield* tiles.deleteMany(keys)`: batches of 25, not atomic                |
+| `db.transact`                    | `yield* db.transact([tiles.tx.put(t), feed.tx.insert(e)])`: all or none; fails `TransactionCanceled`      |
 | `Queues`                         | `yield* queues.send('emails', { to, subject, body }, { delay: '1 minute' })`, `sendBatch`                 |
 | `Events`                         | `yield* events.publish('todo.created', { userId, id, title })`                                            |
 | `Storage`                        | `const uploads = storage.store('uploads')`: `put`, `get`, `getText` (`Option`), `list(prefix)`, `delete`  |
@@ -133,6 +135,16 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   can miss it for a moment. Pass `{ consistent: true }` to `get`, `query` or `queryAll` to see every write
   that finished first, at twice the read cost. Indexes are always eventually consistent, so an index
   query can't take it (a type error).
+- **Writes that belong together.** When data is stored more than once (a copy per tile, a count beside a
+  list) or a change has a feed event, write it with `db.transact([...])`: up to 100 documents, all or none.
+  - Build the writes with each collection's `tx`: `put`, `insert`, `update`, `delete`, and `check(key)`
+    (`{ exists: false }` for absent), which writes nothing but must hold.
+  - A failed condition (`insert` over an existing key, `update` or `check` of a missing document) cancels
+    all of it with `TransactionCanceled`; its `failed` lists the positions of the writes that failed. A
+    transaction of only `put` and `delete` can't fail that way, and its type says so.
+  - A transaction writes each document once. Its `update` doesn't read the document, so a patch that
+    changes a field of a secondary index must give every field of that index.
+  - Many writes that needn't be atomic (imports, cleanup): `putMany`/`deleteMany`.
 - **Pagination.** Return `page.cursor` to the client and pass it back as `{ cursor }`, with the same
   partition, index and sort condition.
   - `cursor` set means there may be more pages, even when `items` is shorter than `limit`: a page also
