@@ -21,6 +21,19 @@ export function cleanItem(item: Record<string, unknown>): Record<string, unknown
   return out;
 }
 
+/**
+ * A stage whose app has `db` off, or that was never deployed, has no table.
+ * The browser shows it as an empty database rather than failing.
+ */
+async function unlessNoTable<T>(read: () => Promise<T>, empty: T): Promise<T> {
+  try {
+    return await read();
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ResourceNotFoundException') return empty;
+    throw err;
+  }
+}
+
 const encode = (k: Record<string, unknown> | undefined) =>
   k ? Buffer.from(JSON.stringify(k)).toString('base64url') : undefined;
 const decode = (c: string | undefined) =>
@@ -31,29 +44,31 @@ export async function listCollections(
   app: string,
   stage: string,
 ): Promise<Array<{ name: string; sampled: number }>> {
-  const counts = new Map<string, number>();
-  let ExclusiveStartKey: Record<string, unknown> | undefined;
-  let scanned = 0;
-  do {
-    const res = await aws.ddb().send(
-      new ScanCommand({
-        TableName: names.table(app, stage),
-        ProjectionExpression: '#c',
-        ExpressionAttributeNames: { '#c': '_c' },
-        ExclusiveStartKey,
-        Limit: 1000,
-      }),
-    );
-    for (const i of res.Items ?? []) {
-      const c = typeof i._c === 'string' ? i._c : '(untyped)';
-      counts.set(c, (counts.get(c) ?? 0) + 1);
-    }
-    scanned += res.ScannedCount ?? 0;
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey && scanned < 5000);
-  return [...counts]
-    .map(([name, sampled]) => ({ name, sampled }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return unlessNoTable(async () => {
+    const counts = new Map<string, number>();
+    let ExclusiveStartKey: Record<string, unknown> | undefined;
+    let scanned = 0;
+    do {
+      const res = await aws.ddb().send(
+        new ScanCommand({
+          TableName: names.table(app, stage),
+          ProjectionExpression: '#c',
+          ExpressionAttributeNames: { '#c': '_c' },
+          ExclusiveStartKey,
+          Limit: 1000,
+        }),
+      );
+      for (const i of res.Items ?? []) {
+        const c = typeof i._c === 'string' ? i._c : '(untyped)';
+        counts.set(c, (counts.get(c) ?? 0) + 1);
+      }
+      scanned += res.ScannedCount ?? 0;
+      ExclusiveStartKey = res.LastEvaluatedKey;
+    } while (ExclusiveStartKey && scanned < 5000);
+    return [...counts]
+      .map(([name, sampled]) => ({ name, sampled }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, []);
 }
 
 export async function listItems(opts: {
@@ -67,31 +82,36 @@ export async function listItems(opts: {
   const TableName = names.table(opts.app, opts.stage);
   const Limit = Math.min(opts.limit ?? 50, 200);
   const ExclusiveStartKey = decode(opts.cursor);
-  const res = opts.partition
-    ? await aws.ddb().send(
-        new QueryCommand({
-          TableName,
-          KeyConditionExpression: 'pk = :pk',
-          ExpressionAttributeValues: { ':pk': `${opts.collection}#${opts.partition}` },
-          Limit,
-          ExclusiveStartKey,
-        }),
-      )
-    : await aws.ddb().send(
-        new ScanCommand({
-          TableName,
-          FilterExpression: '#c = :c',
-          ExpressionAttributeNames: { '#c': '_c' },
-          ExpressionAttributeValues: { ':c': opts.collection },
-          Limit,
-          ExclusiveStartKey,
-        }),
-      );
-  const cursor = encode(res.LastEvaluatedKey);
-  return {
-    items: (res.Items ?? []).map((i) => cleanItem(i as Record<string, unknown>)),
-    ...(cursor ? { cursor } : {}),
-  };
+  return unlessNoTable<DataPage>(
+    async () => {
+      const res = opts.partition
+        ? await aws.ddb().send(
+            new QueryCommand({
+              TableName,
+              KeyConditionExpression: 'pk = :pk',
+              ExpressionAttributeValues: { ':pk': `${opts.collection}#${opts.partition}` },
+              Limit,
+              ExclusiveStartKey,
+            }),
+          )
+        : await aws.ddb().send(
+            new ScanCommand({
+              TableName,
+              FilterExpression: '#c = :c',
+              ExpressionAttributeNames: { '#c': '_c' },
+              ExpressionAttributeValues: { ':c': opts.collection },
+              Limit,
+              ExclusiveStartKey,
+            }),
+          );
+      const cursor = encode(res.LastEvaluatedKey);
+      return {
+        items: (res.Items ?? []).map((i) => cleanItem(i as Record<string, unknown>)),
+        ...(cursor ? { cursor } : {}),
+      };
+    },
+    { items: [] },
+  );
 }
 
 export async function listStorage(opts: {
