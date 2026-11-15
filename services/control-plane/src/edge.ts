@@ -1,8 +1,9 @@
 /**
  * After the route flip, CloudFront edges pick up the new KeyValueStore entry
  * within seconds, not instantly. A deployment is reported live only once the
- * public URL actually serves it, so `plat deploy` (and CI) never hand back a
- * URL that still shows the previous version or a 404.
+ * public URL serves it to the control plane. Edges near other viewers can lag
+ * a few seconds more, so `plat deploy` repeats the check from the machine it
+ * runs on (`packages/cli/src/edge.ts`) before it returns.
  */
 import { HEALTH_PATH } from '@ericminassian/platform-core';
 

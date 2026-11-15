@@ -206,7 +206,8 @@ control plane ─ worker job "deploy" ─ engine.deployStage():
    role → log groups → table → queues/DLQs → bus/rules → Cognito client → worker Lambda
    → ESMs/rules targets/schedules → static files → Web Function revision → endpoint weights
    → resource policy → KVS route (last step)
-CI polls, streams events, comments the URL on the PR.
+CI polls, streams events, waits until its nearest edge serves the deployment,
+comments the URL on the PR.
 ```
 
 - The API accepts a deploy from CI only if the token's `repository` matches
@@ -411,7 +412,9 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
   - The `x-platform-host` cache key keeps two hosts' responses apart.
   - KVS route changes reach the edge in roughly 5–15 s. The deployer waits
     for `/__platform/health` to report the new revision before calling a
-    deployment live.
+    deployment live. Edges elsewhere can still serve the previous version for
+    a few seconds after that, so `plat deploy` then waits until the edge
+    nearest the runner serves the new revision and the built `index.html`.
   - Measured on the template app: first deploy ~25 s, redeploy ~14 s,
     rollback ~8 s at the edge. A Web Function cold start took ~0.4 s, peaking
     at 182 MB.
