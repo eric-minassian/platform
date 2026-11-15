@@ -370,40 +370,6 @@ export function controlPlanePolicy(input: {
   return policy(...statements);
 }
 
-/** Trust for the platform repo's CI role: GitHub Actions OIDC, main branch only. */
-/**
- * Trust GitHub Actions on `main` of one repo. Accepts both OIDC subject
- * formats: the legacy `repo:<owner>/<repo>:...` and GitHub's immutable
- * `repo:<owner>@<ownerId>/<repo>@<repoId>:...`, which repos created since the
- * immutable-subject change use. Trusting both keeps CI working if the repo
- * setting is ever toggled.
- */
-export function githubCiTrustPolicy(input: {
-  accountId: string;
-  owner: string;
-  repo: string;
-  ownerId: number;
-  repoId: number;
-}): PolicyDocument {
-  const ref = 'ref:refs/heads/main';
-  return policy({
-    Effect: 'Allow',
-    Principal: {
-      Federated: `arn:aws:iam::${input.accountId}:oidc-provider/token.actions.githubusercontent.com`,
-    },
-    Action: 'sts:AssumeRoleWithWebIdentity',
-    Condition: {
-      StringEquals: {
-        'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com',
-        'token.actions.githubusercontent.com:sub': [
-          `repo:${input.owner}/${input.repo}:${ref}`,
-          `repo:${input.owner}@${input.ownerId}/${input.repo}@${input.repoId}:${ref}`,
-        ],
-      },
-    },
-  });
-}
-
 export function serviceTrustPolicy(...services: string[]): PolicyDocument {
   return policy({ Effect: 'Allow', Principal: { Service: services }, Action: 'sts:AssumeRole' });
 }

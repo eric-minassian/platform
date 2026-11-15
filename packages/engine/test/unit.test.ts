@@ -1,7 +1,6 @@
 import { type PlatformRuntimeConfig, parseManifest } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { fixTimestamps } from '../src/compat.ts';
-import { deepMerge, routerCachePolicy } from '../src/drivers/cloudfront.ts';
 import { snapRetention } from '../src/drivers/logs.ts';
 import { cacheControlFor, contentTypeFor, hostFor, policies } from '../src/index.ts';
 
@@ -87,14 +86,6 @@ describe('stage role policy', () => {
     expect(create?.Condition).toEqual({ StringEquals: { 'iam:PermissionsBoundary': 'arn:b' } });
     expect(create?.Resource).toBe('arn:aws:iam::1:role/platform/apps/*');
   });
-
-  it('pins CI trust to the main branch of the platform repo, in both OIDC subject formats', () => {
-    const t = policies.githubCiTrustPolicy({ accountId: '1', owner: 'o', repo: 'r', ownerId: 7, repoId: 42 });
-    expect(t.Statement[0]?.Condition?.StringEquals?.['token.actions.githubusercontent.com:sub']).toEqual([
-      'repo:o/r:ref:refs/heads/main',
-      'repo:o@7/r@42:ref:refs/heads/main',
-    ]);
-  });
 });
 
 describe('static assets', () => {
@@ -134,35 +125,5 @@ describe('misc', () => {
     expect(snapRetention(7)).toBe(7);
     expect(snapRetention(10)).toBe(14);
     expect(snapRetention(99999)).toBe(3653);
-  });
-  it('keys the router cache on the platform host header', () => {
-    const p = routerCachePolicy('platform-default');
-    expect(p.ParametersInCacheKeyAndForwardedToOrigin?.HeadersConfig?.Headers?.Items).toContain(
-      'x-platform-host',
-    );
-    expect(p.MinTTL).toBe(0);
-  });
-});
-
-describe('distribution config merge', () => {
-  it('keeps fields CloudFront requires that the desired config omits', () => {
-    const current = {
-      Enabled: true,
-      DefaultCacheBehavior: { TargetOriginId: 'sites', SmoothStreaming: false, Compress: true },
-      Origins: { Quantity: 1, Items: [{ Id: 'sites', ConnectionAttempts: 3, DomainName: 'old' }] },
-    };
-    const desired = {
-      DefaultCacheBehavior: { TargetOriginId: 'sites', Compress: true },
-      Origins: { Quantity: 1, Items: [{ Id: 'sites', DomainName: 'new' }] },
-    };
-    expect(deepMerge(current, desired)).toEqual({
-      Enabled: true,
-      DefaultCacheBehavior: { TargetOriginId: 'sites', SmoothStreaming: false, Compress: true },
-      Origins: { Quantity: 1, Items: [{ Id: 'sites', ConnectionAttempts: 3, DomainName: 'new' }] },
-    });
-  });
-
-  it('replaces arrays whose length changed and ignores undefined', () => {
-    expect(deepMerge({ a: [1, 2], b: 1 }, { a: [3], b: undefined })).toEqual({ a: [3], b: 1 });
   });
 });

@@ -1,5 +1,3 @@
-export * from './acm.ts';
-export * from './cloudfront.ts';
 export * from './cognito.ts';
 export * from './dynamodb.ts';
 export * from './events.ts';
@@ -7,10 +5,8 @@ export * from './iam.ts';
 export * from './kvs.ts';
 export * from './lambda.ts';
 export * from './logs.ts';
-export * from './route53.ts';
 export * from './s3.ts';
 export * from './scheduler.ts';
-export * from './sns.ts';
 export * from './sqs.ts';
 export * from './ssm.ts';
 export * from './web-function.ts';

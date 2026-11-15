@@ -14,7 +14,8 @@
     "format": "biome check --write .",
     "build": "pnpm -r build",
     "plat": "node packages/cli/src/bin.ts",
-    "platform:deploy": "pnpm --filter @ericminassian/platform-foundation deploy:platform"
+    "platform:deploy": "pnpm --filter @ericminassian/platform-foundation deploy:platform",
+    "platform:diff": "pnpm --filter @ericminassian/platform-foundation run diff"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.7",

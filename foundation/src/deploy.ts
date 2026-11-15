@@ -1,125 +1,160 @@
 /**
- * Apply the platform's shared resources, in order, with the engine's
- * idempotent drivers (no CloudFormation, no state file). Safe to re-run.
+ * Deploy the platform itself, in three phases. Safe to re-run.
  *
- *   node src/deploy.ts            # apply against AWS (admin credentials)
- *   node src/deploy.ts --plan     # print the steps, touch nothing
- *   node src/deploy.ts --emulator # apply against a throwaway AWS Emulator
- *   node src/deploy.ts --only iam,parameters
+ *  1. foundation     the platform-foundation stack (CDK), plus the session
+ *                    key, a generated secret CloudFormation can't hold
+ *  2. control-plane  services/control-plane as the `platform` app, through
+ *                    the engine like any other app
+ *  3. telemetry      the account-level log subscription, which targets the
+ *                    control plane's worker and so comes after it
+ *
+ *   node src/deploy.ts                       # everything (admin credentials)
+ *   node src/deploy.ts --only control-plane  # a subset of phases
  *
  * See docs/SETUP.md for the one-time manual steps around it.
  */
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { CloudFormationClient, DescribeStacksCommand } from '@aws-sdk/client-cloudformation';
+import {
+  names,
+  type PlatformRuntimeConfig,
+  PROD_STAGE,
+  platformNames,
+  TELEMETRY_FILTER_PATTERN,
+} from '@ericminassian/platform-core';
 import {
   createEngine,
-  type EmulatorConnection,
+  type EngineContext,
   type EngineLogEntry,
   engineContext,
-  errorName,
-  isNotImplemented,
-  startEmulator,
+  ensureAccountSubscriptionFilter,
+  ensureParameterOnce,
+  ensurePermission,
+  getParameter,
 } from '@ericminassian/platform-engine';
 import config from '../../platform.config.ts';
-import { BlockedError, type FoundationContext } from './context.ts';
-import { STEPS } from './steps.ts';
+import { deployControlPlane } from './control-plane.ts';
+import { CONTROL_PLANE_APP, FOUNDATION_STACK } from './stack.ts';
 
-const args = process.argv.slice(2);
-const flag = (name: string) => args.includes(`--${name}`);
-const option = (name: string) => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 ? args[i + 1] : undefined;
-};
+const PHASES = ['foundation', 'control-plane', 'telemetry'] as const;
+type Phase = (typeof PHASES)[number];
 
-const plan = flag('plan');
-const emulator = flag('emulator');
-const only = option('only')?.split(',');
+const foundationDir = fileURLToPath(new URL('..', import.meta.url));
 const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
+
+function parsePhases(args: string[]): Phase[] {
+  const i = args.indexOf('--only');
+  if (i < 0) return [...PHASES];
+  const wanted = (args[i + 1] ?? '').split(',').filter(Boolean);
+  const unknown = wanted.filter((p) => !(PHASES as readonly string[]).includes(p));
+  if (!wanted.length || unknown.length)
+    throw new Error(`--only takes a comma-separated list of: ${PHASES.join(', ')}`);
+  return PHASES.filter((p) => wanted.includes(p));
+}
 
 function printEngineLog(e: EngineLogEntry) {
   const mark = e.level === 'error' ? '✗' : e.level === 'warn' ? '!' : '·';
   console.log(`    ${mark} ${e.msg}${e.resource ? `  (${e.resource})` : ''}`);
 }
 
-async function main(): Promise<number> {
-  const steps = STEPS.filter((s) => !only || only.includes(s.id));
-  if (plan) {
-    console.log(`Foundation plan for ${config.domain} (${config.region}):`);
-    for (const [i, s] of steps.entries()) {
-      console.log(
-        `  ${String(i + 1).padStart(2)}. ${s.id.padEnd(14)} ${s.describe(config)}${s.awsOnly ? '  [AWS only]' : ''}`,
-      );
-    }
-    return 0;
-  }
-
-  let conn: EmulatorConnection | undefined;
+async function describeStack() {
+  const cfn = new CloudFormationClient({ region: config.region });
   try {
-    if (emulator) conn = await startEmulator({ region: config.region, idleTimeoutSeconds: 600 });
-    const engine = createEngine({
-      region: config.region,
-      ...(conn
-        ? { emulator: { endpoint: conn.endpoint, caFile: conn.caFile, credentials: conn.credentials } }
-        : {}),
-      log: printEngineLog,
-    });
-    const f: FoundationContext = {
-      config,
-      engine,
-      ctx: engineContext(engine),
-      emulator,
-      repoRoot,
-      env: {
-        ...(process.env.DNS_DELEGATION_ROLE_ARN
-          ? { dnsDelegationRoleArn: process.env.DNS_DELEGATION_ROLE_ARN }
-          : {}),
-        ...(process.env.ALERT_EMAIL ? { alertEmail: process.env.ALERT_EMAIL } : {}),
-      },
-      state: {},
-      log: (msg) => console.log(`    ${msg}`),
-    };
-
-    for (const step of steps) {
-      if (emulator && step.awsOnly) {
-        console.log(`- ${step.id}: skipped on the emulator`);
-        continue;
-      }
-      console.log(`▸ ${step.id}: ${step.describe(config)}`);
-      try {
-        await step.run(f);
-      } catch (e) {
-        if (e instanceof BlockedError) {
-          console.error(`\n⏸  ${step.id} is blocked:\n\n${e.message}\n`);
-          return 2;
-        }
-        if (emulator && (isNotImplemented(e) || errorName(e) === 'UnknownOperationException')) {
-          console.log(`    ! not supported by the emulator, continuing: ${(e as Error).message}`);
-          continue;
-        }
-        console.error(`\n✗ ${step.id} failed: ${(e as Error).stack ?? e}`);
-        return 1;
-      }
-    }
-
-    console.log('\nFoundation is up to date.');
-    const s = f.state;
-    const summary: Record<string, string | undefined> = {
-      account: s.accountId,
-      distribution: s.distribution ? `${s.distribution.id} (${s.distribution.domainName})` : undefined,
-      userPool: s.userPoolId,
-      controlPlaneRole: s.controlPlaneRoleArn,
-      ciRole: s.ciRoleArn,
-      controlPlaneWorker: s.controlPlaneWorkerArn,
-    };
-    for (const [k, v] of Object.entries(summary)) if (v) console.log(`  ${k.padEnd(19)} ${v}`);
-    if (s.ciRoleArn && s.accountId && !emulator)
-      console.log(
-        `\nCI (deploy-platform.yml) assumes ${s.ciRoleArn}; it needs repository variable` +
-          ` AWS_ACCOUNT_ID=${s.accountId} on ${config.github.owner}/${config.github.repo} (docs/SETUP.md step 2).`,
-      );
-    return 0;
-  } finally {
-    await conn?.stop();
+    return (await cfn.send(new DescribeStacksCommand({ StackName: FOUNDATION_STACK }))).Stacks?.[0];
+  } catch (e) {
+    if (/does not exist/.test((e as Error).message)) return undefined;
+    throw e;
   }
 }
 
-process.exitCode = await main();
+/** `cdk deploy` with the CLI pinned in this package. */
+async function deployStack(): Promise<void> {
+  const cdk = createRequire(import.meta.url).resolve('aws-cdk/bin/cdk');
+  const args = [cdk, 'deploy', FOUNDATION_STACK, '--require-approval', 'never', '--progress', 'events'];
+  // The template is the source of truth: a drift-aware change set also undoes
+  // changes made outside it (console edits). CloudFormation only offers it
+  // for stacks that already exist.
+  if (await describeStack()) args.push('--revert-drift');
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const child = spawn(process.execPath, args, { cwd: foundationDir, stdio: 'inherit' });
+    child.on('error', reject);
+    child.on('exit', resolve);
+  });
+  if (code !== 0) throw new Error(`cdk deploy exited with ${code}`);
+}
+
+async function stackOutput(key: string): Promise<string> {
+  const value = (await describeStack())?.Outputs?.find((o) => o.OutputKey === key)?.OutputValue;
+  if (!value) throw new Error(`stack ${FOUNDATION_STACK} has no output ${key}; deploy the foundation first`);
+  return value;
+}
+
+async function runtimeConfig(ctx: EngineContext): Promise<PlatformRuntimeConfig> {
+  const raw = await getParameter(ctx, platformNames.runtimeConfigParameter);
+  if (!raw)
+    throw new Error(`${platformNames.runtimeConfigParameter} is missing; deploy the foundation first`);
+  return JSON.parse(raw) as PlatformRuntimeConfig;
+}
+
+async function main(): Promise<void> {
+  const phases = parsePhases(process.argv.slice(2));
+  const engine = createEngine({ region: config.region, log: printEngineLog });
+  const ctx = engineContext(engine);
+
+  if (phases.includes('foundation')) {
+    console.log(`▸ foundation: stack ${FOUNDATION_STACK}`);
+    await deployStack();
+    await ensureParameterOnce(ctx, {
+      name: platformNames.sessionKeyParameter,
+      secure: true,
+      description: 'HMAC key for platform sessions and CLI tokens',
+      generate: () => randomBytes(32).toString('base64url'),
+    });
+  }
+
+  if (phases.includes('control-plane')) {
+    console.log(`▸ control-plane: app "${CONTROL_PLANE_APP}" (stage ${PROD_STAGE})`);
+    const result = await deployControlPlane({
+      engine,
+      ctx,
+      config,
+      runtime: await runtimeConfig(ctx),
+      roleArn: await stackOutput('ControlPlaneRoleArn'),
+      repoRoot,
+    });
+    console.log(`    control plane ${result.deploymentId} → ${result.url}`);
+  }
+
+  if (phases.includes('telemetry')) {
+    console.log('▸ telemetry: account-level log subscription → control plane worker');
+    const runtime = await runtimeConfig(ctx);
+    const workerArn = runtime.telemetryFunctionArn;
+    if (!workerArn) throw new Error('runtime config has no telemetryFunctionArn');
+    await ensurePermission(ctx, {
+      functionName: workerArn,
+      statementId: 'cloudwatch-logs-account-subscription',
+      principal: 'logs.amazonaws.com',
+      action: 'lambda:InvokeFunction',
+      sourceArn: `arn:aws:logs:${runtime.region}:${runtime.accountId}:log-group:*`,
+    });
+    // The processor's own log group is excluded so it can't feed itself.
+    await ensureAccountSubscriptionFilter(ctx, {
+      name: 'platform-telemetry',
+      destinationArn: workerArn,
+      filterPattern: TELEMETRY_FILTER_PATTERN,
+      excludeLogGroups: [names.logGroup(CONTROL_PLANE_APP, PROD_STAGE, 'worker')],
+    });
+  }
+
+  console.log('\nPlatform is up to date.');
+}
+
+try {
+  await main();
+} catch (e) {
+  console.error(`\n✗ ${(e as Error).stack ?? e}`);
+  process.exitCode = 1;
+}

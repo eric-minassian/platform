@@ -1,8 +1,8 @@
-# Deploys the platform itself (shared resources + control plane) after CI
-# passes on main. Uses the `platform-ci` role, trusted only for this repo's main
-# branch (no GitHub environment here: that would change the OIDC subject the
-# role trusts). Account-specific values live in repository variables, not in
-# this public repo.
+# Deploys the platform itself (the platform-foundation CDK stack, then the
+# control plane) after CI passes on main. Uses the `platform-ci` role, trusted
+# only for this repo's main branch (no GitHub environment here: that would
+# change the OIDC subject the role trusts). Account-specific values live in
+# repository variables, not in this public repo.
 name: deploy-platform
 
 on:
@@ -39,6 +39,11 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/platform/platform-ci
           aws-region: us-east-1
+      - name: Diff the foundation stack
+        env:
+          DNS_DELEGATION_ROLE_ARN: ${{ vars.DNS_DELEGATION_ROLE_ARN }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+        run: pnpm platform:diff
       - name: Deploy the platform
         env:
           DNS_DELEGATION_ROLE_ARN: ${{ vars.DNS_DELEGATION_ROLE_ARN }}
