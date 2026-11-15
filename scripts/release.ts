@@ -7,11 +7,9 @@
  *   node scripts/release.ts --dry-run     # pack and `npm publish --dry-run`
  *
  * pnpm packs (it rewrites `workspace:` ranges and applies `publishConfig`);
- * the npm CLI publishes. pnpm requests its OIDC token with the audience
- * `npm:registry`, npm expects `npm:registry.npmjs.org`, and the registry
- * answers "OIDC permission denied for this action".
+ * the npm CLI publishes, since npm documents trusted publishing for its own CLI.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +41,21 @@ function onNpm(name: string, version: string): boolean {
   }
 }
 
-/** Exchanges this job's OIDC token for a publish token exactly as `npm publish` does, then discards it. */
+/** The one-time fix for a package whose trusted publisher is missing or can't `npm publish`. */
+function trustFix(name: string): string {
+  return (
+    `Recreate its trusted publisher with \`npm publish\` allowed: \`npm trust list ${name}\`, ` +
+    `\`npm trust revoke ${name} --id <id>\`, then \`npm trust github ${name} --file release.yml ` +
+    `--repo eric-minassian/platform --allow-publish\` (docs/SETUP.md step 10).`
+  );
+}
+
+/**
+ * Exchanges this job's OIDC token for a publish token exactly as `npm publish`
+ * does, then discards it. This proves the trusted publisher matches this
+ * workflow, not that it may `npm publish`: the exchange also succeeds for a
+ * publisher that only allows `npm stage publish`.
+ */
 async function checkTrust(name: string): Promise<void> {
   const url = process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
   const bearer = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
@@ -63,12 +75,36 @@ async function checkTrust(name: string): Promise<void> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string };
     throw new Error(
-      `trusted publishing is not set up for ${name} (${res.status} ${body.message ?? body.error ?? ''}). ` +
-        `On npmjs.com → ${name} → Settings → Trusted publishing, add GitHub Actions with ` +
-        `repository eric-minassian/platform and workflow release.yml (docs/SETUP.md step 10).`,
+      `npm has no trusted publisher for ${name} that matches this workflow ` +
+        `(${res.status} ${body.message ?? body.error ?? ''}). ${trustFix(name)}`,
     );
   }
-  console.log(`✓ trusted publishing works for ${name}`);
+  console.log(`✓ npm accepts this workflow's OIDC token for ${name}`);
+}
+
+function publish(tarball: string, name: string): void {
+  const res = spawnSync(
+    'npm',
+    [
+      'publish',
+      tarball,
+      '--access',
+      'public',
+      '--registry',
+      REGISTRY,
+      ...(dryRun ? ['--dry-run'] : ['--provenance']),
+    ],
+    { encoding: 'utf8', stdio: ['ignore', 'inherit', 'pipe'] },
+  );
+  if (res.error) throw res.error;
+  process.stderr.write(res.stderr);
+  if (res.status === 0) return;
+  // The registry's answer when the publisher matched but isn't allowed to `npm publish`:
+  // publishers created since 2026-09-03 allow only `npm stage publish` unless told otherwise.
+  if (res.stderr.includes('OIDC permission denied')) {
+    throw new Error(`npm refused to publish ${name} with this workflow's OIDC token. ${trustFix(name)}`);
+  }
+  throw new Error(`npm publish failed for ${name} (exit ${res.status ?? res.signal})`);
 }
 
 const pending = packages.filter((p) => {
@@ -92,18 +128,6 @@ for (const p of pending) {
     encoding: 'utf8',
   });
   const tarball = packed.trim().split('\n').pop()!;
-  execFileSync(
-    'npm',
-    [
-      'publish',
-      tarball,
-      '--access',
-      'public',
-      '--registry',
-      REGISTRY,
-      ...(dryRun ? ['--dry-run'] : ['--provenance']),
-    ],
-    { stdio: 'inherit' },
-  );
+  publish(tarball, p.name);
   console.log(`✓ ${dryRun ? 'would publish' : 'published'} ${p.name}@${p.version}`);
 }

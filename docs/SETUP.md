@@ -183,11 +183,23 @@ exists, so:
 
 1. Publish once by hand from an up-to-date `main`: `npm login`, then
    `pnpm -r --filter './packages/*' publish --access public`.
-2. On npmjs.com, add a trusted publisher to each package: GitHub Actions,
-   repository `eric-minassian/platform`, workflow `release.yml`.
-3. Later releases: bump the package versions, merge, then run the `release`
-   workflow. It publishes only versions that aren't on npm yet, and checks
-   trusted publishing for every package first (`scripts/release.ts`).
+2. Add a trusted publisher to each package that allows `npm publish` (npm
+   ≥ 11.15, account 2FA):
+
+   ```sh
+   for p in @ericminassian/platform-core @ericminassian/platform @ericminassian/platform-engine @ericminassian/plat; do
+     npm trust github "$p" --file release.yml --repo eric-minassian/platform --allow-publish --yes
+   done
+   ```
+
+   On npmjs.com this is "npm publish" under Allowed actions, which is off by
+   default: a publisher that only allows `npm stage publish` passes the
+   workflow's token check and then fails the publish with "OIDC permission
+   denied for this action". A publisher can't be edited; `npm trust revoke`
+   it and add it again.
+3. Release within 2 days of adding the publishers, or npm expires them: bump
+   the package versions, merge, then run the `release` workflow. It publishes
+   only versions that aren't on npm yet (`scripts/release.ts`).
 
 ## 11. Smoke test
 
