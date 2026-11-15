@@ -6,7 +6,7 @@ import {
   resetPlatform,
   useTestBindings,
 } from '@ericminassian/platform/testing';
-import { Context, Effect, Layer } from 'effect';
+import { Context, Effect, Layer, Schema } from 'effect';
 import { FetchHttpClient, HttpClient, HttpClientRequest } from 'effect/http';
 import { HttpApiClient } from 'effect/http-api';
 import { afterEach, beforeEach } from 'vitest';
@@ -126,7 +126,11 @@ describe('api', () => {
       const { fetch } = yield* setup;
       const res = yield* Effect.promise(() => fetch(post(JSON.stringify({ title: '  Buy milk ' }))));
       assert.strictEqual(res.status, 201);
-      assert.strictEqual(((yield* Effect.promise(() => res.json())) as { title: string }).title, 'Buy milk');
+      // Decoded with a plain string, not `Todo`: its `Title` would trim the response again.
+      const created = yield* Effect.promise(() => res.json()).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(Schema.Struct({ title: Schema.String }))),
+      );
+      assert.strictEqual(created.title, 'Buy milk');
     }),
   );
 

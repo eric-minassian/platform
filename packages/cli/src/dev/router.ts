@@ -150,9 +150,8 @@ export interface LocalRouterOptions {
 }
 
 export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
-  const server = createServer(async (req, res) => {
+  const route = async (req: IncomingMessage, res: ServerResponse) => {
     const started = Date.now();
-    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     let kind = 'intercept';
     res.once('finish', () =>
       opts.onRequest?.({
@@ -163,33 +162,35 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
         kind,
       }),
     );
-    try {
-      for (const fn of opts.intercept ?? []) if (await fn(req, res, url)) return;
-      const d = localDecision(opts.state(), req.url ?? '/');
-      kind = d.kind;
-      switch (d.kind) {
-        case 'server':
-          return proxy(req, res, d.target, true);
-        case 'webdev':
-          return proxy(req, res, d.target, false);
-        case 'file':
-          return serveFile(res, d.path);
-        case 'health':
-          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-          return res.end(JSON.stringify(d.body));
-        case 'realtime':
-          // A WebSocket arrives as an `upgrade` (below); anything else reads the config.
-          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-          return res.end(JSON.stringify(d.realtime.config));
-        case 'unavailable':
-          return text(res, 503, `${d.reason}\n`);
-        case 'notfound':
-          return text(res, 404, 'Not found\n');
-      }
-    } catch (err) {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    for (const fn of opts.intercept ?? []) if (await fn(req, res, url)) return;
+    const d = localDecision(opts.state(), req.url ?? '/');
+    kind = d.kind;
+    switch (d.kind) {
+      case 'server':
+        return proxy(req, res, d.target, true);
+      case 'webdev':
+        return proxy(req, res, d.target, false);
+      case 'file':
+        return serveFile(res, d.path);
+      case 'health':
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify(d.body));
+      case 'realtime':
+        // A WebSocket arrives as an `upgrade` (below); anything else reads the config.
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+        return res.end(JSON.stringify(d.realtime.config));
+      case 'unavailable':
+        return text(res, 503, `${d.reason}\n`);
+      case 'notfound':
+        return text(res, 404, 'Not found\n');
+    }
+  };
+  const server = createServer((req, res) => {
+    route(req, res).catch((err: unknown) => {
       if (!res.headersSent) text(res, 502, `plat dev router error: ${(err as Error).message}\n`);
       else res.destroy();
-    }
+    });
   });
 
   server.on('upgrade', (req, socket, head) => {

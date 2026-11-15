@@ -114,7 +114,7 @@ function publicRequest(incoming: Request): Request {
     signal: incoming.signal,
     redirect: incoming.redirect,
     ...(hasBody ? { body: incoming.body, duplex: 'half' } : {}),
-  } as RequestInit);
+  });
 }
 
 async function platformRoute(request: Request): Promise<Response> {
@@ -190,7 +190,7 @@ export async function startServer(handler: FetchHandlerLike): Promise<{ close():
     // Web Functions allow ~1 s for cleanup after SIGTERM.
     const force = setTimeout(() => process.exit(0), 900);
     force.unref();
-    close().then(() => process.exit(0));
+    void close().then(() => process.exit(0));
   });
   process.on('unhandledRejection', (reason) => emitError(toError(reason), 'unhandled'));
   return { close };

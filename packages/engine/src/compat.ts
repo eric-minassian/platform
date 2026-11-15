@@ -14,7 +14,7 @@ export function addEmulatorCompat(client: {
   const middleware =
     (next: (args: unknown) => Promise<{ response?: { body?: unknown } }>) => async (args: unknown) => {
       const out = await next(args);
-      const res = out.response as { body?: unknown } | undefined;
+      const res = out.response;
       const body = res?.body as AsyncIterable<Uint8Array> | undefined;
       if (
         res &&
@@ -51,7 +51,7 @@ export function fixTimestamps(json: string): string {
     if (!o || typeof o !== 'object') return;
     const rec = o as Record<string, unknown>;
     for (const [k, v] of Object.entries(rec)) {
-      if (/At$/.test(k) && typeof v === 'number') {
+      if (k.endsWith('At') && typeof v === 'number') {
         rec[k] = new Date(v < 1e12 ? v * 1000 : v).toISOString();
       } else {
         visit(v);

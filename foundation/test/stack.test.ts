@@ -9,7 +9,9 @@ import { FOUNDATION_STACK, FoundationStack } from '../src/stack.ts';
 const account = '123456789012';
 const delegationRole = 'arn:aws:iam::210987654321:role/route53-delegation-platform-ericminassian-com';
 // The feature flags `cdk synth` runs with, so the template matches a real deploy.
-const { context } = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.url), 'utf8'));
+const { context } = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.url), 'utf8')) as {
+  context: Record<string, unknown>;
+};
 
 function synth(alertEmail?: string): Template {
   const stack = new FoundationStack(new App({ context }), FOUNDATION_STACK, {
@@ -102,17 +104,19 @@ describe('foundation stack', () => {
     });
 
     it('lets the authorizer read stage keys and nothing else', () => {
-      const policies = template.findResources('AWS::IAM::Policy');
+      const policies = template.findResources('AWS::IAM::Policy') as Record<
+        string,
+        {
+          Properties: {
+            Roles: Array<{ Ref?: string }>;
+            PolicyDocument: { Statement: Array<{ Action: string; Resource: unknown }> };
+          };
+        }
+      >;
       const statements = Object.values(policies)
-        .filter((p) =>
-          (p.Properties.Roles as Array<{ Ref?: string }>).some((r) =>
-            r.Ref?.startsWith('RealtimeAuthorizer'),
-          ),
-        )
-        .flatMap(
-          (p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string; Resource: unknown }>,
-        );
-      expect(statements.map((s) => s.Action).sort()).toEqual(['kms:Decrypt', 'ssm:GetParameter']);
+        .filter((p) => p.Properties.Roles.some((r) => r.Ref?.startsWith('RealtimeAuthorizer')))
+        .flatMap((p) => p.Properties.PolicyDocument.Statement);
+      expect(statements.map((s) => s.Action).toSorted()).toEqual(['kms:Decrypt', 'ssm:GetParameter']);
       const ssm = statements.find((s) => s.Action === 'ssm:GetParameter');
       expect(JSON.stringify(ssm?.Resource)).toContain(':parameter/platform/apps/*/*/stage-key');
     });
@@ -232,7 +236,11 @@ describe('foundation stack', () => {
 
   it('publishes the runtime config, including the control plane worker deployed after it', () => {
     const id = logicalId('AWS::SSM::Parameter', { Name: platformNames.runtimeConfigParameter });
-    const value = template.toJSON().Resources[id].Properties.Value as { 'Fn::Join': [string, unknown[]] };
+    const resources = template.toJSON().Resources as Record<
+      string,
+      { Properties: { Value: { 'Fn::Join': [string, unknown[]] } } }
+    >;
+    const value = resources[id]!.Properties.Value;
     const parts = value['Fn::Join'][1];
     const literal = parts.filter((p) => typeof p === 'string').join('');
     for (const key of ['artifactsBucket', 'kvsArn', 'distributionArn', 'userPoolId', 'boundaryPolicyArn'])

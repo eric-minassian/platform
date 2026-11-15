@@ -49,7 +49,7 @@ form {
   display: flex;
   gap: 8px;
 }
-input:not([type="checkbox"]) {
+input:not([type='checkbox']) {
   flex: 1;
   padding: 8px 10px;
   border: 1px solid var(--border);

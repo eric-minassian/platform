@@ -90,7 +90,7 @@ export class Store extends Context.Service<
 
       const queryAll = Effect.fnUntraced(function* (
         input: Omit<QueryCommandInput, 'TableName' | 'ExclusiveStartKey'>,
-        limit = Number.POSITIVE_INFINITY,
+        limit: number = Number.POSITIVE_INFINITY,
       ) {
         const TableName = yield* table;
         const items: Array<Record<string, unknown>> = [];
@@ -247,7 +247,7 @@ export class Store extends Context.Service<
         return Option.isSome(item) ? Option.some(yield* decodeDeployment(item.value)) : Option.none();
       }, Effect.orDie);
 
-      const listDeployments = Effect.fn('Store.listDeployments')(function* (app: string, limit = 50) {
+      const listDeployments = Effect.fn('Store.listDeployments')(function* (app: string, limit: number = 50) {
         const items = yield* queryAll(
           {
             KeyConditionExpression: 'pk = :p AND begins_with(sk, :s)',

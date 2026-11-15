@@ -1,6 +1,6 @@
 import { assert, describe, it } from '@effect/vitest';
-import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import type { AppRecord, LogLine } from '@ericminassian/platform-core';
+import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import { Effect, Ref, Stream } from 'effect';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach } from 'vitest';
@@ -46,7 +46,7 @@ const prodStage = (over: Partial<StageItem> = {}): StageItem => ({
   ...over,
 });
 
-const json = (res: Response) => Effect.promise(() => res.json() as Promise<unknown>);
+const json = (res: Response) => Effect.promise(() => res.json());
 const text = (res: Response) => Effect.promise(() => res.text());
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 
@@ -244,7 +244,7 @@ describe('authentication', () => {
       };
       assert.strictEqual(created.deployment.actor, 'ci:bob/shop');
       assert.strictEqual(created.deployment.commit, 'abc123');
-      assert.deepStrictEqual(Object.keys(created.uploads).sort(), ['manifest.json', 'static.zip']);
+      assert.deepStrictEqual(Object.keys(created.uploads).toSorted(), ['manifest.json', 'static.zip']);
 
       const staging = yield* deploy('staging');
       assert.strictEqual(staging.status, 403);
@@ -532,7 +532,7 @@ describe('stages and deployments', () => {
       };
       assert.strictEqual(deployment.status, 'awaiting_upload');
       assert.strictEqual(deployment.actor, 'bob');
-      assert.deepStrictEqual(Object.keys(uploads).sort(), ['manifest.json', 'server.zip']);
+      assert.deepStrictEqual(Object.keys(uploads).toSorted(), ['manifest.json', 'server.zip']);
       assert.deepStrictEqual(deployment.manifest.web, {
         server: 'src/server.ts',
         spa: true,
@@ -619,7 +619,7 @@ describe('stages and deployments', () => {
       const [stage] = (yield* json(
         yield* request('/v1/apps/shop/stages', { headers: yield* signIn('bob') }),
       )) as Array<Record<string, unknown>>;
-      assert.deepStrictEqual(Object.keys(stage ?? {}).sort(), [
+      assert.deepStrictEqual(Object.keys(stage ?? {}).toSorted(), [
         'app',
         'createdAt',
         'currentDeployment',

@@ -78,5 +78,5 @@ export const RealtimeClient = {
       }),
       (stop) => Effect.sync(stop),
     ),
-  ) as Stream.Stream<RealtimeStatus>,
+  ),
 };

@@ -8,8 +8,8 @@
  *   PLATFORM_DEV_USER        GitHub username to act as (skips sign-in; dev only)
  */
 import { toFetchHandler } from '@ericminassian/platform';
-import { startServer } from '@ericminassian/platform/server';
 import { BINDINGS_ENV, type Bindings, names } from '@ericminassian/platform-core';
+import { startServer } from '@ericminassian/platform/server';
 import { Layer, Option } from 'effect';
 import { DevUser } from './auth.ts';
 import { ServerLive } from './server.ts';

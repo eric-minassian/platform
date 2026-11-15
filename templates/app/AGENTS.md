@@ -21,10 +21,11 @@ reference over anything you remember about Effect 2 or 3.
    `src/domain.ts`. Decode anything from outside (queue messages, event details) with them; never cast.
 4. **Never commit secrets.** Use `plat secrets set NAME` for deployed stages and `.env.local` (git-ignored)
    for `plat dev`. Declare each name under `secrets`.
-5. **Run `pnpm typecheck && pnpm test` before you push.** CI runs the same checks, plus `plat test` when
-   `*.integration.test.ts` files exist, and after deploying it runs `pnpm test:e2e` against the stage.
-   `typecheck` includes Effect's diagnostics (an Effect that is never run, a missing `yield*`), so fix what
-   it reports.
+5. **Run `pnpm format && pnpm typecheck && pnpm lint && pnpm test` before you push.** CI runs the same
+   checks (`pnpm format:check` for formatting), plus `plat test` when `*.integration.test.ts` files exist, and
+   after deploying it runs `pnpm test:e2e` against the stage. `typecheck` includes Effect's diagnostics (an
+   Effect that is never run, a missing `yield*`) and `lint` is type-aware oxlint (a floating promise, an unsafe
+   cast), so fix what they report rather than disabling rules.
 
 ## Layout
 
@@ -210,6 +211,8 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 pnpm install
 pnpm dev                     # whole app on the AWS Emulator: http://template-app.localhost:3000
 pnpm test                    # unit tests (in-memory platform)
+pnpm lint                    # oxlint, type-aware; `pnpm lint --fix` applies safe fixes
+pnpm format                  # oxfmt (CI runs `pnpm format:check`)
 pnpm test:integration        # plat test: the real services against a throwaway emulator
 pnpm test:e2e                # browser tests against plat dev (started if needed), or BASE_URL=<url>
 plat dev run-cron cleanup    # fire a cron in the running `plat dev`

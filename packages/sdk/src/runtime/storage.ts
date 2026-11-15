@@ -1,3 +1,4 @@
+import type { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import type { StoreName } from '../register.ts';
 import { getBindings } from './bindings.ts';
@@ -41,10 +42,9 @@ async function s3() {
   return { c, m };
 }
 
-async function sign(command: unknown, expiresIn: number): Promise<string> {
+async function sign(command: GetObjectCommand | PutObjectCommand, expiresIn: number): Promise<string> {
   const [{ getSignedUrl }, c] = await Promise.all([import('@aws-sdk/s3-request-presigner'), client('s3')]);
-  // biome-ignore lint/suspicious/noExplicitAny: presigner and client generics differ across smithy versions
-  return getSignedUrl(c as any, command as any, { expiresIn });
+  return getSignedUrl(c, command, { expiresIn });
 }
 
 export function objectKey(prefix: string, key: string): string {

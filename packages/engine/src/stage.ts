@@ -567,9 +567,9 @@ async function removeWorker(ctx: EngineContext, app: string, stage: string): Pro
 export function staleStaticPrefixes(prefixes: string[], keep: Array<string | undefined>): string[] {
   const kept = new Set(keep.filter(Boolean).map((k) => `${k}/`));
   // Deployment ids sort by creation time.
-  return [...prefixes]
-    .sort()
-    .reverse()
+  return prefixes
+    .toSorted()
+    .toReversed()
     .slice(DEPLOYMENTS_KEPT)
     .filter((p) => !kept.has(p));
 }

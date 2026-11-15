@@ -46,8 +46,8 @@ describe('loadProject', () => {
   it('explains how to move from platform.json', async () => {
     const root = app({ 'platform.json': '{"name":"old-app"}' });
     await expect(loadProject(root)).rejects.toMatchObject({
-      message: expect.stringMatching(/no plat\.config\.ts found/),
-      hint: expect.stringMatching(/platform\.json is no longer read.*defineApp/),
+      message: expect.stringMatching(/no plat\.config\.ts found/) as unknown,
+      hint: expect.stringMatching(/platform\.json is no longer read.*defineApp/) as unknown,
     });
   });
 

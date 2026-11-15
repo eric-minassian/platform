@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Publishes one realtime event the way deployed code does: the SDK's Realtime
 // service, with the stage's bindings and credentials in the environment
 // (`localEnv`). Usage: node realtime-publish.ts <channel> <event JSON>

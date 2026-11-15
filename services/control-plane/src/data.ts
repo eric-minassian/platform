@@ -107,7 +107,7 @@ export class DataBrowser extends Context.Service<
           } while (ExclusiveStartKey && scanned < 5000);
           const found = [...counts]
             .map(([name, sampled]) => ({ name, sampled }))
-            .sort((a, b) => a.name.localeCompare(b.name));
+            .toSorted((a, b) => a.name.localeCompare(b.name));
           return { database: true, collections: found } satisfies DataCollections;
         },
         Effect.catchIf(noTable, () => Effect.succeed<DataCollections>({ database: false, collections: [] })),

@@ -29,8 +29,8 @@ export function RequestsTab() {
                   <Mono>{r.route}</Mono>
                 </td>
                 <td className="tabular-nums">{fmtNum(r.req)}</td>
-                <td className="tabular-nums text-warn">{r.s4xx || ''}</td>
-                <td className="tabular-nums text-bad">{r.s5xx || ''}</td>
+                <td className="text-warn tabular-nums">{r.s4xx || ''}</td>
+                <td className="text-bad tabular-nums">{r.s5xx || ''}</td>
                 <td className="tabular-nums">{fmtPct(r.req ? r.s5xx / r.req : 0)}</td>
                 <td className="tabular-nums">{fmtMs(r.p50)}</td>
                 <td className="tabular-nums">{fmtMs(r.p95)}</td>

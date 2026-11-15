@@ -57,7 +57,7 @@ export function registerLifecycle(program: Command): void {
       result({ app: r.manifest.name, files: r.files }, (v) => {
         success(`built ${v.app}`);
         return Object.entries(v.files)
-          .map(([k, p]) => `  ${k.padEnd(14)} ${relative(process.cwd(), p as string)}`)
+          .map(([k, p]) => `  ${k.padEnd(14)} ${relative(process.cwd(), p)}`)
           .join('\n');
       });
     }),
@@ -109,8 +109,7 @@ export function registerLifecycle(program: Command): void {
   ).action(
     action(async (name: string, _opts: CommonOpts, cmd: Command) => {
       // `--port` belongs to `plat dev` (the parent); commander parses it there.
-      const port =
-        (cmd.parent?.opts() as { port?: string } | undefined)?.port ?? String(PLATFORM_DEFAULTS.localPort);
+      const port = cmd.parent?.opts<{ port?: string }>().port ?? String(PLATFORM_DEFAULTS.localPort);
       const { runCronOnDev } = await import('../dev/index.ts');
       await runCronOnDev(name, parsePort(port));
       result({ cron: name, triggered: true }, () => `${pc.green('✓')} ran ${name}`);

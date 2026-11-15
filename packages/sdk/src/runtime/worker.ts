@@ -52,13 +52,13 @@ export interface LogsBatch {
 
 /** The dispatch table `createWorkerHandler` runs: one promise-returning handler per job. */
 export interface JobHandlers {
-  queues?: Record<string, (message: QueueMessage<AnyPayload>, ctx: JobContext) => unknown | Promise<unknown>>;
-  events?: Record<string, (event: PlatformEvent<AnyPayload>, ctx: JobContext) => unknown | Promise<unknown>>;
-  crons?: Record<string, (ctx: JobContext) => unknown | Promise<unknown>>;
+  queues?: Record<string, (message: QueueMessage<AnyPayload>, ctx: JobContext) => unknown>;
+  events?: Record<string, (event: PlatformEvent<AnyPayload>, ctx: JobContext) => unknown>;
+  crons?: Record<string, (ctx: JobContext) => unknown>;
   /** Direct invocations by name, e.g. the control plane's `deploy`. Return value is the invoke result. */
-  invoke?: Record<string, (payload: AnyPayload, ctx: JobContext) => unknown | Promise<unknown>>;
+  invoke?: Record<string, (payload: AnyPayload, ctx: JobContext) => unknown>;
   /** CloudWatch Logs subscription deliveries (system use). */
-  logs?: (batch: LogsBatch, ctx: JobContext) => unknown | Promise<unknown>;
+  logs?: (batch: LogsBatch, ctx: JobContext) => unknown;
 }
 
 type QueueHandlers<Out> = {
@@ -192,10 +192,10 @@ export function createWorkerHandler(
       ) as LogsBatch & {
         messageType?: string;
       };
-      if (decoded.messageType === 'CONTROL_MESSAGE') return;
+      if (decoded.messageType === 'CONTROL_MESSAGE') return undefined;
       if (!def.logs) {
         log.warn('worker received a CloudWatch Logs batch but defines no `logs` handler');
-        return;
+        return undefined;
       }
       const ctx = newContext();
       return runWithContext(ctx, () =>
@@ -215,7 +215,7 @@ export function createWorkerHandler(
       const handler = def.events?.[type];
       if (!handler) {
         log.warn(`no handler for event "${type}"`, { source: event.source });
-        return;
+        return undefined;
       }
       const env = event.detail as Partial<EventEnvelope> | undefined;
       const isEnvelope = env !== null && typeof env === 'object' && 'data' in env;
@@ -227,7 +227,7 @@ export function createWorkerHandler(
       );
       // Rethrow so Lambda's async retries and the on-failure destination apply.
       if (!r.ok) throw r.error;
-      return;
+      return undefined;
     }
 
     if (isDirect(event)) {
@@ -236,7 +236,7 @@ export function createWorkerHandler(
         if (!handler) throw new Error(`no cron handler "${event.name}"`);
         const r = await runJob('cron', event.name, event.trace, 1, lambdaCtx, (ctx) => handler(ctx));
         if (!r.ok) throw r.error;
-        return;
+        return undefined;
       }
       const handler = def.invoke?.[event.name];
       if (!handler) throw new Error(`no invoke handler "${event.name}"`);
@@ -297,7 +297,8 @@ export async function invokeJob(name: string, payload: unknown): Promise<void> {
     return;
   }
   const { InvokeCommand } = await import('@aws-sdk/client-lambda');
-  const out = await (await client('lambda')).send(
+  const lambda = await client('lambda');
+  const out = await lambda.send(
     new InvokeCommand({
       FunctionName: worker,
       InvocationType: 'Event',

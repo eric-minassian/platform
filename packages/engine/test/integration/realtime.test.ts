@@ -51,7 +51,7 @@ function signedPublish(
     host: u.host,
     'x-amz-date': now,
   };
-  const signed = Object.keys(headers).sort();
+  const signed = Object.keys(headers).toSorted();
   const hash = (s: string) => createHash('sha256').update(s).digest('hex');
   const canonical = [
     'POST',
@@ -90,9 +90,9 @@ function firstEvent(websocketUrl: string, host: string, apiKey: string, channel:
   });
   const event = new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('no event within 20 s')), 20_000);
-    ws.onopen = () => ws.send(JSON.stringify({ type: 'connection_init' }));
-    ws.onerror = () => reject(new Error('WebSocket error'));
-    ws.onmessage = (m) => {
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'connection_init' })));
+    ws.addEventListener('error', () => reject(new Error('WebSocket error')));
+    ws.addEventListener('message', (m) => {
       const msg = JSON.parse(String(m.data)) as { type: string; event?: string };
       if (msg.type === 'connection_ack')
         ws.send(JSON.stringify({ type: 'subscribe', id: 's1', channel, authorization: auth }));
@@ -103,7 +103,7 @@ function firstEvent(websocketUrl: string, host: string, apiKey: string, channel:
         // AppSync sends each event as one JSON string.
         resolve(JSON.parse(msg.event!));
       } else if (msg.type !== 'ka') reject(new Error(`unexpected ${m.data}`));
-    };
+    });
   });
   return { subscribed, event };
 }
@@ -160,7 +160,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         v: 1,
         o: platform.realtime!.realtimeDomain,
         h: platform.realtime!.httpDomain,
-        k: expect.stringMatching(/^da2-/),
+        k: expect.stringMatching(/^da2-/) as unknown,
       });
       expect((await engine.ensureRealtimePlatform(platform))?.k).toBe(entry?.k);
     });

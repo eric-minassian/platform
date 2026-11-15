@@ -24,9 +24,7 @@ import { awsLayer, memoryStore, runtime, settingsLayer } from './support.ts';
 
 /** Effect's HTTP client over a fake `fetch`. */
 const fetchLayer = (fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) =>
-  FetchHttpClient.layer.pipe(
-    Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch as typeof globalThis.fetch)),
-  );
+  FetchHttpClient.layer.pipe(Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch)));
 
 describe('uptime state', () => {
   it('needs two failures before going down and alerts once', () => {

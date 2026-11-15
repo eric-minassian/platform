@@ -31,8 +31,8 @@ describe('channels', () => {
     expect(isChannel('tile_3')).toBe(false); // AppSync has no underscores
     expect(isChannel('-x')).toBe(false);
     expect(isChannel('boards/*')).toBe(false);
-    expect(isChannel(`${'a'.repeat(50)}`)).toBe(true);
-    expect(isChannel(`${'a'.repeat(51)}`)).toBe(false);
+    expect(isChannel('a'.repeat(50))).toBe(true);
+    expect(isChannel('a'.repeat(51))).toBe(false);
 
     expect(CHANNEL_DECLARATION_PATTERN.test('boards/*')).toBe(true);
     expect(CHANNEL_DECLARATION_PATTERN.test('a/b/c/*')).toBe(true);

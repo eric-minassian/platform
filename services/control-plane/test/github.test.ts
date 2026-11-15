@@ -21,7 +21,7 @@ const github = (respond: (url: string, init: RequestInit) => Response | Promise<
   };
   const layer = GitHub.layer.pipe(
     Layer.provide(FetchHttpClient.layer),
-    Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch as typeof globalThis.fetch)),
+    Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch)),
   );
   return {
     calls,

@@ -73,10 +73,9 @@ function Items(key: { app: string; stage: string; collection: string; partition:
         <Empty>No items.</Empty>
       ) : (
         <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
-          {rows.map((item, i) => (
+          {rows.map((item) => (
             <pre
-              // biome-ignore lint/suspicious/noArrayIndexKey: items are displayed in scan order
-              key={i}
+              key={JSON.stringify(item._key)}
               className="overflow-x-auto rounded-md bg-panel-2 p-2 font-mono text-[11px]"
             >
               {JSON.stringify(item, null, 2)}
@@ -168,6 +167,13 @@ function Objects(key: { app: string; stage: string; store: string }) {
   const result = useAtomValue(atom);
   const loadMore = useAtomSet(atom);
   const objectUrl = useAtomSet(objectUrlAtom, { mode: 'promiseExit' });
+  const download = async (objectKey: string) => {
+    const exit = await objectUrl({
+      params: { app: key.app },
+      query: { stage: key.stage, store: key.store, key: objectKey },
+    });
+    if (Exit.isSuccess(exit)) window.open(exit.value.url, '_blank', 'noopener');
+  };
   if (AsyncResult.isInitial(result)) return <Spinner />;
   const loaded = loadedPages(result);
   const failed = result._tag === 'Failure' ? <ErrorBox error={result.cause} /> : null;
@@ -187,16 +193,7 @@ function Objects(key: { app: string; stage: string; store: string }) {
                   <td className="tabular-nums">{fmtBytes(obj.size)}</td>
                   <td>{relTime(obj.lastModified)}</td>
                   <td className="text-right">
-                    <Button
-                      variant="ghost"
-                      onClick={async () => {
-                        const exit = await objectUrl({
-                          params: { app: key.app },
-                          query: { stage: key.stage, store: key.store, key: obj.key },
-                        });
-                        if (Exit.isSuccess(exit)) window.open(exit.value.url, '_blank', 'noopener');
-                      }}
-                    >
+                    <Button variant="ghost" onClick={() => void download(obj.key)}>
                       Download
                     </Button>
                   </td>

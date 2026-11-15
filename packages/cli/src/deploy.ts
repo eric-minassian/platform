@@ -5,7 +5,6 @@ import type {
   DeploymentEventEntry,
   DeploymentRecord,
   DeploymentStatus,
-  ManifestInput,
   PresignedPost,
 } from '@ericminassian/platform-core';
 import pc from 'picocolors';
@@ -46,7 +45,7 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
   step(`creating deployment of ${pc.bold(app)} to ${pc.bold(stage)}`);
   const created = await api.createDeployment(app, {
     stage,
-    manifest: project.raw as ManifestInput,
+    manifest: project.raw,
     files: fileNames,
     ...git,
   });

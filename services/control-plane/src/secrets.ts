@@ -50,15 +50,18 @@ export class AppSecrets extends Context.Service<
       });
 
       const list = Effect.fn('AppSecrets.list')(function* (app: string, stage?: string) {
-        const shared = (yield* listPath(names.sharedSecretsPath(app))).map(
-          (s): SecretInfo => ({ ...s, scope: 'shared' }),
-        );
+        const shared = (yield* listPath(names.sharedSecretsPath(app))).map((s): SecretInfo => ({
+          ...s,
+          scope: 'shared',
+        }));
         const staged = stage
-          ? (yield* listPath(names.secretsPath(app, stage))).map(
-              (s): SecretInfo => ({ ...s, scope: 'stage', stage }),
-            )
+          ? (yield* listPath(names.secretsPath(app, stage))).map((s): SecretInfo => ({
+              ...s,
+              scope: 'stage',
+              stage,
+            }))
           : [];
-        return [...staged, ...shared].sort((a, b) => a.name.localeCompare(b.name));
+        return [...staged, ...shared].toSorted((a, b) => a.name.localeCompare(b.name));
       }, Effect.orDie);
 
       const put = Effect.fn('AppSecrets.put')(function* (

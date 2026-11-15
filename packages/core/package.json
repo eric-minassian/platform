@@ -2,13 +2,17 @@
   "name": "@ericminassian/platform-core",
   "version": "0.3.0",
   "description": "Shared contracts for the platform: naming, manifest schema, bindings, telemetry, routing.",
-  "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eric-minassian/platform.git",
     "directory": "packages/core"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./auth": "./src/auth.ts",
@@ -19,7 +23,6 @@
     "./router/decide.js": "./src/router/decide.js"
   },
   "publishConfig": {
-    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -46,12 +49,9 @@
         "default": "./dist/realtime.js"
       },
       "./router/decide.js": "./dist/router/decide.js"
-    }
+    },
+    "access": "public"
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && mkdir -p dist/router && cp src/router/decide.js src/router/decide.d.ts dist/router/",
     "typecheck": "tsc --noEmit",

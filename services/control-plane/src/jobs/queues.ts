@@ -87,7 +87,10 @@ export class AppQueues extends Context.Service<
             }),
           ),
         ).pipe(Effect.option);
-        for (const r of Option.match(res, { onNone: () => [], onSome: (r) => r.MetricDataResults ?? [] })) {
+        for (const r of Option.match(res, {
+          onNone: () => [],
+          onSome: (out) => out.MetricDataResults ?? [],
+        })) {
           const name = queueNames[Number(r.Id?.slice(1))];
           const latest = r.Values?.[0];
           if (name !== undefined && latest !== undefined) ages.set(name, latest);
@@ -118,15 +121,13 @@ export class AppQueues extends Context.Service<
           ],
           { concurrency: 'unbounded' },
         );
-        return rows.map(
-          ({ key, m, d }): QueueStats => ({
-            name: key,
-            visible: Option.match(m, { onNone: () => 0, onSome: (x) => x.visible }),
-            inFlight: Option.match(m, { onNone: () => 0, onSome: (x) => x.inFlight }),
-            deadLetter: Option.match(d, { onNone: () => 0, onSome: (x) => x.visible }),
-            oldestAgeSeconds: ages.get(names.queue(app, stage, key)) ?? null,
-          }),
-        );
+        return rows.map(({ key, m, d }): QueueStats => ({
+          name: key,
+          visible: Option.match(m, { onNone: () => 0, onSome: (x) => x.visible }),
+          inFlight: Option.match(m, { onNone: () => 0, onSome: (x) => x.inFlight }),
+          deadLetter: Option.match(d, { onNone: () => 0, onSome: (x) => x.visible }),
+          oldestAgeSeconds: ages.get(names.queue(app, stage, key)) ?? null,
+        }));
       });
 
       const redrive = Effect.fn('AppQueues.redrive')(function* (app: string, stage: string, queue: string) {

@@ -1,0 +1,96 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import", "node", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "options": {
+    "typeAware": true,
+    "reportUnusedDisableDirectives": "error"
+  },
+  "rules": {
+    // typescript-eslint's recommended-type-checked rules that oxlint files under `pedantic`.
+    "typescript/no-misused-promises": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/only-throw-error": "error",
+    "typescript/prefer-promise-reject-errors": "error",
+    "typescript/restrict-plus-operands": "error",
+    "typescript/no-deprecated": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error",
+    "eslint/no-unused-vars": ["error", { "ignoreRestSiblings": true }],
+    "import/no-unassigned-import": ["error", { "allow": ["**/*.css", "@aws-sdk/signature-v4a"] }],
+
+    // Deploys, pagination and retries await in sequence on purpose.
+    "eslint/no-await-in-loop": "off",
+    // Copy-and-override in `map` is the codebase's immutable style; the arrays are small.
+    "oxc/no-map-spread": "off",
+    // Effect's `_tag` and the `__platform/*` names are part of the API.
+    "eslint/no-underscore-dangle": "off",
+    // Local helpers stay next to their one caller.
+    "unicorn/consistent-function-scoping": "off",
+    // Casts narrow decoded AWS and JSON payloads; schemas validate at the boundaries.
+    "typescript/no-unsafe-type-assertion": "off"
+  },
+  "overrides": [
+    {
+      // Untyped JavaScript: every value is `any`, so the type-aware `no-unsafe-*` rules only add noise.
+      "files": ["**/*.js", "**/*.mjs", "**/*.cjs"],
+      "rules": {
+        "typescript/no-unsafe-argument": "off",
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-call": "off",
+        "typescript/no-unsafe-member-access": "off",
+        "typescript/no-unsafe-return": "off"
+      }
+    },
+    {
+      "files": ["**/web/**"],
+      "plugins": ["react", "jsx-a11y"],
+      "rules": {
+        "react/rules-of-hooks": "error",
+        // The automatic JSX runtime doesn't need React in scope.
+        "react/react-in-jsx-scope": "off"
+      }
+    },
+    {
+      "files": ["**/test/**", "**/*.test.ts"],
+      "plugins": ["vitest"],
+      "rules": {
+        "vitest/expect-expect": [
+          "error",
+          {
+            "assertFunctionNames": [
+              "expect",
+              "expectTypeOf",
+              "assert",
+              "assertType",
+              "template.hasResourceProperties",
+              "template.resourceCountIs",
+              "dbContract"
+            ]
+          }
+        ],
+        // Vitest's `expect(value, message)` labels the assertion.
+        "vitest/valid-expect": ["error", { "maxArgs": 2 }],
+        "vitest/valid-title": ["error", { "ignoreTypeOfDescribeName": true }]
+      }
+    },
+    {
+      // CDK constructs register themselves with their scope.
+      "files": ["foundation/**"],
+      "rules": {
+        "eslint/no-new": "off"
+      }
+    }
+  ]
+}

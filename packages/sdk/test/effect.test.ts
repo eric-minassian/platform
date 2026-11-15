@@ -10,6 +10,7 @@ import {
   defineWorker,
   Jobs,
   Platform,
+  type QueueMessage,
   Queues,
   Secrets,
   Storage,
@@ -34,7 +35,7 @@ afterEach(() => {
   telemetry.stop();
   resetPlatform();
 });
-const ofType = <T extends string>(t: T) => telemetry.events.filter((e) => e.t === t);
+const ofType = (t: string) => telemetry.events.filter((e) => e.t === t);
 
 describe('Db in memory', () => {
   it('behaves like DynamoDB', () =>
@@ -186,12 +187,12 @@ describe('defineWorker', () => {
           Layer.provideMerge(Platform.layerMemory()),
         ),
         queues: {
-          emails: (message, ctx) =>
-            Effect.gen(function* () {
-              if ((message.body as { fail?: boolean }).fail)
-                return yield* new Bounced({ message: 'bounced' });
-              seen.push({ body: message.body, attempt: message.attempt, trace: ctx.trace.length });
-            }),
+          emails: (message: QueueMessage<{ to?: string; fail?: boolean }>, ctx) =>
+            message.body.fail
+              ? Effect.fail(new Bounced({ message: 'bounced' }))
+              : Effect.sync(() => {
+                  seen.push({ body: message.body, attempt: message.attempt, trace: ctx.trace.length });
+                }),
         },
         invoke: { double: (payload: number) => Effect.succeed(payload * 2) },
       }),
@@ -212,10 +213,11 @@ describe('defineWorker', () => {
       defineWorker({
         layer: Platform.layerMemory(),
         logs: (batch) =>
-          Effect.gen(function* () {
-            if (batch.logGroup.endsWith('/broken')) return yield* new Bounced({ message: 'unreadable' });
-            messages.push(...batch.logEvents.map((e) => `${batch.logGroup} ${e.message}`));
-          }),
+          batch.logGroup.endsWith('/broken')
+            ? Effect.fail(new Bounced({ message: 'unreadable' }))
+            : Effect.sync(() => {
+                messages.push(...batch.logEvents.map((e) => `${batch.logGroup} ${e.message}`));
+              }),
       }),
     );
     const delivery = (logGroup: string) => ({

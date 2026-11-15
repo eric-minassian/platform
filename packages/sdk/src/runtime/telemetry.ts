@@ -140,7 +140,7 @@ export const log = {
   debug: (msg: string, fields?: Record<string, unknown>) => logAt('debug', msg, fields),
   info: (msg: string, fields?: Record<string, unknown>) => logAt('info', msg, fields),
   warn: (msg: string, fields?: Record<string, unknown>) => logAt('warn', msg, fields),
-  error: (msg: string, fields?: Record<string, unknown> | unknown) => logAt('error', msg, fields),
+  error: (msg: string, fields?: unknown) => logAt('error', msg, fields),
 };
 
 function jobOrRoute(): { route?: string; job?: string } {
@@ -184,7 +184,7 @@ export function installFetchInstrumentation(): void {
   fetchPatched = true;
   originalFetch = globalThis.fetch;
   const original = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+  globalThis.fetch = async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!currentContext()) return original(input, init);
     let name = 'fetch';
     try {
@@ -193,7 +193,7 @@ export function installFetchInstrumentation(): void {
       name = `${method.toUpperCase()} ${url.host}`;
     } catch {}
     return span('fetch', name, () => original(input, init));
-  }) as typeof fetch;
+  };
 }
 
 /**
@@ -241,7 +241,10 @@ function pretty(e: TelemetryEvent): string {
     case 'job':
       return `${c('dim', time)} ${c(e.status === 'ok' ? 'cyan' : 'red', `${e.kind}:${e.name}`)} ${e.status} ${c('dim', `${e.dur}ms`)}`;
     case 'span':
-      return `${c('dim', `${time}   ↳ ${e.op}${e.name ? ` ${e.name}` : ''} ${e.dur}ms${e.status === 'error' ? ' error' : ''}`)}`;
+      return c(
+        'dim',
+        `${time}   ↳ ${e.op}${e.name ? ` ${e.name}` : ''} ${e.dur}ms${e.status === 'error' ? ' error' : ''}`,
+      );
     case 'log': {
       const { _p, t, ts, app, stage, rev, trace, span: _s, parent, level, msg, ...rest } = e;
       const extra = Object.keys(rest).length ? ` ${c('dim', safeStringify(rest))}` : '';
@@ -249,9 +252,11 @@ function pretty(e: TelemetryEvent): string {
       return `${c('dim', time)} ${c(color, msg)}${extra}`;
     }
     case 'metric':
-      return `${c('dim', `${time} metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`)}`;
+      return c('dim', `${time} metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`);
     case 'env':
-      return `${c('dim', `${time} ${e.runtime} ${e.event}${e.initMs !== undefined ? ` (${e.initMs}ms)` : ''}`)}`;
+      return c('dim', `${time} ${e.runtime} ${e.event}${e.initMs !== undefined ? ` (${e.initMs}ms)` : ''}`);
+    default:
+      return e satisfies never;
   }
 }
 

@@ -51,7 +51,7 @@ describe('stage role policy', () => {
     manifest,
     platform: platform(),
   });
-  const bySid = Object.fromEntries(doc.Statement.map((s) => [s.Sid, s]));
+  const bySid = Object.fromEntries(doc.Statement.map((s) => [s.Sid ?? '', s] as const));
 
   it('scopes every grant to this stage', () => {
     expect(bySid.Db?.Resource).toEqual([
@@ -132,7 +132,7 @@ describe('misc', () => {
   it('fixes emulator epoch timestamps', () => {
     const fixed = JSON.parse(
       fixTimestamps('{"createdAt":1794686149,"nested":[{"updatedAt":1794686149000}],"n":5}'),
-    );
+    ) as { createdAt: string; nested: [{ updatedAt: string }]; n: number };
     expect(fixed.createdAt).toBe('2026-11-14T19:55:49.000Z');
     expect(fixed.nested[0].updatedAt).toBe('2026-11-14T19:55:49.000Z');
     expect(fixed.n).toBe(5);
@@ -225,7 +225,7 @@ function fakeAws(
     },
     DescribeKeyValueStoreCommand: () => ({ ETag: 'e1' }),
     PutKeyCommand: ({ Value }) => {
-      state.route = JSON.parse(Value);
+      state.route = JSON.parse(Value) as RouteRecord;
       return {};
     },
   };
@@ -247,7 +247,8 @@ function fakeAws(
   } as unknown as EngineContext;
   const pinned = () => Object.fromEntries([...endpoints].map(([n, e]) => [n, e.revisionId]));
   const routerArns = () =>
-    (JSON.parse(state.policy ?? '{"Statement":[]}').Statement[0]?.Resource ?? []) as string[];
+    (JSON.parse(state.policy ?? '{"Statement":[]}') as { Statement: Array<{ Resource?: string | string[] }> })
+      .Statement[0]?.Resource ?? [];
   return { ctx, calls, state, pinned, routerArns, domain };
 }
 
@@ -387,12 +388,12 @@ describe('realtime', () => {
       },
       CreateChannelNamespaceCommand: (i) => {
         if (opts.quota) throw Object.assign(new Error('quota'), { name: 'ServiceQuotaExceededException' });
-        const ns = { ...i, channelNamespaceArn: `arn:ns/${i.name}` } as ChannelNamespace;
+        const ns = { ...i, channelNamespaceArn: `arn:ns/${i.name as string}` } as ChannelNamespace;
         namespaces.set(i.name as string, ns);
         return { channelNamespace: ns };
       },
       UpdateChannelNamespaceCommand: (i) => {
-        namespaces.set(i.name as string, { ...namespaces.get(i.name as string), ...i } as ChannelNamespace);
+        namespaces.set(i.name as string, { ...namespaces.get(i.name as string), ...i });
         return {};
       },
       GetKeyCommand: () => {

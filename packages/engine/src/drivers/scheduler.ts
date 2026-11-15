@@ -58,7 +58,7 @@ export async function ensureSchedule(ctx: EngineContext, spec: ScheduleSpec): Pr
       existing
         ? sch.send(new UpdateScheduleCommand(definition))
         : sch.send(new CreateScheduleCommand(definition)),
-    { when: (e) => /assume the role|execution role/i.test(String((e as Error).message)), attempts: 12 },
+    { when: (e) => /assume the role|execution role/i.test((e as Error).message), attempts: 12 },
   );
   if (!existing) ctx.log('info', 'created schedule', `schedule ${spec.group}/${spec.name}`);
 }

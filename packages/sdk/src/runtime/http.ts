@@ -24,7 +24,7 @@ export function toRequest(req: IncomingMessage, signal?: AbortSignal): Request {
     headers,
     ...(hasBody ? { body: Readable.toWeb(req) as ReadableStream, duplex: 'half' } : {}),
     ...(signal ? { signal } : {}),
-  } as RequestInit);
+  });
 }
 
 export async function writeResponse(res: ServerResponse, response: Response): Promise<void> {
@@ -40,7 +40,7 @@ export async function writeResponse(res: ServerResponse, response: Response): Pr
     res.end();
     return;
   }
-  const reader = response.body.getReader();
+  const reader = (response.body as ReadableStream<Uint8Array>).getReader();
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -64,7 +64,9 @@ export function createNodeServer(fetchFn: FetchFn): Server {
         if (!res.headersSent) {
           res.writeHead(500, { 'content-type': 'application/json' });
           res.end(
-            JSON.stringify({ error: { code: 'internal', message: String((e as Error)?.message ?? e) } }),
+            JSON.stringify({
+              error: { code: 'internal', message: String((e as Error | undefined)?.message ?? e) },
+            }),
           );
         } else res.destroy(e as Error);
       });

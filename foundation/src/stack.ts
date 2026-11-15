@@ -252,9 +252,9 @@ export class FoundationStack extends Stack {
     // `*.<domain>` in the root zone is a CNAME to the edge host; the console
     // is the zone apex.
     const edgeTarget = route53.RecordTarget.fromAlias(new CloudFrontTarget(distribution));
-    const aliases = (id: string, recordName: string, target: route53.RecordTarget) => [
-      new route53.ARecord(this, `${id}A`, { zone, recordName, target }),
-      new route53.AaaaRecord(this, `${id}Aaaa`, { zone, recordName, target }),
+    const aliases = (prefix: string, recordName: string, target: route53.RecordTarget) => [
+      new route53.ARecord(this, `${prefix}A`, { zone, recordName, target }),
+      new route53.AaaaRecord(this, `${prefix}Aaaa`, { zone, recordName, target }),
     ];
     aliases('EdgeAlias', config.edgeHost, edgeTarget);
     const consoleAliases = aliases('ConsoleAlias', config.consoleHost, edgeTarget);

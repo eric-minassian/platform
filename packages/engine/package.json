@@ -2,29 +2,29 @@
   "name": "@ericminassian/platform-engine",
   "version": "0.3.0",
   "description": "Idempotent AWS SDK drivers that provision and deploy platform stages (no CloudFormation).",
-  "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eric-minassian/platform.git",
     "directory": "packages/engine"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "publishConfig": {
-    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
       }
-    }
+    },
+    "access": "public"
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",

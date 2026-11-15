@@ -30,11 +30,10 @@ const SIGNED: RealtimeClientConfig = {
 
 type Message = Record<string, unknown>;
 
+type Listener = { type: string; listener: (event: { data: unknown }) => void; signal: AbortSignal };
+
 class FakeSocket implements SocketLike {
-  onopen: SocketLike['onopen'] = null;
-  onmessage: SocketLike['onmessage'] = null;
-  onclose: SocketLike['onclose'] = null;
-  onerror: SocketLike['onerror'] = null;
+  private readonly listeners: Listener[] = [];
   sent: Message[] = [];
   closed = false;
   readonly url: string;
@@ -43,30 +42,36 @@ class FakeSocket implements SocketLike {
     this.url = url;
     this.protocols = protocols;
   }
+  addEventListener(type: string, listener: Listener['listener'], { signal }: { signal: AbortSignal }) {
+    this.listeners.push({ type, listener, signal });
+  }
   send(data: string) {
-    this.sent.push(JSON.parse(data));
+    this.sent.push(JSON.parse(data) as Message);
   }
   close() {
     this.closed = true;
   }
+  private dispatch(type: string, data?: unknown) {
+    for (const l of this.listeners) if (l.type === type && !l.signal.aborted) l.listener({ data });
+  }
   /** The server side: open, ack, push frames, hang up. */
   open() {
-    this.onopen?.({});
+    this.dispatch('open');
   }
   receive(message: Message | string) {
-    this.onmessage?.({ data: typeof message === 'string' ? message : JSON.stringify(message) });
+    this.dispatch('message', typeof message === 'string' ? message : JSON.stringify(message));
   }
   ack(connectionTimeoutMs = 300_000) {
     this.receive({ type: 'connection_ack', connectionTimeoutMs });
   }
   hangUp() {
     this.closed = true;
-    this.onclose?.({ code: 1000 });
+    this.dispatch('close');
   }
   /** The decoded `header-…` subprotocol. */
   header(): Record<string, string> {
     const h = this.protocols[1]!.slice('header-'.length);
-    return JSON.parse(Buffer.from(h, 'base64url').toString('utf8'));
+    return JSON.parse(Buffer.from(h, 'base64url').toString('utf8')) as Record<string, string>;
   }
 }
 
@@ -134,7 +139,9 @@ function page(options: { config?: RealtimeClientConfig; random?: number } = {}) 
   const advance = async (ms: number) => {
     const end = now + ms;
     for (;;) {
-      const due = [...timers.entries()].filter(([, t]) => t.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+      const due = [...timers.entries()]
+        .filter(([, t]) => t.at <= end)
+        .toSorted((a, b) => a[1].at - b[1].at)[0];
       if (!due) break;
       timers.delete(due[0]);
       now = due[1].at;
@@ -152,7 +159,7 @@ function page(options: { config?: RealtimeClientConfig; random?: number } = {}) 
     }
   };
   /** Delays of the pending timers, shortest first. */
-  const pendingDelays = () => [...timers.values()].map((t) => t.at - now).sort((a, b) => a - b);
+  const pendingDelays = () => [...timers.values()].map((t) => t.at - now).toSorted((a, b) => a - b);
   const setVisibility = async (state: 'visible' | 'hidden') => {
     visibility.state = state;
     for (const l of visibility.listeners) l();

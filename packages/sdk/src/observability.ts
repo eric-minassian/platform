@@ -24,7 +24,7 @@ const LEVELS: Record<LogLevel.LogLevel, Level | undefined> = {
 const platformLogger = Logger.make<unknown, void>(({ message, logLevel, cause, fiber }) => {
   const level = LEVELS[logLevel];
   if (!level) return;
-  const parts = Array.isArray(message) ? message : [message];
+  const parts: readonly unknown[] = Array.isArray(message) ? message : [message];
   const fields: Record<string, unknown> = { ...fiber.getRef(References.CurrentLogAnnotations) };
   const error = Cause.prettyErrors(cause)[0];
   if (error) fields.error = { name: error.name, message: error.message, stack: error.stack };

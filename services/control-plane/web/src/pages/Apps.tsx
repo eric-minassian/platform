@@ -79,8 +79,8 @@ export function AppsPage() {
         {apps && <span className="text-[12px] text-muted">{apps.length} apps</span>}
       </div>
       <Loaded result={result}>
-        {(apps) =>
-          apps.length === 0 ? (
+        {(list) =>
+          list.length === 0 ? (
             <div className="rounded-lg border border-border bg-panel">
               <Empty>
                 No apps yet. Create one with <Mono>plat init my-app</Mono>, then{' '}
@@ -89,7 +89,7 @@ export function AppsPage() {
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {apps.map((s) => (
+              {list.map((s) => (
                 <AppCard key={s.app.name} s={s} />
               ))}
             </div>

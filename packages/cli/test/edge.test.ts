@@ -60,7 +60,7 @@ type Answer = () => Response | Error;
 /** Serves each path's answers in order, repeating the last one. */
 function edge(answers: Record<string, Answer[]>, calls: string[] = []) {
   return (async (input: string | URL | Request) => {
-    const path = new URL(String(input)).pathname;
+    const path = new URL(input instanceof Request ? input.url : input).pathname;
     calls.push(path);
     const list = answers[path] ?? [];
     const a = (list.length > 1 ? list.shift() : list[0])?.();

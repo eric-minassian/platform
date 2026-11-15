@@ -157,7 +157,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
 
       const ctx = engineContext(engine);
       const table = await ctx.clients.dynamodb.send(new DescribeTableCommand({ TableName: 'itest--itest1' }));
-      expect((table.Table?.GlobalSecondaryIndexes ?? []).map((g) => g.IndexName).sort()).toEqual([
+      expect((table.Table?.GlobalSecondaryIndexes ?? []).map((g) => g.IndexName!).toSorted()).toEqual([
         'gsi1',
         'gsi2',
         'gsi3',
@@ -207,8 +207,8 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       const before = await engine.listStageResources('itest', stage);
       const again = await deploy();
       const after = await engine.listStageResources('itest', stage);
-      expect(after.map((r) => `${r.type}:${r.name}`).sort()).toEqual(
-        before.map((r) => `${r.type}:${r.name}`).sort(),
+      expect(after.map((r) => `${r.type}:${r.name}`).toSorted()).toEqual(
+        before.map((r) => `${r.type}:${r.name}`).toSorted(),
       );
       expect(again.bindings.revision).not.toBe('');
       expect(again.bindings.stageKey).toBe(stageKey);

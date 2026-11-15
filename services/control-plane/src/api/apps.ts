@@ -129,7 +129,7 @@ export const AppsLive = HttpApiBuilder.group(
               message: `destroy stages first: ${live.map((s) => s.stage).join(', ')}`,
             });
           }
-          yield* store.deleteApp(app.name);
+          return yield* store.deleteApp(app.name);
         }),
     });
   }),

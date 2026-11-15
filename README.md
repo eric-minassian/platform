@@ -10,6 +10,7 @@ observes them at `https://<app>.ericminassian.com`.
 
 ```sh
 pnpm install
-pnpm typecheck && pnpm test
+pnpm typecheck && pnpm lint && pnpm test
+pnpm format             # oxfmt; CI checks it with `pnpm format:check`
 pnpm test:integration   # needs the AWS Emulator (`aws-emulator` on PATH)
 ```

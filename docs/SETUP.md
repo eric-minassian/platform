@@ -196,6 +196,7 @@ exists, so:
    default; without it the workflow fails with "OIDC permission denied for
    this action". A publisher can't be edited: `npm trust revoke` it and add it
    again.
+
 3. Release within 2 days of adding the publishers, or npm expires them: bump
    the package versions, merge, then run the `release` workflow. It publishes
    only versions that aren't on npm yet.

@@ -55,7 +55,7 @@ describe('aggregate', () => {
     expect(minute!.add).toMatchObject({ req: 3, s2xx: 1, s4xx: 1, s5xx: 1, cold: 1, l0: 1, l3: 1, l7: 1 });
     expect(agg.rollups.filter((r) => r.pk.startsWith('m#'))).toHaveLength(3);
     const routes = agg.rollups.filter((r) => r.pk === 'r#todo#prod#1h');
-    expect(routes.map((r) => r.sk).sort()).toEqual([
+    expect(routes.map((r) => r.sk).toSorted()).toEqual([
       '2026-11-14T10:00:00.000Z#GET /api/todos',
       '2026-11-14T10:00:00.000Z#GET /api/todos/:id',
     ]);

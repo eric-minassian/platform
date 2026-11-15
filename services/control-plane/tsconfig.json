@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["plat.config.ts", "src", "test"],
+  "include": ["plat.config.ts", "src", "test", "vitest.config.ts"],
   "compilerOptions": {
     "plugins": [
       {

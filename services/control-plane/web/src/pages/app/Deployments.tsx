@@ -21,7 +21,7 @@ import { appChanged, useApp } from '../AppLayout.tsx';
 /** Reactivity key of an app's deployment list, on every stage. */
 const deploymentsChanged = (app: string) => [`deployments:${app}`];
 
-const inProgress: readonly DeploymentStatus[] = ['queued', 'running', 'awaiting_upload'];
+const inProgress: ReadonlySet<DeploymentStatus> = new Set(['queued', 'running', 'awaiting_upload']);
 
 const deploymentsAtom = Atom.family(({ app, stage }: { app: string; stage: string }) =>
   fresh(
@@ -37,7 +37,7 @@ const deploymentsAtom = Atom.family(({ app, stage }: { app: string; stage: strin
 // Follows a deployment's event log while it runs.
 const deploymentAtom = Atom.family((id: string) =>
   fresh(ApiClient.query('deployments', 'get', { params: { id }, timeToLive }), {
-    every: (d) => (inProgress.includes(d.status) ? '2 seconds' : undefined),
+    every: (d) => (inProgress.has(d.status) ? '2 seconds' : undefined),
   }),
 );
 const rollbackAtom = ApiClient.mutation('stages', 'rollback');
@@ -55,7 +55,7 @@ function Events({ id }: { id: string }) {
             ) : (
               d.events.map((e, i) => (
                 <div
-                  // biome-ignore lint/suspicious/noArrayIndexKey: append-only event log
+                  // oxlint-disable-next-line react/no-array-index-key -- append-only event log
                   key={i}
                   className={cx(e.level === 'error' && 'text-bad', e.level === 'warn' && 'text-warn')}
                 >

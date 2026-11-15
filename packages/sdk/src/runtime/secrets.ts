@@ -15,9 +15,8 @@ const cache = new Map<string, { value: string | undefined; at: number }>();
 async function read(path: string): Promise<string | undefined> {
   try {
     const { GetParameterCommand } = await import('@aws-sdk/client-ssm');
-    const out = await (await client('ssm')).send(
-      new GetParameterCommand({ Name: path, WithDecryption: true }),
-    );
+    const ssm = await client('ssm');
+    const out = await ssm.send(new GetParameterCommand({ Name: path, WithDecryption: true }));
     return out.Parameter?.Value;
   } catch (e) {
     if ((e as { name?: string })?.name === 'ParameterNotFound') return undefined;

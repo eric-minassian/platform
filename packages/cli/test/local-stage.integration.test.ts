@@ -154,9 +154,9 @@ describe.skipIf(!findEmulatorBinary())('local realtime on the AWS Emulator', () 
     const ws = new WebSocket(`ws://${base}${REALTIME_PATH}`, [APPSYNC_SUBPROTOCOL, `header-${header}`]);
     const received = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('no event within 20 s')), 20_000);
-      ws.onerror = () => reject(new Error('WebSocket error'));
-      ws.onopen = () => ws.send(JSON.stringify({ type: 'connection_init' }));
-      ws.onmessage = (m) => {
+      ws.addEventListener('error', () => reject(new Error('WebSocket error')));
+      ws.addEventListener('open', () => ws.send(JSON.stringify({ type: 'connection_init' })));
+      ws.addEventListener('message', (m) => {
         const msg = JSON.parse(String(m.data)) as { type: string; event?: string };
         if (msg.type === 'connection_ack')
           ws.send(
@@ -174,7 +174,7 @@ describe.skipIf(!findEmulatorBinary())('local realtime on the AWS Emulator', () 
           // AppSync carries each event as one JSON string.
           resolve(JSON.parse(msg.event!));
         } else if (msg.type.endsWith('error')) reject(new Error(String(m.data)));
-      };
+      });
     });
     try {
       expect(await received).toEqual({ stroke: 1 });

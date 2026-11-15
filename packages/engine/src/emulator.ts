@@ -96,7 +96,7 @@ export async function startEmulator(opts: StartEmulatorOptions = {}): Promise<Em
         opts.onLog?.(line);
         let parsed: { fields?: Record<string, string> } | undefined;
         try {
-          parsed = JSON.parse(line);
+          parsed = JSON.parse(line) as { fields?: Record<string, string> };
         } catch {
           return;
         }
@@ -107,8 +107,8 @@ export async function startEmulator(opts: StartEmulatorOptions = {}): Promise<Em
           resolve({ endpoint: f.endpoint_url, caFile: f.ca_file, credentialsFile });
         }
       };
-      createInterface({ input: child.stdout! }).on('line', onLine);
-      createInterface({ input: child.stderr! }).on('line', onLine);
+      createInterface({ input: child.stdout }).on('line', onLine);
+      createInterface({ input: child.stderr }).on('line', onLine);
       child.once('exit', (code) => {
         clearTimeout(timer);
         reject(new Error(`AWS Emulator exited during startup (code ${code})`));

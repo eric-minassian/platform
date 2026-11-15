@@ -59,7 +59,7 @@ describe('createPlatformFetch', () => {
     expect(res.headers.get('x-platform-trace')).toBe(trace);
     expect(res.headers.get('cache-control')).toBe('private, no-store');
     expect(await res.json()).toEqual({ id: '42', url: 'https://todo.example.com/api/todos/42' });
-    const req = tel.events.filter((e) => e.t === 'req').at(-1);
+    const req = tel.events.findLast((e) => e.t === 'req');
     expect(req).toMatchObject({
       method: 'GET',
       route: '/api/todos/:id',
@@ -154,6 +154,6 @@ describe('node http adapter', () => {
   it('parses listen endpoints', () => {
     expect(parseEndpoint('127.0.0.1:9001')).toEqual({ host: '127.0.0.1', port: 9001 });
     expect(parseEndpoint('[::1]:80')).toEqual({ host: '::1', port: 80 });
-    expect(() => parseEndpoint('nope')).toThrow();
+    expect(() => parseEndpoint('nope')).toThrow('Invalid listen endpoint "nope" (expected host:port)');
   });
 });

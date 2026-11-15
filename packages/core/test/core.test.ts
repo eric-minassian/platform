@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import { buildRouterFunctionCode } from '../src/cloudfront-function.ts';
 import {
@@ -59,7 +60,7 @@ describe('cron', () => {
     expect(toSchedulerExpression('0 9 * * 1-5')).toBe('cron(0 9 ? * 2-6 *)');
     expect(toSchedulerExpression('0 9 * * 0')).toBe('cron(0 9 ? * 1 *)');
     expect(toSchedulerExpression('rate(5 minutes)')).toBe('rate(5 minutes)');
-    expect(() => toSchedulerExpression('bad')).toThrow();
+    expect(() => toSchedulerExpression('bad')).toThrow(/must have 5 fields/);
   });
 });
 
@@ -155,7 +156,8 @@ describe('router decide', () => {
       },
     };
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' }).replace("import cf from 'cloudfront';", '');
-    const handler = new Function('cf', `${code}\nreturn handler;`)(cf) as (event: unknown) => Promise<{
+    // Its own global scope like the CloudFront runtime, with `cf` standing in for the import.
+    const handler = runInNewContext(`${code}\nhandler`, { cf }) as (event: unknown) => Promise<{
       statusCode?: number;
       headers: Record<string, { value: string }>;
       body?: string;
@@ -242,8 +244,8 @@ describe('router decide', () => {
 
 describe('telemetry', () => {
   it('computes percentiles from fixed buckets', () => {
-    const hist = new Array(13).fill(0);
-    for (const ms of [3, 8, 40, 40, 90, 200, 400, 900, 2000, 20000]) hist[latencyBucket(ms)]++;
+    const hist = Array.from({ length: 13 }, () => 0);
+    for (const ms of [3, 8, 40, 40, 90, 200, 400, 900, 2000, 20000]) hist[latencyBucket(ms)]!++;
     expect(percentile(hist, 50)).toBe(100);
     expect(percentile(hist, 95)).toBe(30000);
     expect(percentile([], 50)).toBeNull();

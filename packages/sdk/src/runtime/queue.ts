@@ -32,7 +32,8 @@ export function queue<K extends QueueName>(name: K): Queue<QueueBody<K>> {
     send: (body, opts) =>
       span('queue.send', name, async () => {
         const { SendMessageCommand } = await import('@aws-sdk/client-sqs');
-        await (await client('sqs')).send(
+        const sqs = await client('sqs');
+        await sqs.send(
           new SendMessageCommand({
             QueueUrl: queueUrl(name),
             MessageBody: JSON.stringify(body),

@@ -29,7 +29,7 @@ export function LogRows({ lines, app, search }: { lines: readonly LogLine[]; app
     <div className="divide-y divide-border/60 font-mono text-[11.5px]">
       {lines.map((l, i) => (
         <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: log lines have no stable id
+          // oxlint-disable-next-line react/no-array-index-key -- log lines have no stable id
           key={i}
           className="flex gap-3 px-1 py-1 hover:bg-panel-2"
         >
@@ -86,9 +86,14 @@ const decodeTailEvent = Schema.decodeUnknownOption(TailEvent);
 function useLiveTail(url: string) {
   const [lines, setLines] = useState<LogLine[]>([]);
   const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
+  // A new URL is a new tail: reset while rendering, so the old tail's lines never show against it.
+  const [tailing, setTailing] = useState(url);
+  if (tailing !== url) {
+    setTailing(url);
     setLines([]);
     setError(null);
+  }
+  useEffect(() => {
     const es = new EventSource(url, { withCredentials: true });
     // A dropped connection fires a plain `error` event without data, which doesn't decode.
     const onEvent = (e: Event) => {

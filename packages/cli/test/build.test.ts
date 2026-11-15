@@ -12,7 +12,12 @@ describe('buildApp', () => {
     const { manifest, files } = await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true });
 
     expect(manifest.name).toBe('basic-app');
-    expect(Object.keys(files).sort()).toEqual(['manifest.json', 'server.zip', 'static.zip', 'worker.zip']);
+    expect(Object.keys(files).toSorted()).toEqual([
+      'manifest.json',
+      'server.zip',
+      'static.zip',
+      'worker.zip',
+    ]);
     for (const p of Object.values(files)) expect(p.startsWith(root)).toBe(true);
 
     expect(zipFileNames(readFileSync(files['server.zip']!))).toEqual(['index.mjs', 'index.mjs.map']);
@@ -25,7 +30,11 @@ describe('buildApp', () => {
     const worker = readFileSync(join(root, '.plat/build/worker/index.mjs'), 'utf8');
     expect(worker).toMatch(/export\s*\{[^}]*handler/);
 
-    const built = JSON.parse(readFileSync(files['manifest.json']!, 'utf8'));
+    const built = JSON.parse(readFileSync(files['manifest.json']!, 'utf8')) as {
+      manifest: { name: string };
+      resolved: { worker: { entry: string } };
+      build: { files: string[] };
+    };
     expect(built.manifest.name).toBe('basic-app');
     expect(built.resolved.worker.entry).toBe('src/worker.ts');
     expect(built.build.files).toEqual(['server.zip', 'worker.zip', 'static.zip']);
@@ -34,7 +43,9 @@ describe('buildApp', () => {
   it('the worker bundle exports a handler that dispatches to the definition', async () => {
     const root = copyFixture('basic-app');
     await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true, minify: false, only: ['worker'] });
-    const mod = await import(join(root, '.plat/build/worker/index.mjs'));
+    const mod = (await import(join(root, '.plat/build/worker/index.mjs'))) as {
+      handler: (event: unknown) => Promise<unknown>;
+    };
     expect(await mod.handler({ ping: 1 })).toEqual({ handled: ['queues', 'crons'], event: { ping: 1 } });
   });
 

@@ -161,6 +161,6 @@ async function main(): Promise<void> {
 try {
   await main();
 } catch (e) {
-  console.error(`\n✗ ${(e as Error).stack ?? e}`);
+  console.error(`\n✗ ${e instanceof Error ? (e.stack ?? String(e)) : String(e)}`);
   process.exitCode = 1;
 }

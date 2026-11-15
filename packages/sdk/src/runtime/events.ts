@@ -24,7 +24,8 @@ export const events: Events = {
         throw new Error(`This app has no event bus. Add an \`events\` entry to ${APP_CONFIG_FILE}.`);
       const envelope: EventEnvelope = { data: detail, trace: currentTrace() };
       const { PutEventsCommand } = await import('@aws-sdk/client-eventbridge');
-      const out = await (await client('events')).send(
+      const eventbridge = await client('events');
+      const out = await eventbridge.send(
         new PutEventsCommand({
           Entries: [
             {

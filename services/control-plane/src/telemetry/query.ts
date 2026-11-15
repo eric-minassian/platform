@@ -26,6 +26,7 @@ import { Settings } from '../config.ts';
 
 type Item = Record<string, unknown>;
 const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+const str = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const HIST_LEN = LATENCY_BUCKETS_MS.length + 1;
 
 export function histogramOf(item: Item): number[] {
@@ -110,12 +111,12 @@ export function toRouteStats(items: readonly Item[]): RouteStats[] {
     let a = acc.get(key);
     if (!a) {
       a = {
-        method: String(i.method ?? ''),
-        route: String(i.route ?? key),
+        method: str(i.method),
+        route: str(i.route, key),
         req: 0,
         s4xx: 0,
         s5xx: 0,
-        hist: new Array(HIST_LEN).fill(0),
+        hist: Array.from({ length: HIST_LEN }, () => 0),
       };
       acc.set(key, a);
     }
@@ -134,7 +135,7 @@ export function toRouteStats(items: readonly Item[]): RouteStats[] {
       p50: percentile(a.hist, 50),
       p95: percentile(a.hist, 95),
     }))
-    .sort((x, y) => y.req - x.req);
+    .toSorted((x, y) => y.req - x.req);
 }
 
 /** Sums per-job items (sk = `<iso>#<kind>:<name>`). `declared` adds never-run jobs from the manifest. */
@@ -150,7 +151,7 @@ export function toJobStats(
     const key = `${kind}:${name}`;
     let a = acc.get(key);
     if (!a) {
-      a = { kind, name, ok: 0, error: 0, hist: new Array(HIST_LEN).fill(0), last: 0 };
+      a = { kind, name, ok: 0, error: 0, hist: Array.from({ length: HIST_LEN }, () => 0), last: 0 };
       acc.set(key, a);
     }
     return a;
@@ -176,13 +177,13 @@ export function toJobStats(
 export function toErrorGroup(i: Item): ErrorGroup {
   return {
     fingerprint: String(i.sk),
-    stage: String(i.stage ?? ''),
-    name: String(i.name ?? 'Error'),
-    message: String(i.message ?? ''),
-    source: String(i.source ?? ''),
+    stage: str(i.stage),
+    name: str(i.name, 'Error'),
+    message: str(i.message),
+    source: str(i.source),
     count: num(i.count),
-    firstSeen: String(i.firstSeen ?? ''),
-    lastSeen: String(i.lastSeen ?? ''),
+    firstSeen: str(i.firstSeen),
+    lastSeen: str(i.lastSeen),
     status: i.status === 'resolved' || i.status === 'ignored' ? i.status : 'open',
     sample: (i.sample as ErrorGroup['sample']) ?? {},
   };
@@ -196,7 +197,7 @@ export function summarizeHealth(
 ): NonNullable<AppSummary['health']> {
   const req = points.reduce((a, p) => a + p.req, 0);
   const errors = points.reduce((a, p) => a + p.s5xx, 0);
-  const hist = new Array(HIST_LEN).fill(0);
+  const hist = Array.from({ length: HIST_LEN }, () => 0);
   for (const i of items) addHist(hist, histogramOf(i));
   return {
     up,
@@ -323,7 +324,7 @@ export class TelemetryQuery extends Context.Service<
             }),
           ),
         );
-        return (res.Items ?? []).map(toErrorGroup).sort((x, y) => y.lastSeen.localeCompare(x.lastSeen));
+        return (res.Items ?? []).map(toErrorGroup).toSorted((x, y) => y.lastSeen.localeCompare(x.lastSeen));
       }, Effect.orDie);
 
       const setErrorStatus = Effect.fn('TelemetryQuery.setErrorStatus')(function* (
@@ -360,9 +361,12 @@ export class TelemetryQuery extends Context.Service<
           telemetryKeys.time(range.from),
           `${telemetryKeys.time(range.to)}\uffff`,
         );
-        return items.map(
-          (i): UptimePoint => ({ ts: String(i.sk), ok: Boolean(i.ok), status: num(i.status), ms: num(i.ms) }),
-        );
+        return items.map((i): UptimePoint => ({
+          ts: String(i.sk),
+          ok: Boolean(i.ok),
+          status: num(i.status),
+          ms: num(i.ms),
+        }));
       }, Effect.orDie);
 
       const cost = Effect.fn('TelemetryQuery.cost')(function* (app: string, days = 35) {

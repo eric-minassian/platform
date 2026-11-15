@@ -19,6 +19,10 @@ export function SettingsTab() {
   const [save, updateApp] = useAtom(updateAppAtom);
   const [del, removeApp] = useAtom(removeAppAtom, { mode: 'promiseExit' });
   const live = summary.stages.filter((s) => s.status !== 'destroyed');
+  const deleteApp = async () => {
+    if (Exit.isSuccess(await removeApp({ params: { app }, reactivityKeys: appsChanged })))
+      await navigate('/');
+  };
 
   return (
     <div className="max-w-2xl space-y-3">
@@ -78,14 +82,7 @@ export function SettingsTab() {
             ? `Destroy these stages first (Deployments tab): ${live.map((s) => s.stage).join(', ')}.`
             : 'Removes the app record. Its repo and code are untouched.'}
         </p>
-        <Button
-          variant="danger"
-          disabled={live.length > 0 || del.waiting}
-          onClick={async () => {
-            if (Exit.isSuccess(await removeApp({ params: { app }, reactivityKeys: appsChanged })))
-              navigate('/');
-          }}
-        >
+        <Button variant="danger" disabled={live.length > 0 || del.waiting} onClick={() => void deleteApp()}>
           Delete app
         </Button>
         <ErrorBox error={failure(del)} />

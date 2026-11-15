@@ -70,6 +70,10 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
       return opts.spans
         ? pc.dim(`  span ${e.op}${e.name ? ` ${e.name}` : ''} ${Math.round(e.dur)}ms ${e.status}`)
         : null;
+    default:
+      // Every type this CLI knows is handled above; one from a newer SDK prints nothing.
+      e satisfies never;
+      return null;
   }
 }
 
