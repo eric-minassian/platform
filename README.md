@@ -6,6 +6,7 @@ observes them at `https://<app>.ericminassian.com`.
 
 - [docs/DESIGN.md](docs/DESIGN.md): architecture, contracts and the decision log.
 - [docs/SETUP.md](docs/SETUP.md): the one-time manual setup.
+- [docs/MOVE-APP.md](docs/MOVE-APP.md): moving an app to its own AWS account (rare, manual).
 
 ```sh
 pnpm install

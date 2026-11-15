@@ -328,16 +328,16 @@ the account.
 
 ## Graduation
 
-Nothing in an app mentions AWS. Moving an app out is:
+Nothing in an app mentions AWS: the SDK needs only `PLATFORM_BINDINGS` and IAM
+permissions. Moving an app to its own account is therefore re-hosting:
 
-1. Deploy a second platform instance (same foundation) in a new account.
-2. `plat app move` (planned) provisions the app there, copies DynamoDB
-   (export/import), storage objects and secrets, migrates users lazily, and
-   switches DNS.
+- recreate its resources with ordinary infrastructure code;
+- set the bindings;
+- copy the data;
+- switch DNS.
 
-For a team that wants standard infrastructure code, `plat app export`
-(planned) generates Terraform for that app's resources from the same naming
-rules.
+App code is unchanged. Because it's rare, it's a manual runbook,
+[`docs/MOVE-APP.md`](MOVE-APP.md), not tooling.
 
 ## Repo layout
 
@@ -384,7 +384,6 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
   same function and KVS.
 - **Workflows.** Lambda durable functions (`app.workflow()`) are not wired yet.
   The deployer is a plain async job with idempotent steps.
-- **`plat app move` and `plat app export`** are planned, not built.
 
 ## Decision log
 
@@ -395,6 +394,7 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Lambda Web Functions for HTTP                                                        | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here. |
 | One router distribution + KVS                                                        | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                  |
 | AWS Emulator for local dev (Eric's call)                                             | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                 |
+| Moving an app out is a runbook, not tooling (Eric's call)                            | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                           |
 | No MCP; CLI only                                                                     | Eric's call. Agents use `plat … --json`.                                                                                                                                                                   |
 | Members = GitHub usernames in config                                                 | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                  |
 | Shared Cognito pool for app users                                                    | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                     |
