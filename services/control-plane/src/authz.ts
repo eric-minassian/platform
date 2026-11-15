@@ -45,6 +45,9 @@ export interface GithubOidcClaims {
 
 export type Decision = { ok: true } | { ok: false; reason: string };
 
+/** What a stage-scoped request does; CI runs may tear down more than they may deploy. */
+export type StageAction = 'deploy' | 'destroy';
+
 const allow: Decision = { ok: true };
 const deny = (reason: string): Decision => ({ ok: false, reason });
 
@@ -90,7 +93,8 @@ export function canCreateApp(
  * Which CI runs may deploy (or destroy) which stage:
  *  - the token must come from the app's registered repo, owned by a member;
  *  - `prod` only from `main` (push or workflow_dispatch);
- *  - `pr-N` only from the `pull_request` event for PR N;
+ *  - `pr-N` only from the `pull_request` event for PR N, except that a merged
+ *    PR's `closed` run may destroy previews (see below);
  *  - any other stage needs a member token (`plat deploy --stage <name>`).
  */
 export function checkCiStageAccess(
@@ -98,6 +102,7 @@ export function checkCiStageAccess(
   app: AppRecord,
   stage: string,
   config: PlatformConfig,
+  action: StageAction = 'deploy',
 ): Decision {
   const stageErr = validateStageName(stage);
   if (stageErr) return deny(stageErr);
@@ -117,8 +122,14 @@ export function checkCiStageAccess(
   if (isPreviewStage(stage)) {
     const pr = stage.slice('pr-'.length);
     if (ci.eventName !== 'pull_request') return deny(`${stage} deploys only from pull_request events`);
-    if (ci.ref !== `refs/pull/${pr}/merge`) return deny(`${stage} deploys only from refs/pull/${pr}/merge`);
-    return allow;
+    if (ci.ref === `refs/pull/${pr}/merge`) return allow;
+    // When a PR is merged, its `closed` run gets the base branch as its ref
+    // (the merge ref is gone), so the token can't name the PR. Only a merged
+    // PR's `closed` event yields a pull_request token with a branch ref, and
+    // its workflow is the code already on that branch, so it may tear
+    // previews down. It may never deploy one.
+    if (action === 'destroy' && ci.ref.startsWith('refs/heads/')) return allow;
+    return deny(`${stage} deploys only from refs/pull/${pr}/merge (got ${ci.ref})`);
   }
   return deny(`stage ${stage} can only be deployed with a member token`);
 }
@@ -135,10 +146,11 @@ export function checkStageAccess(
   app: AppRecord,
   stage: string,
   config: PlatformConfig,
+  action: StageAction = 'deploy',
 ): Decision {
   return p.kind === 'member'
     ? checkMemberStageAccess(p, app, stage)
-    : checkCiStageAccess(p, app, stage, config);
+    : checkCiStageAccess(p, app, stage, config, action);
 }
 
 /** Display name stored as a deployment's actor. */

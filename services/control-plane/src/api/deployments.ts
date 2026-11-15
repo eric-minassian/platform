@@ -49,7 +49,7 @@ export const stages = new Hono<AuthEnv>()
   })
   .delete('/:app/stages/:stage', async (c) => {
     const stage = c.req.param('stage');
-    const app = await stageApp(c, c.req.param('app'), stage);
+    const app = await stageApp(c, c.req.param('app'), stage, 'destroy');
     if (stage === PROD_STAGE) {
       if (c.get('principal').kind !== 'member')
         throw new ApiError(403, 'forbidden', 'prod can only be destroyed by a member');

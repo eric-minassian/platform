@@ -2,7 +2,7 @@ import type { AppRecord, ResolvedManifest } from '@ericminassian/platform-core';
 import { PROD_STAGE, validateStageName } from '@ericminassian/platform-core';
 import type { Context } from 'hono';
 import type { AuthEnv } from '../auth.ts';
-import { canAccessApp, checkStageAccess, type MemberPrincipal } from '../authz.ts';
+import { canAccessApp, checkStageAccess, type MemberPrincipal, type StageAction } from '../authz.ts';
 import { config } from '../config.ts';
 import { ApiError, badRequest, notFound } from '../errors.ts';
 import { getApp, getDeployment, getStage } from '../store.ts';
@@ -23,11 +23,16 @@ export async function memberApp(
 }
 
 /** Loads `:app` for a stage-scoped action; members and (rule-checked) CI runs are allowed. */
-export async function stageApp(c: Ctx, name: string, stage: string): Promise<AppRecord> {
+export async function stageApp(
+  c: Ctx,
+  name: string,
+  stage: string,
+  action: StageAction = 'deploy',
+): Promise<AppRecord> {
   const app = await getApp(name);
   if (!app) throw notFound(`app ${name}`);
   const p = c.get('principal');
-  const decision = checkStageAccess(p, app, stage, config);
+  const decision = checkStageAccess(p, app, stage, config, action);
   if (!decision.ok) {
     if (p.kind === 'member' && !canAccessApp(p, app)) throw notFound(`app ${name}`);
     throw new ApiError(403, 'forbidden', decision.reason);
