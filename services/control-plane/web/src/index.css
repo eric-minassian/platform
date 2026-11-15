@@ -60,6 +60,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* index.html's copy of the signed-out page is for clients that don't run scripts; React replaces it. */
+@media (scripting: enabled) {
+  #root > [data-static] {
+    display: none;
+  }
+}
+
 .recharts-cartesian-axis-tick-value {
   fill: var(--muted);
   font-size: 11px;
