@@ -8,6 +8,7 @@ import {
   checkCiStageAccess,
   checkStageAccess,
   ciPrincipalFromClaims,
+  type Decision,
   memberFor,
 } from '../src/authz.ts';
 
@@ -45,6 +46,9 @@ const ci = (over: Partial<CiPrincipal> = {}): CiPrincipal => ({
   eventName: 'push',
   ...over,
 });
+
+/** Why access was denied; undefined when it was allowed. */
+const reasonOf = (d: Decision) => (d.ok ? undefined : d.reason);
 
 describe('members', () => {
   it('resolves members case-insensitively', () => {
@@ -88,10 +92,9 @@ describe('CI deploy rules', () => {
     // A merged PR's `closed` event runs with the base branch as its ref.
     const closed = ci({ eventName: 'pull_request', ref: 'refs/heads/main' });
     expect(checkCiStageAccess(closed, app, 'pr-12', config, 'destroy').ok).toBe(true);
-    expect(checkCiStageAccess(closed, app, 'pr-12', config, 'deploy')).toMatchObject({
-      ok: false,
-      reason: expect.stringMatching(/refs\/pull\/12\/merge/),
-    });
+    expect(reasonOf(checkCiStageAccess(closed, app, 'pr-12', config, 'deploy'))).toMatch(
+      /refs\/pull\/12\/merge/,
+    );
     expect(checkCiStageAccess(closed, app, 'prod', config, 'destroy')).toMatchObject({ ok: false });
     expect(checkCiStageAccess(closed, app, 'staging', config, 'destroy')).toMatchObject({ ok: false });
     // Still bound to the app's repo, and to pull_request events.
@@ -112,10 +115,7 @@ describe('CI deploy rules', () => {
     expect(checkCiStageAccess(ci({ repositoryOwner: 'mallory' }), app, 'prod', config)).toMatchObject({
       ok: false,
     });
-    expect(checkCiStageAccess(ci(), app, 'staging', config)).toMatchObject({
-      ok: false,
-      reason: expect.stringMatching(/member token/),
-    });
+    expect(reasonOf(checkCiStageAccess(ci(), app, 'staging', config))).toMatch(/member token/);
     expect(checkCiStageAccess(ci(), app, 'BAD', config)).toMatchObject({ ok: false });
   });
 

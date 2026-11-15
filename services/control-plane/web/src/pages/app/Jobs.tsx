@@ -53,7 +53,7 @@ export function JobsTab() {
                     <Mono>{j.name}</Mono>
                   </td>
                   <td className="tabular-nums">{fmtNum(j.ok)}</td>
-                  <td className="tabular-nums text-bad">{j.error || ''}</td>
+                  <td className="text-bad tabular-nums">{j.error || ''}</td>
                   <td className="tabular-nums">{fmtMs(j.p95)}</td>
                   <td>{relTime(j.lastRun)}</td>
                 </tr>
@@ -78,7 +78,7 @@ export function JobsTab() {
                     </td>
                     <td className="tabular-nums">{fmtNum(q.visible)}</td>
                     <td className="tabular-nums">{fmtNum(q.inFlight)}</td>
-                    <td className={q.deadLetter ? 'tabular-nums font-medium text-bad' : 'tabular-nums'}>
+                    <td className={q.deadLetter ? 'font-medium text-bad tabular-nums' : 'tabular-nums'}>
                       {fmtNum(q.deadLetter)}
                     </td>
                     <td className="text-right">

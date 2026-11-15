@@ -223,7 +223,9 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         }
         break;
       }
-      default:
+      // Logs and spans are read back from CloudWatch Logs (search, traces), not rolled up.
+      case 'log':
+      case 'span':
         break;
     }
   }

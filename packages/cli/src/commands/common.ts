@@ -40,7 +40,7 @@ export function appFor(opts: CommonOpts): Promise<string> {
 export function action<A extends unknown[]>(fn: (...args: A) => Promise<void> | void) {
   return async (...args: A) => {
     const cmd = args[args.length - 1] as Command;
-    const opts = (typeof cmd?.optsWithGlobals === 'function' ? cmd.optsWithGlobals() : {}) as CommonOpts;
+    const opts = typeof cmd?.optsWithGlobals === 'function' ? cmd.optsWithGlobals() : {};
     setJsonMode(!!opts.json);
     try {
       await fn(...args);

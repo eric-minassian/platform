@@ -38,10 +38,7 @@ export function defineWorker<R, E>(definition: WorkerDefinition<R, E>): JobHandl
   const wrap = (handlers: Handlers<R> | undefined) =>
     handlers &&
     Object.fromEntries(
-      Object.entries(handlers).map(([name, handler]) => [
-        name,
-        (...args: never[]) => run((handler as (...a: never[]) => Job<R>)(...args)),
-      ]),
+      Object.entries(handlers).map(([name, handler]) => [name, (...args: never[]) => run(handler(...args))]),
     );
 
   const d = definition as unknown as Record<

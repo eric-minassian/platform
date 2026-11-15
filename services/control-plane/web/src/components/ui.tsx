@@ -178,7 +178,7 @@ export function Table({
           <tr className="border-b border-border text-[11px] tracking-wide text-muted uppercase">
             {head.map((h, i) => (
               <th
-                // biome-ignore lint/suspicious/noArrayIndexKey: static header list
+                // oxlint-disable-next-line react/no-array-index-key -- static header list
                 key={i}
                 className="px-2 py-1.5 font-medium whitespace-nowrap"
               >
@@ -187,7 +187,7 @@ export function Table({
             ))}
           </tr>
         </thead>
-        <tbody className="[&>tr]:border-b [&>tr]:border-border/60 [&>tr:last-child]:border-0 [&_td]:px-2 [&_td]:py-1.5">
+        <tbody className="[&_td]:px-2 [&_td]:py-1.5 [&>tr]:border-b [&>tr]:border-border/60 [&>tr:last-child]:border-0">
           {children}
         </tbody>
       </table>

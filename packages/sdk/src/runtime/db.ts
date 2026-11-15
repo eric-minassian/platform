@@ -131,11 +131,13 @@ function hasAll(item: Record<string, unknown>, fields: string[]): boolean {
   return fields.every((f) => item[f] !== undefined && item[f] !== null && item[f] !== '');
 }
 
-export function stripInternal<T>(item: Record<string, unknown> | undefined): T | undefined {
+export function stripInternal(
+  item: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
   if (!item) return undefined;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(item)) if (!INTERNAL_ATTRIBUTES.includes(k)) out[k] = v;
-  return out as T;
+  return out;
 }
 
 /**
@@ -226,7 +228,7 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
       cond += ` AND ${expr}`;
     };
     if (q.beginsWith !== undefined) {
-      vals[':b'] = String(q.beginsWith);
+      vals[':b'] = q.beginsWith;
       sortCond('begins_with(#sk, :b)');
     } else if (q.between) {
       vals[':lo'] = String(q.between[0]);
@@ -287,7 +289,7 @@ function collection<T extends Record<string, unknown>>(
     get: (key) =>
       span('db.get', name, async () => {
         const out = await ddb().send(new GetCommand({ TableName: table(), Key: m.primaryKey(key) }));
-        return stripInternal<T>(out.Item);
+        return stripInternal(out.Item) as T | undefined;
       }),
 
     put: (item, putOpts) =>
@@ -310,7 +312,7 @@ function collection<T extends Record<string, unknown>>(
         }
         const tableName = table();
         const Key = m.primaryKey(key);
-        const { expr, names, values } = setExpression(patch as Record<string, unknown>, m.keyFields);
+        const { expr, names, values } = setExpression(patch, m.keyFields);
         const out = await ddb().send(
           new UpdateCommand({
             TableName: tableName,
@@ -338,7 +340,7 @@ function collection<T extends Record<string, unknown>>(
           );
           item = again.Attributes ?? item;
         }
-        return stripInternal<T>(item)!;
+        return stripInternal(item) as T;
       }),
 
     delete: (key) =>
@@ -352,7 +354,7 @@ function collection<T extends Record<string, unknown>>(
         const scope = cursorScope(input);
         if (q.cursor) input.ExclusiveStartKey = openCursor(q.cursor, scope);
         const out = await ddb().send(new QueryCommand(input));
-        const page: Page<T> = { items: (out.Items ?? []).map((i) => stripInternal<T>(i)!) };
+        const page: Page<T> = { items: (out.Items ?? []).map((i) => stripInternal(i) as T) };
         if (out.LastEvaluatedKey) page.cursor = sealCursor(out.LastEvaluatedKey, scope);
         return page;
       }),
@@ -365,7 +367,7 @@ function collection<T extends Record<string, unknown>>(
         const out = await span('db.query', name, () =>
           ddb().send(new QueryCommand(start ? { ...input, ExclusiveStartKey: start } : input)),
         );
-        for (const i of out.Items ?? []) items.push(stripInternal<T>(i)!);
+        for (const i of out.Items ?? []) items.push(stripInternal(i) as T);
         start = out.LastEvaluatedKey;
       } while (start);
       return items;

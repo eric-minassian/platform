@@ -45,10 +45,16 @@ export interface RealtimeClient {
 
 /** The slice of the browser's WebSocket the client uses. */
 export interface SocketLike {
-  onopen: ((event: unknown) => void) | null;
-  onmessage: ((event: { data: unknown }) => void) | null;
-  onclose: ((event: unknown) => void) | null;
-  onerror: ((event: unknown) => void) | null;
+  addEventListener(
+    type: 'open' | 'close' | 'error',
+    listener: (event: unknown) => void,
+    options: { signal: AbortSignal },
+  ): void;
+  addEventListener(
+    type: 'message',
+    listener: (event: { data: unknown }) => void,
+    options: { signal: AbortSignal },
+  ): void;
   send(data: string): void;
   close(code?: number, reason?: string): void;
 }
@@ -117,6 +123,8 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
   let config: RealtimeClientConfig | undefined;
   let token: RealtimeToken | undefined;
   let socket: SocketLike | undefined;
+  /** Aborted to detach the client's listeners from `socket` when it's let go. */
+  let socketListeners: AbortController | undefined;
   /** Subscriptions are sent only after connection_ack. */
   let acked = false;
   /** Bumped whenever a connection attempt is abandoned, so its late callbacks do nothing. */
@@ -139,7 +147,8 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
   function setStatus(next: RealtimeStatus) {
     if (next === status) return;
     status = next;
-    for (const l of [...statusListeners]) {
+    // A snapshot: listeners that (un)subscribe while being called don't change this round.
+    for (const l of Array.from(statusListeners)) {
       try {
         l(next);
       } catch (e) {
@@ -206,7 +215,8 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
     socket = undefined;
     acked = false;
     if (s) {
-      s.onopen = s.onmessage = s.onclose = s.onerror = null;
+      socketListeners?.abort();
+      socketListeners = undefined;
       try {
         s.close(1000);
       } catch {
@@ -270,18 +280,24 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
       `header-${base64url(JSON.stringify(auth))}`,
     ]);
     socket = s;
+    socketListeners = new AbortController();
+    const { signal } = socketListeners;
     clear(kaTimer);
     kaTimer = env.setTimeout(() => {
       env.report('realtime: AppSync did not acknowledge the connection; retrying');
       drop(true);
     }, CONNECT_TIMEOUT_MS);
-    s.onopen = () => s.send(JSON.stringify({ type: 'connection_init' }));
-    s.onmessage = (event) => onMessage(s, cfg, event.data);
+    s.addEventListener('open', () => s.send(JSON.stringify({ type: 'connection_init' })), { signal });
+    s.addEventListener('message', (event) => onMessage(s, cfg, event.data), { signal });
     // The browser fires error then close; close is what matters.
-    s.onerror = () => {};
-    s.onclose = () => {
-      if (socket === s) drop(true);
-    };
+    s.addEventListener('error', () => {}, { signal });
+    s.addEventListener(
+      'close',
+      () => {
+        if (socket === s) drop(true);
+      },
+      { signal },
+    );
   }
 
   function onMessage(s: SocketLike, cfg: RealtimeClientConfig, data: unknown) {
@@ -294,7 +310,7 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
       errors?: unknown;
     };
     try {
-      msg = JSON.parse(String(data));
+      msg = JSON.parse(String(data)) as typeof msg;
     } catch {
       env.report('realtime: ignored a message that is not JSON');
       return;
@@ -326,7 +342,7 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
             env.report(`realtime: ignored an event on ${sub.channel} that is not JSON`);
             continue;
           }
-          for (const listener of [...sub.listeners]) {
+          for (const listener of Array.from(sub.listeners)) {
             try {
               listener(event);
             } catch (e) {
@@ -355,6 +371,7 @@ export function createRealtimeClient(env: RealtimeEnv): RealtimeClient {
         token = undefined;
         drop(true);
         return;
+      case undefined:
       default:
         return;
     }

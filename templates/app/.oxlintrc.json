@@ -1,0 +1,57 @@
+{
+  // `pnpm lint` adds --type-aware: `options` would be rejected while this
+  // template sits inside the platform's monorepo as a nested config.
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import", "node", "promise"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "rules": {
+    // typescript-eslint's recommended-type-checked rules that oxlint files under `pedantic`.
+    "typescript/no-misused-promises": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/no-unsafe-return": "error",
+    "typescript/only-throw-error": "error",
+    "typescript/prefer-promise-reject-errors": "error",
+    "typescript/restrict-plus-operands": "error",
+    "typescript/no-deprecated": "error",
+    "typescript/switch-exhaustiveness-check": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-import-type-side-effects": "error",
+    "import/no-cycle": "error",
+    "import/no-duplicates": "error",
+    "eslint/no-unused-vars": ["error", { "ignoreRestSiblings": true }],
+    "import/no-unassigned-import": ["error", { "allow": ["**/*.css"] }],
+
+    "eslint/no-await-in-loop": "off",
+    "oxc/no-map-spread": "off",
+    // Effect's `_tag`.
+    "eslint/no-underscore-dangle": "off",
+    "unicorn/consistent-function-scoping": "off"
+  },
+  "overrides": [
+    {
+      "files": ["web/**"],
+      "plugins": ["react", "jsx-a11y"],
+      "rules": {
+        "react/rules-of-hooks": "error",
+        // The automatic JSX runtime doesn't need React in scope.
+        "react/react-in-jsx-scope": "off"
+      }
+    },
+    {
+      "files": ["test/**"],
+      "plugins": ["vitest"],
+      "rules": {
+        // Vitest's `expect(value, message)` labels the assertion.
+        "vitest/valid-expect": ["error", { "maxArgs": 2 }],
+        "vitest/valid-title": ["error", { "ignoreTypeOfDescribeName": true }]
+      }
+    }
+  ]
+}

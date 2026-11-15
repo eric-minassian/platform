@@ -13,7 +13,7 @@ export function listFiles(dir: string): Array<{ zipPath: string; absPath: string
     }
   };
   walk(dir);
-  return out.sort((a, b) => a.zipPath.localeCompare(b.zipPath));
+  return out.toSorted((a, b) => a.zipPath.localeCompare(b.zipPath));
 }
 
 /** Zip a directory. Timestamps are fixed so identical inputs produce identical zips. */
@@ -32,7 +32,7 @@ export function zipEntries(entries: Record<string, Uint8Array | string>): Uint8A
 }
 
 export function zipFileNames(zip: Uint8Array): string[] {
-  return Object.keys(unzipSync(zip)).sort();
+  return Object.keys(unzipSync(zip)).toSorted();
 }
 
 export function dirExists(path: string): boolean {

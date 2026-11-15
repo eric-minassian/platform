@@ -21,7 +21,10 @@ export function Layout() {
 }
 
 function Shell({ me }: { me: MeResponse }) {
-  const signOut = useAtomSet(logout, { mode: 'promiseExit' });
+  const logoutExit = useAtomSet(logout, { mode: 'promiseExit' });
+  const signOut = async () => {
+    if (Exit.isSuccess(await logoutExit())) location.assign('/login');
+  };
   const link = ({ isActive }: { isActive: boolean }) =>
     cx('rounded-md px-2 py-1 text-[12px]', isActive ? 'bg-panel-2 text-fg' : 'text-muted hover:text-fg');
   return (
@@ -46,12 +49,7 @@ function Shell({ me }: { me: MeResponse }) {
             <a href={`https://github.com/${me.github}`} className="hover:text-fg">
               @{me.github}
             </a>
-            <Button
-              variant="ghost"
-              onClick={async () => {
-                if (Exit.isSuccess(await signOut())) location.assign('/login');
-              }}
-            >
+            <Button variant="ghost" onClick={() => void signOut()}>
               Sign out
             </Button>
           </div>

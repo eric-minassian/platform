@@ -1,0 +1,17 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 110,
+  "singleQuote": true,
+  "sortImports": {
+    "newlinesBetween": false,
+    "partitionByNewline": true
+  },
+  "overrides": [
+    {
+      "files": ["services/control-plane/web/**"],
+      "options": {
+        "sortTailwindcss": { "stylesheet": "./services/control-plane/web/src/index.css" }
+      }
+    }
+  ]
+}

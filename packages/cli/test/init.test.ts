@@ -20,7 +20,12 @@ describe('plat init', () => {
     expect(Object.keys(manifest.queues)).toEqual(['emails']);
     expect(manifest.events).toEqual(['todo.created']);
 
-    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+      name: string;
+      dependencies: Record<string, string>;
+      devDependencies: Record<string, string>;
+      packageManager: string;
+    };
     expect(pkg.name).toBe('my-notes');
     expect(pkg.dependencies['@ericminassian/platform']).toBe(`^${cliVersion()}`);
     expect(pkg.devDependencies['@ericminassian/plat']).toBe(`^${cliVersion()}`);
@@ -79,7 +84,7 @@ describe('plat init', () => {
         'shop',
         '^0.3.0',
       ),
-    );
+    ) as unknown;
     expect(out).toMatchObject({ name: 'shop', dependencies: { a: '^0.3.0', b: '^1.0.0' } });
     expect(replaceAppName('https://template-app.x and template-app--pr-1', 'shop')).toBe(
       'https://shop.x and shop--pr-1',

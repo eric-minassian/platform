@@ -86,7 +86,7 @@ export function initApp(opts: InitOptions): InitResult {
   );
   writeFileSync(join(dir, 'pnpm-workspace.yaml'), PNPM_WORKSPACE);
   files.push('pnpm-workspace.yaml');
-  return { dir, name, files: files.sort() };
+  return { dir, name, files: files.toSorted() };
 }
 
 /**

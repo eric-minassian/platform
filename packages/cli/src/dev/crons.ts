@@ -37,6 +37,17 @@ export function scheduleCrons(
 ): CronScheduler {
   const timers = new Map<string, NodeJS.Timeout>();
   const nexts = new Map<string, Date>();
+  const tick = async (c: LocalCron, at: Date) => {
+    if (Date.now() >= at.getTime() - 5) {
+      try {
+        await fire(c.name);
+      } catch {
+        // reported by `fire`
+      }
+    }
+    // Can't throw: the same expression already parsed when this run was armed.
+    arm(c);
+  };
   const arm = (c: LocalCron) => {
     const at = nextRun(c);
     nexts.set(c.name, at);
@@ -44,19 +55,7 @@ export function scheduleCrons(
     const delay = Math.min(at.getTime() - Date.now(), 2 ** 31 - 1);
     timers.set(
       c.name,
-      setTimeout(
-        async () => {
-          if (Date.now() >= at.getTime() - 5) {
-            try {
-              await fire(c.name);
-            } catch {
-              // reported by `fire`
-            }
-          }
-          arm(c);
-        },
-        Math.max(delay, 0),
-      ),
+      setTimeout(() => void tick(c, at), Math.max(delay, 0)),
     );
   };
   for (const c of crons) arm(c);

@@ -83,9 +83,9 @@ export class GitHub extends Context.Service<
           const res = yield* api(token).get('/user');
           if (res.status < 200 || res.status >= 300)
             return yield* fail(`GitHub rejected the token (${res.status})`);
-          const { login } = yield* json(Schema.Struct({ login: Schema.optional(Schema.String) }))(res);
-          if (!login) return yield* fail('GitHub returned no login');
-          return login;
+          const { login: user } = yield* json(Schema.Struct({ login: Schema.optional(Schema.String) }))(res);
+          if (!user) return yield* fail('GitHub returned no login');
+          return user;
         },
         Effect.timeout(TIMEOUT),
         asGitHubError,

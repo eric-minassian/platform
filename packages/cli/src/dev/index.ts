@@ -141,9 +141,12 @@ export async function runDev(opts: DevOptions): Promise<void> {
 
   // ------------------------------------------------------------ web server
   if (manifest.web?.server) {
-    const { child, port: serverPort } = await spawnWebServer(stage, manifest, root, {
-      ...(workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {}),
-    });
+    const { child, port: serverPort } = await spawnWebServer(
+      stage,
+      manifest,
+      root,
+      workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {},
+    );
     children.push(child);
     const out = prefixer(pc.green('web   │'), (s) => process.stdout.write(s), { spans: opts.spans });
     child.stdout!.on('data', out);
@@ -151,11 +154,14 @@ export async function runDev(opts: DevOptions): Promise<void> {
     child.once('exit', (code) => {
       if (!shuttingDown) warn(`web server exited (code ${code})`);
     });
-    void waitForPort(serverPort, '127.0.0.1', 60_000)
-      .then(() => {
+    void (async () => {
+      try {
+        await waitForPort(serverPort, '127.0.0.1', 60_000);
         state.server = { host: '127.0.0.1', port: serverPort };
-      })
-      .catch((err) => warn(`web server did not start: ${(err as Error).message}`));
+      } catch (err) {
+        warn(`web server did not start: ${(err as Error).message}`);
+      }
+    })();
   }
 
   // ------------------------------------------------------------ frontend dev server
@@ -173,16 +179,16 @@ export async function runDev(opts: DevOptions): Promise<void> {
       if (!shuttingDown && state.webDev) warn(`frontend dev server exited (code ${code})`);
     });
     state.webDevStarting = true;
-    void ready
-      .then(() => {
+    void (async () => {
+      try {
+        await ready;
         state.webDev = { host: 'localhost', port };
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!shuttingDown) warn(`frontend dev server did not start: ${(err as Error).message}`);
-      })
-      .finally(() => {
+      } finally {
         state.webDevStarting = false;
-      });
+      }
+    })();
   }
 
   // ------------------------------------------------------------ router
@@ -205,7 +211,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
         res
           .writeHead(200, { 'content-type': 'application/json' })
           .end(
-            JSON.stringify({ app: manifest.name, bindings: stage!.bindings, emulator: stage!.conn.endpoint }),
+            JSON.stringify({ app: manifest.name, bindings: stage.bindings, emulator: stage.conn.endpoint }),
           );
         return true;
       }

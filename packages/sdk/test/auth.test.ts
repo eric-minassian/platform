@@ -66,15 +66,15 @@ describe('cognito hosted-login flow', () => {
     const pair = await generateKeyPair('RS256');
     privateKey = pair.privateKey;
     jwk = { ...(await exportJWK(pair.publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' };
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url === JWKS) return Response.json({ keys: [jwk] });
       if (url === `${LOGIN}/oauth2/token`) {
-        tokenCalls.push(new URLSearchParams(String(init?.body)));
+        tokenCalls.push(new URLSearchParams(init?.body as URLSearchParams));
         return Response.json({ id_token: nextIdToken, refresh_token: 'refresh-1', access_token: 'a' });
       }
       return realFetch(input, init);
-    }) as typeof fetch;
+    };
   });
   afterAll(() => {
     globalThis.fetch = realFetch;

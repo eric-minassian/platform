@@ -105,7 +105,7 @@ export async function mapLimit<T, R>(
   limit: number,
   fn: (item: T) => Promise<R>,
 ): Promise<R[]> {
-  const out: R[] = new Array(items.length);
+  const out = Array.from<R>({ length: items.length });
   let next = 0;
   const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (next < items.length) {
@@ -159,15 +159,15 @@ export function policy(...statements: PolicyStatement[]): PolicyDocument {
 /** Deep-equal for policy documents that may come back URL-encoded from IAM. */
 export function samePolicy(a: string | PolicyDocument | undefined, b: PolicyDocument): boolean {
   if (!a) return false;
-  const parsed = typeof a === 'string' ? JSON.parse(decodeURIComponent(a)) : a;
+  const parsed = typeof a === 'string' ? (JSON.parse(decodeURIComponent(a)) as unknown) : a;
   return canonical(parsed) === canonical(b);
 }
 
 function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
   if (v && typeof v === 'object') {
-    return `{${Object.keys(v as object)
-      .sort()
+    return `{${Object.keys(v)
+      .toSorted()
       .map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`)
       .join(',')}}`;
   }

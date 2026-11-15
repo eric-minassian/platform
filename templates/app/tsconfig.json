@@ -23,5 +23,12 @@
       }
     ]
   },
-  "include": ["plat.config.ts", "src", "test", "vitest.config.ts", "vitest.integration.config.ts"]
+  "include": [
+    "plat.config.ts",
+    "src",
+    "test",
+    "playwright.config.ts",
+    "vitest.config.ts",
+    "vitest.integration.config.ts"
+  ]
 }

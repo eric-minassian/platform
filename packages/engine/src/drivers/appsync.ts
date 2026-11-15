@@ -51,7 +51,7 @@ const QUOTA_NAME = 'Event APIs - Channel namespaces per API';
 export async function findEventApi(ctx: EngineContext, name: string): Promise<Api | undefined> {
   let nextToken: string | undefined;
   do {
-    const res = await ctx.clients.appsync.send(new ListApisCommand({ ...(nextToken ? { nextToken } : {}) }));
+    const res = await ctx.clients.appsync.send(new ListApisCommand(nextToken ? { nextToken } : {}));
     const found = (res.apis ?? []).find((a) => a.name === name && a.eventConfig);
     if (found) return found;
     nextToken = res.nextToken;
@@ -103,6 +103,7 @@ export async function ensureChannelNamespace(
         `The platform's realtime API has no room for another channel namespace. Every stage with ` +
           `realtime (preview stages too) has one; destroy unused previews or raise the "${QUOTA_NAME}" ` +
           'quota (default 50, adjustable) in Service Quotas.',
+        { cause: e },
       );
     }
     throw e;
@@ -125,8 +126,8 @@ export async function deleteChannelNamespace(
 function sameModes(a: AuthMode[] | undefined, b: AuthMode[]): boolean {
   const key = (m: AuthMode[] | undefined) =>
     (m ?? [])
-      .map((x) => x.authType)
-      .sort()
+      .map((x) => x.authType ?? '')
+      .toSorted((p, q) => (p < q ? -1 : p > q ? 1 : 0))
       .join(',');
   return key(a) === key(b);
 }
@@ -165,7 +166,7 @@ export async function ensurePublicApiKey(
   } while (nextToken);
   const live = keys
     .filter((k) => k.description === platformNames.realtimePublicKey && k.id && (k.expires ?? 0) > nowSeconds)
-    .sort((a, b) => (b.expires ?? 0) - (a.expires ?? 0))[0];
+    .toSorted((a, b) => (b.expires ?? 0) - (a.expires ?? 0))[0];
   if (live?.id) {
     if ((live.expires ?? 0) - nowSeconds < KEY_RENEW_BELOW) {
       await ctx.clients.appsync.send(

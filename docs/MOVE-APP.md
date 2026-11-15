@@ -120,6 +120,7 @@ user's `sub`. Pick one:
 
   Token verification works from any account, `sub`s don't change, and users
   notice nothing.
+
 - **Dedicated pool.**
   - Cognito can't export passwords or passkeys, and the new pool assigns new
     `sub`s. So either:

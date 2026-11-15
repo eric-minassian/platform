@@ -48,7 +48,7 @@ export function layout(events: readonly TelemetryEvent[]): { rows: Row[]; total:
     return { e, label, start, dur, tone };
   });
   const total = Math.max(1, ...rows.map((r) => r.start + r.dur));
-  return { rows: rows.sort((a, b) => a.start - b.start), total };
+  return { rows: rows.toSorted((a, b) => a.start - b.start), total };
 }
 
 const barColor: Record<Tone, string> = {
@@ -70,7 +70,7 @@ function Waterfall({ events }: { events: readonly TelemetryEvent[] }) {
       </div>
       {rows.map((r, i) => (
         <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: trace rows are positional
+          // oxlint-disable-next-line react/no-array-index-key -- trace rows are positional
           key={i}
           className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-center gap-3 py-0.5 text-[12px]"
         >
@@ -131,7 +131,7 @@ export function TracesTab() {
           className="flex items-center gap-2"
           onSubmit={(e) => {
             e.preventDefault();
-            if (draft.trim()) navigate(`/apps/${app}/traces/${draft.trim()}${search}`);
+            if (draft.trim()) void navigate(`/apps/${app}/traces/${draft.trim()}${search}`);
           }}
         >
           <Input

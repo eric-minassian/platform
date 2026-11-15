@@ -45,7 +45,7 @@ export function isExpiredError(e: unknown): boolean {
 }
 
 export function toUser(p: JWTPayload): PlatformUser {
-  const str = (k: string) => (typeof p[k] === 'string' ? (p[k] as string) : undefined);
+  const str = (k: string) => (typeof p[k] === 'string' ? p[k] : undefined);
   const name =
     str('name') ?? ([str('given_name'), str('family_name')].filter(Boolean).join(' ') || undefined);
   const groups = Array.isArray(p['cognito:groups']) ? (p['cognito:groups'] as unknown[]).map(String) : [];
@@ -90,7 +90,8 @@ export function exchangeCode(
 export async function refreshTokens(auth: AuthBindings, refreshToken: string): Promise<Tokens> {
   if (auth.mode === 'local') {
     const { InitiateAuthCommand } = await import('@aws-sdk/client-cognito-identity-provider');
-    const out = await (await client('cognito')).send(
+    const cognito = await client('cognito');
+    const out = await cognito.send(
       new InitiateAuthCommand({
         ClientId: auth.clientId,
         AuthFlow: 'REFRESH_TOKEN_AUTH',

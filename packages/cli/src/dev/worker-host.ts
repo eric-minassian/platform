@@ -28,35 +28,38 @@ if (!mod.default) {
 }
 const sdkUrl = sdkWorker.startsWith('/') ? pathToFileURL(sdkWorker).href : sdkWorker;
 const { createWorkerHandler } = (await import(sdkUrl)) as typeof import('@ericminassian/platform/worker');
-const handler = createWorkerHandler(mod.default as Parameters<typeof createWorkerHandler>[0]);
+const handler = createWorkerHandler(mod.default);
+
+/** The JSON reply for one invocation; never rejects, failures become `{ ok: false, error }`. */
+async function invoke(body: string): Promise<string> {
+  const started = Date.now();
+  const context = {
+    awsRequestId: randomUUID(),
+    functionName,
+    functionVersion: '$LATEST',
+    invokedFunctionArn: `arn:aws:lambda:${process.env.AWS_REGION ?? 'us-east-1'}:000000000000:function:${functionName}`,
+    memoryLimitInMB: '512',
+    logGroupName: `/aws/lambda/${functionName}`,
+    logStreamName: 'local',
+    callbackWaitsForEmptyEventLoop: false,
+    getRemainingTimeInMillis: () => Math.max(0, started + timeoutMs - Date.now()),
+  };
+  try {
+    return JSON.stringify({ ok: true, result: (await handler(JSON.parse(body || '{}'), context)) ?? null });
+  } catch (err) {
+    const e = err as Error;
+    return JSON.stringify({
+      ok: false,
+      error: { name: e?.name ?? 'Error', message: e?.message ?? String(err), stack: e?.stack },
+    });
+  }
+}
 
 createServer((req, res) => {
   let body = '';
   req.setEncoding('utf8');
   req.on('data', (c) => (body += c));
-  req.on('end', async () => {
-    const started = Date.now();
-    const context = {
-      awsRequestId: randomUUID(),
-      functionName,
-      functionVersion: '$LATEST',
-      invokedFunctionArn: `arn:aws:lambda:${process.env.AWS_REGION ?? 'us-east-1'}:000000000000:function:${functionName}`,
-      memoryLimitInMB: '512',
-      logGroupName: `/aws/lambda/${functionName}`,
-      logStreamName: 'local',
-      callbackWaitsForEmptyEventLoop: false,
-      getRemainingTimeInMillis: () => Math.max(0, started + timeoutMs - Date.now()),
-    };
-    let reply: unknown;
-    try {
-      reply = { ok: true, result: (await handler(JSON.parse(body || '{}'), context)) ?? null };
-    } catch (err) {
-      const e = err as Error;
-      reply = {
-        ok: false,
-        error: { name: e?.name ?? 'Error', message: e?.message ?? String(err), stack: e?.stack },
-      };
-    }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(reply));
+  req.on('end', () => {
+    void invoke(body).then((reply) => res.writeHead(200, { 'content-type': 'application/json' }).end(reply));
   });
 }).listen(port, '127.0.0.1');

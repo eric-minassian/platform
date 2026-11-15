@@ -33,7 +33,7 @@ export class DocumentNotFound extends Schema.TaggedError<
  * reads decoded, so a document written by an older revision that no longer
  * matches fails loudly instead of reaching app code half-formed.
  */
-export type DocumentSchema = Schema.Codec<object, Record<string, unknown>, never, never> & {
+export type DocumentSchema = Schema.Codec<object, Record<string, unknown>> & {
   readonly fields: Schema.Struct.Fields;
 };
 
@@ -192,7 +192,7 @@ function memoryStore(): StoreFactory {
     };
 
     return {
-      get: (key) => Effect.sync(() => stripInternal<Doc>(table.get(at(key)))),
+      get: (key) => Effect.sync(() => stripInternal(table.get(at(key)))),
 
       put: (item, ifNotExists) =>
         Effect.suspend(() => {
@@ -209,7 +209,7 @@ function memoryStore(): StoreFactory {
               return Effect.die(new Error(`${what}: cannot change key attribute "${f}"`));
           }
           const k = at(key);
-          const existing = stripInternal<Doc>(table.get(k));
+          const existing = stripInternal(table.get(k));
           if (!existing) return Effect.fail(new ConditionFailed());
           const next: Doc = { ...existing };
           for (const [f, v] of Object.entries(patch)) {
@@ -242,13 +242,12 @@ function memoryStore(): StoreFactory {
             [skAttr]: last[skAttr],
           };
           return Effect.succeed({
-            items: page.map((i) => stripInternal<Doc>(i)!),
+            items: page.map((i) => stripInternal(i)!),
             cursor: lastKey && Buffer.from(JSON.stringify({ scope, key: lastKey })).toString('base64url'),
           });
         }),
 
-      queryAll: (values, q) =>
-        Effect.sync(() => matching(values, q).items.map((i) => stripInternal<Doc>(i)!)),
+      queryAll: (values, q) => Effect.sync(() => matching(values, q).items.map((i) => stripInternal(i)!)),
     };
 
     /** The query's items in order, and the scope its cursors are bound to (as `cursorScope` in db.ts). */
@@ -270,7 +269,7 @@ function memoryStore(): StoreFactory {
         compare(a[skAttr], b[skAttr]) || compare(a.pk, b.pk) || compare(a.sk, b.sk);
       const items = [...table.values()]
         .filter((i) => i[pkAttr] === pkValue && matches(String(i[skAttr])))
-        .sort(q.reverse ? (a, b) => order(b, a) : order);
+        .toSorted(q.reverse ? (a, b) => order(b, a) : order);
       const { beginsWith, between, gt, gte, lt, lte } = q;
       const scope = JSON.stringify([q.index ?? null, pkValue, { beginsWith, between, gt, gte, lt, lte }]);
       return { items, scope, order, pkAttr, skAttr };
@@ -283,7 +282,7 @@ function openMemoryCursor(cursor: string, scope: string): Doc | undefined {
   try {
     const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
     if (Predicate.isObject(parsed) && 'scope' in parsed && parsed.scope === scope && 'key' in parsed)
-      return Predicate.isObject(parsed.key) ? (parsed.key as Doc) : undefined;
+      return Predicate.isObject(parsed.key) ? parsed.key : undefined;
   } catch {}
   return undefined;
 }
@@ -297,7 +296,7 @@ function compare(a: unknown, b: unknown): number {
 /** The key condition `queryInput` builds for DynamoDB, as a predicate on the sort key. */
 function sortCondition(q: QueryOptions): (sk: string) => boolean {
   if (q.beginsWith !== undefined) {
-    const prefix = String(q.beginsWith);
+    const prefix = q.beginsWith;
     return (sk) => sk.startsWith(prefix);
   }
   if (q.between) {
@@ -330,7 +329,7 @@ function makeCollection<S extends DocumentSchema, P extends FieldOf<S>, K extend
 ): Collection<S['Type'], P | K> {
   type T = S['Type'];
   const { schema } = options;
-  const raw = store(name, options as unknown as BaseCollectionOptions<Doc>);
+  const raw = store(name, options);
   const encode = (document: object) => Effect.orDie(Schema.encodeEffect(schema)(document));
   // Stored items are untrusted: an older revision may have written another shape.
   const decode = (item: unknown) => Effect.orDie(Schema.decodeUnknownEffect(schema)(item));
@@ -354,7 +353,7 @@ function makeCollection<S extends DocumentSchema, P extends FieldOf<S>, K extend
       // Each field schema comes from `schema`, which encodes without services.
       const changed = Schema.Struct(set) as unknown as Schema.Codec<Doc, Doc>;
       const encoded = yield* Effect.orDie(Schema.encodeUnknownEffect(changed)(values));
-      return { ...out, ...(encoded as Doc) };
+      return { ...out, ...encoded };
     });
 
   const query = (partition: Partial<T>, q: QueryOptions = {}): Effect.Effect<Page<T>, InvalidCursor> =>
@@ -388,7 +387,7 @@ function makeCollection<S extends DocumentSchema, P extends FieldOf<S>, K extend
         Effect.mapError(() => new DocumentNotFound({ collection: name })),
         Effect.flatMap(decode),
       ),
-    delete: (key) => raw.delete(key as Doc),
+    delete: (key) => raw.delete(key),
     // Without a cursor, `query` can't fail with InvalidCursor; the overloads say so.
     query: query as Collection<T, P | K>['query'],
     queryAll: (partition, q = {}) => raw.queryAll(partition as Doc, q).pipe(Effect.flatMap(decodeAll)),

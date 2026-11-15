@@ -11,7 +11,7 @@ import {
 } from '@aws-sdk/client-cloudwatch-logs';
 import { type LogLine, type LogsResponse, names, type TelemetryEvent } from '@ericminassian/platform-core';
 import { BadRequest } from '@ericminassian/platform-core/platform-api';
-import { Clock, Context, Effect, Layer, Schedule, Stream } from 'effect';
+import { absurd, Clock, Context, Effect, Layer, Schedule, Stream } from 'effect';
 import { Aws, AwsError, toAwsError, tryAws } from './aws.ts';
 import { Settings } from './config.ts';
 import { parseLogMessage } from './telemetry/aggregate.ts';
@@ -29,7 +29,7 @@ export function runtimeRecord(message: string): string | undefined {
   if (!message.includes('"platform.')) return undefined;
   let rec: { type?: unknown; record?: Record<string, unknown> };
   try {
-    rec = JSON.parse(message);
+    rec = JSON.parse(message) as typeof rec;
   } catch {
     return undefined;
   }
@@ -93,6 +93,8 @@ export function describe(e: TelemetryEvent): string {
       return `metric ${e.name}=${e.value}${e.unit ?? ''}`;
     case 'env':
       return `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
+    default:
+      return absurd(e);
   }
 }
 
@@ -290,7 +292,7 @@ export class Logs extends Context.Service<
             const e = msg ? parseLogMessage(msg) : null;
             if (e && e.trace === options.trace) events.push(e);
           }
-          return events.sort((a, b) => a.ts - b.ts);
+          return events.toSorted((a, b) => a.ts - b.ts);
         },
         // Logs Insights refuses some queries (an unknown log group, a range too
         // long); the caller gets its reason.

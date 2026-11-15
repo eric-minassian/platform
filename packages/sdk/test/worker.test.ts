@@ -1,6 +1,11 @@
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createWorkerHandler, invokeJob } from '../src/runtime/worker.ts';
+import {
+  createWorkerHandler,
+  invokeJob,
+  type PlatformEvent,
+  type QueueMessage,
+} from '../src/runtime/worker.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 const QUEUE_ARN = 'arn:aws:sqs:us-east-1:000000000000:app--test--emails';
@@ -35,9 +40,9 @@ describe('worker dispatch', () => {
     const seen: unknown[] = [];
     const handler = createWorkerHandler({
       queues: {
-        emails: (msg, ctx) => {
+        emails: (msg: QueueMessage<{ to?: string; fail?: boolean }>, ctx) => {
           seen.push({ body: msg.body, attempt: msg.attempt, trace: ctx.trace });
-          if ((msg.body as { fail?: boolean }).fail) throw new Error('boom');
+          if (msg.body.fail) throw new Error('boom');
         },
       },
     });
@@ -66,7 +71,7 @@ describe('worker dispatch', () => {
     const got: unknown[] = [];
     const handler = createWorkerHandler({
       events: {
-        'order.created': (evt, ctx) => {
+        'order.created': (evt: PlatformEvent, ctx) => {
           got.push({ detail: evt.detail, trace: ctx.trace });
         },
         'order.failed': () => {
@@ -133,7 +138,7 @@ describe('worker dispatch', () => {
     });
     await invokeJob('deploy', { id: 'd1' });
     expect(calls[0]).toMatchObject({ FunctionName: 'app--test--worker', InvocationType: 'Event' });
-    const body = JSON.parse(new TextDecoder().decode(calls[0]!.Payload as Uint8Array));
+    const body = JSON.parse(new TextDecoder().decode(calls[0]!.Payload as Uint8Array)) as { trace: string };
     expect(body).toMatchObject({ __platform: 'invoke', name: 'deploy', payload: { id: 'd1' } });
     expect(body.trace).toMatch(/^[0-9a-f]{32}$/);
   });

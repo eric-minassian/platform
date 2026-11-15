@@ -42,7 +42,7 @@ function Detail({ g, onStatus }: { g: ErrorGroup; onStatus: (s: ErrorGroup['stat
   const { app, search } = useApp();
   return (
     <Card
-      title={`${g.name}`}
+      title={g.name}
       actions={
         <>
           {g.status !== 'resolved' && <Button onClick={() => onStatus('resolved')}>Resolve</Button>}

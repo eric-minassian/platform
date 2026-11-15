@@ -2,7 +2,7 @@ import { useAtomSet, useAtomValue } from '@effect/atom-react';
 import { loginUrl, logoutUrl, type User } from '@ericminassian/platform/api';
 import { Exit } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
-import { type FormEvent, useState } from 'react';
+import { type SubmitEvent, useState } from 'react';
 import type { Todo } from '../../src/domain.ts';
 import { ApiClient } from './client.ts';
 
@@ -47,10 +47,13 @@ function TodoList({ user }: { user: User }) {
   const [title, setTitle] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  async function add(e: FormEvent) {
+  function submit(e: SubmitEvent<HTMLFormElement>) {
     e.preventDefault();
     const trimmed = title.trim();
-    if (!trimmed) return;
+    if (trimmed) void add(trimmed);
+  }
+
+  async function add(trimmed: string) {
     setError(null);
     const exit = await create({ payload: { title: trimmed }, reactivityKeys: todosChanged });
     if (Exit.isFailure(exit)) setError('Could not add that todo.');
@@ -79,7 +82,7 @@ function TodoList({ user }: { user: User }) {
           {user.email ?? user.name ?? user.id} · <a href={logoutUrl()}>Sign out</a>
         </span>
       </header>
-      <form onSubmit={add}>
+      <form onSubmit={submit}>
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -90,31 +93,43 @@ function TodoList({ user }: { user: User }) {
         <button type="submit">Add</button>
       </form>
       {error && <p className="error">{error}</p>}
-      {AsyncResult.match(list, {
-        onInitial: () => null,
-        onFailure: () => <p className="error">Could not load your todos.</p>,
-        onSuccess: ({ value }) => (
-          <ul>
-            {value.map((t) => (
-              <li key={t.id}>
-                <label>
-                  <input type="checkbox" checked={t.done} onChange={() => void toggle(t)} />
-                  <span className={t.done ? 'done' : undefined}>{t.title}</span>
-                </label>
-                <button
-                  type="button"
-                  className="link"
-                  onClick={() => void del(t)}
-                  aria-label={`Delete ${t.title}`}
-                >
-                  ✕
-                </button>
-              </li>
-            ))}
-            {value.length === 0 && <li className="empty">Nothing yet.</li>}
-          </ul>
-        ),
-      })}
+      <TodoItems list={list} onToggle={(t) => void toggle(t)} onDelete={(t) => void del(t)} />
     </main>
   );
+}
+
+function TodoItems({
+  list,
+  onToggle,
+  onDelete,
+}: {
+  list: AsyncResult.AsyncResult<ReadonlyArray<Todo>, unknown>;
+  onToggle: (todo: Todo) => void;
+  onDelete: (todo: Todo) => void;
+}) {
+  return AsyncResult.match(list, {
+    onInitial: () => null,
+    onFailure: () => <p className="error">Could not load your todos.</p>,
+    onSuccess: ({ value }) => (
+      <ul>
+        {value.map((t) => (
+          <li key={t.id}>
+            <label>
+              <input type="checkbox" checked={t.done} onChange={() => onToggle(t)} />
+              <span className={t.done ? 'done' : undefined}>{t.title}</span>
+            </label>
+            <button
+              type="button"
+              className="link"
+              onClick={() => onDelete(t)}
+              aria-label={`Delete ${t.title}`}
+            >
+              ✕
+            </button>
+          </li>
+        ))}
+        {value.length === 0 && <li className="empty">Nothing yet.</li>}
+      </ul>
+    ),
+  });
 }

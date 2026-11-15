@@ -2,26 +2,29 @@
   "name": "platform-monorepo",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.11.2",
-  "engines": {
-    "node": ">=24"
-  },
   "scripts": {
     "typecheck": "pnpm -r --parallel typecheck",
     "test": "pnpm -r test",
     "test:integration": "pnpm -r test:integration",
-    "lint": "biome check .",
-    "format": "biome check --write .",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "build": "pnpm -r build",
     "plat": "node packages/cli/src/bin.ts",
     "platform:deploy": "pnpm --filter @ericminassian/platform-foundation deploy:platform",
     "platform:diff": "pnpm --filter @ericminassian/platform-foundation run diff"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.6.7",
+    "@ericminassian/platform-core": "workspace:*",
     "@types/node": "^24.19.2",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
+    "oxlint-tsgolint": "^7.0.2007",
     "typescript": "^7.0.2",
-    "vitest": "^5.1.0",
-    "@ericminassian/platform-core": "workspace:*"
-  }
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@12.11.2"
 }

@@ -51,14 +51,14 @@ describe('realtime.publish', () => {
   beforeEach(() => {
     calls = [];
     answer = () => Response.json({ successful: [{ identifier: 'x', index: 0 }], failed: [] });
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
       calls.push({
-        url: String(input),
+        url: String(input instanceof Request ? input.url : input),
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
-        body: JSON.parse(String(init?.body)),
+        body: JSON.parse(init?.body as string) as Call['body'],
       });
       return answer();
-    }) as typeof fetch;
+    };
     tel = captureTelemetry();
     useTestBindings({ realtime: realtimeBindings });
   });
@@ -89,7 +89,7 @@ describe('realtime.publish', () => {
       Array.from({ length: 12 }, (_, i) => ({ i })),
     );
     expect(calls.map((c) => c.body.events.length)).toEqual([5, 5, 2]);
-    expect(calls.flatMap((c) => c.body.events.map((e) => JSON.parse(e).i))).toEqual([
+    expect(calls.flatMap((c) => c.body.events.map((e) => (JSON.parse(e) as { i: number }).i))).toEqual([
       0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ]);
     await realtime.publishMany('board', []);
@@ -192,8 +192,10 @@ describe(REALTIME_TOKEN_PATH, () => {
     jwk = { ...(await exportJWK(pair.publicKey)), kid: 'k1', alg: 'RS256', use: 'sig' };
   });
   beforeEach(() => {
-    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
-      String(input) === JWKS ? Response.json({ keys: [jwk] }) : realFetch(input, init)) as typeof fetch;
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) =>
+      String(input instanceof Request ? input.url : input) === JWKS
+        ? Response.json({ keys: [jwk] })
+        : realFetch(input, init);
     tel = captureTelemetry();
   });
   afterEach(() => {

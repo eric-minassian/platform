@@ -321,7 +321,7 @@ export async function ensureRouterAccess(
 ): Promise<void> {
   const lw = ctx.clients.lambdaWeb;
   const sid = 'AllowPlatformRouter';
-  const arns = [...spec.endpointArns].sort();
+  const arns = spec.endpointArns.toSorted();
   const statement = {
     Sid: sid,
     Effect: 'Allow',

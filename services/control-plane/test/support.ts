@@ -4,13 +4,13 @@
  * through the platform's server wrapper on whatever services a test gives it.
  */
 import { toFetchHandler } from '@ericminassian/platform';
-import { createPlatformFetch } from '@ericminassian/platform/testing';
 import {
   type AppRecord,
   definePlatformConfig,
   type PlatformConfig,
   type PlatformRuntimeConfig,
 } from '@ericminassian/platform-core';
+import { createPlatformFetch } from '@ericminassian/platform/testing';
 import { DateTime, Effect, Layer, Option, Ref } from 'effect';
 import { decodeJwt, SignJWT } from 'jose';
 import { HttpLive } from '../src/api/http.ts';
@@ -148,7 +148,7 @@ export const memoryStore = (
         Effect.sync(() =>
           [...deployments.values()]
             .filter((d) => d.app === app)
-            .sort((a, b) => b.id.localeCompare(a.id))
+            .toSorted((a, b) => b.id.localeCompare(a.id))
             .slice(0, limit),
         ),
       updateDeployment: (_app, id, patch, ifStatus) =>

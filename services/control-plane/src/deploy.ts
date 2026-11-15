@@ -285,7 +285,10 @@ export class Deployer extends Context.Service<
       const run = Effect.fn('Deployer.run')(
         function* (id: string) {
           const found = yield* store.getDeployment(id);
-          if (Option.isNone(found)) return yield* Effect.logWarning('deploy job for unknown deployment');
+          if (Option.isNone(found)) {
+            yield* Effect.logWarning('deploy job for unknown deployment');
+            return;
+          }
           const { app, stage, status } = found.value;
           // Idempotent under Lambda async retries: only one run moves it out of `queued`.
           const claimed = yield* store.updateDeployment(
@@ -294,8 +297,10 @@ export class Deployer extends Context.Service<
             { status: 'running', startedAt: yield* nowIso },
             'queued',
           );
-          if (!claimed)
-            return yield* Effect.logInfo('deployment already handled').pipe(Effect.annotateLogs({ status }));
+          if (!claimed) {
+            yield* Effect.logInfo('deployment already handled').pipe(Effect.annotateLogs({ status }));
+            return;
+          }
           const before = yield* store.getStage(app, stage);
 
           // The event log is complete before the status is final: the CLI stops
@@ -359,11 +364,9 @@ export class Deployer extends Context.Service<
             yield* store.updateStage(app, stage, { status: 'failed' });
             return yield* Effect.failCause(destroyed.cause);
           }
-          yield* store.updateStage(app, stage, {
-            status: 'destroyed',
-            route: undefined,
-            previousRoute: undefined,
-          });
+          return yield* store
+            .updateStage(app, stage, { status: 'destroyed', route: undefined, previousRoute: undefined })
+            .pipe(Effect.asVoid);
         },
         (effect, app, stage) => Effect.annotateLogs(effect, { app, stage }),
       );

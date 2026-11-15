@@ -132,13 +132,13 @@ export function registerObserve(program: Command): void {
         }
         if (v.realtime) {
           const rt = v.realtime;
-          const pts = rt.points;
+          const rtPts = rt.points;
           lines.push(
             '',
             `${pc.bold('realtime')} ${pc.dim(`${rt.subscribe ?? 'public'} · ${rt.channels.join(', ')}`)}`,
-            `  events    ${String(rt.totals.events).padStart(8)}  ${sparkline(pts.map((p) => p.events))}`,
-            `  subscribes${String(rt.totals.subscribes).padStart(8)}  ${sparkline(pts.map((p) => p.subscribes))}`,
-            `  errors    ${String(rt.totals.errors).padStart(8)}  ${pc.red(sparkline(pts.map((p) => p.errors)))}`,
+            `  events    ${String(rt.totals.events).padStart(8)}  ${sparkline(rtPts.map((p) => p.events))}`,
+            `  subscribes${String(rt.totals.subscribes).padStart(8)}  ${sparkline(rtPts.map((p) => p.subscribes))}`,
+            `  errors    ${String(rt.totals.errors).padStart(8)}  ${pc.red(sparkline(rtPts.map((p) => p.errors)))}`,
           );
         }
         if (v.queues.length) {
@@ -275,7 +275,7 @@ export function formatLogLine(l: LogLine): string {
 
 export function formatTrace(events: readonly TelemetryEvent[]): string {
   if (events.length === 0) return pc.dim('(no events for this trace)');
-  const sorted = [...events].sort((a, b) => a.ts - b.ts);
+  const sorted = events.toSorted((a, b) => a.ts - b.ts);
   const t0 = sorted[0]!.ts;
   return sorted
     .map((e) => {

@@ -56,7 +56,7 @@ function Frame({ height, children }: { height: number; children: React.ReactElem
 
 const tooltip = (format?: (v: number) => string) => (
   <Tooltip
-    labelFormatter={(l) => fmtDateTime(String(l))}
+    labelFormatter={(l) => (typeof l === 'string' || typeof l === 'number' ? fmtDateTime(l) : l)}
     formatter={(v) => (format && typeof v === 'number' ? format(v) : String(v))}
     cursor={{ stroke: 'var(--muted)', strokeOpacity: 0.3 }}
     contentStyle={{

@@ -97,7 +97,7 @@ async function queueArn(sqs: SQSClient, url: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  expect(endpoint, 'integration tests need the AWS Emulator (see setup.ts)').toBeTruthy();
+  if (!endpoint) throw new Error('integration tests need the AWS Emulator (see setup.ts)');
   const ddb = new DynamoDBClient(cfg);
   const sqs = new SQSClient(cfg);
   const eb = new EventBridgeClient(cfg);
@@ -199,7 +199,7 @@ beforeAll(async () => {
       userPoolId: poolId,
       clientId: appClient.UserPoolClient!.ClientId!,
       issuer: `https://cognito-idp.${region}.amazonaws.com/${poolId}`,
-      jwksUri: `${endpoint!.replace(/\/$/, '')}/${poolId}/.well-known/jwks.json`,
+      jwksUri: `${endpoint.replace(/\/$/, '')}/${poolId}/.well-known/jwks.json`,
       loginUrl: 'http://unused.localhost',
       required: false,
     },
@@ -238,12 +238,13 @@ describe('against the AWS Emulator', () => {
   it('events: publish reaches a subscribed rule target', async () => {
     await run(Effect.flatMap(Events, (events) => events.publish('order.created', { orderId: 42 })));
     const sqs = new SQSClient(cfg);
-    let body: { 'detail-type': string; source: string; detail: { data: unknown; trace: string } } | undefined;
+    type Delivered = { 'detail-type': string; source: string; detail: { data: unknown; trace: string } };
+    let body: Delivered | undefined;
     for (let i = 0; i < 10 && !body; i++) {
       const out = await sqs.send(
         new ReceiveMessageCommand({ QueueUrl: eventsTargetUrl, WaitTimeSeconds: 1 }),
       );
-      if (out.Messages?.[0]) body = JSON.parse(out.Messages[0].Body!);
+      if (out.Messages?.[0]) body = JSON.parse(out.Messages[0].Body!) as Delivered;
     }
     expect(body).toMatchObject({
       'detail-type': 'order.created',

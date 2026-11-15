@@ -185,12 +185,11 @@ export async function handleAuthRoute(request: Request): Promise<Response | null
 async function localRoute(request: Request, b: Bindings, a: AuthBindings, route: string): Promise<Response> {
   const url = new URL(request.url);
   if (route === AUTH_ROUTES.login && request.method === 'POST') {
-    const form = await request.formData();
-    const email = String(form.get('email') ?? '')
-      .trim()
-      .toLowerCase();
-    const name = String(form.get('name') ?? '').trim();
-    const back = safeRedirect(String(form.get('redirect') ?? '/'));
+    // The login page's form posts application/x-www-form-urlencoded.
+    const form = new URLSearchParams(await request.text());
+    const email = (form.get('email') ?? '').trim().toLowerCase();
+    const name = (form.get('name') ?? '').trim();
+    const back = safeRedirect(form.get('redirect') ?? '/');
     if (!/^[^\s@]+@[^\s@]+$/.test(email)) return html(loginPage(b, back, 'Enter an email address.'), 400);
     const tokens = await localSignIn(a, email, name || undefined);
     return redirect(back, sessionCookies(b, tokens), 303);

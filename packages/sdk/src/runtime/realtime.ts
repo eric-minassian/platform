@@ -95,7 +95,7 @@ function signer(region: string): Promise<Signer> {
         // Memoized: refreshes the role's credentials before they expire.
         credentials: defaultProvider(),
         sha256: Hash.bind(null, 'sha256'),
-      }) as unknown as Signer;
+      });
     })();
     signers.set(region, s);
   }
@@ -105,7 +105,8 @@ function signer(region: string): Promise<Signer> {
 const appsync: Transport = async (r, path, events) => {
   const url = new URL(r.publishUrl);
   const body = JSON.stringify({ channel: path, events });
-  const signed = await (await signer(getBindings().region)).sign({
+  const sigv4 = await signer(getBindings().region);
+  const signed = await sigv4.sign({
     method: 'POST',
     protocol: url.protocol,
     hostname: url.hostname,

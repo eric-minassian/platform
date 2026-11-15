@@ -24,8 +24,8 @@ describe('presigned uploads', () => {
 
 function fakeApi(responses: Array<Partial<DeploymentRecord>>, calls: string[] = []) {
   let i = 0;
-  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
-    calls.push(`${init?.method ?? 'GET'} ${String(url)} ${new Headers(init?.headers).get('authorization')}`);
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    calls.push(`${init?.method ?? 'GET'} ${url} ${new Headers(init?.headers).get('authorization')}`);
     const body = responses[Math.min(i++, responses.length - 1)];
     return new Response(JSON.stringify(body), {
       status: 200,
@@ -69,12 +69,12 @@ describe('ApiClient', () => {
     const api = new ApiClient({
       baseUrl: 'https://api.test',
       token: 't',
-      fetch: (async () =>
+      fetch: async () =>
         new Response(JSON.stringify({ error: { code: 'forbidden', message: 'not your app' } }), {
           status: 403,
-        })) as typeof fetch,
+        }),
     });
-    const err = (await api.getApp('x').catch((e) => e)) as ApiError;
+    const err = (await api.getApp('x').catch((e: unknown) => e)) as ApiError;
     expect(err).toBeInstanceOf(ApiError);
     expect(err.message).toBe('not your app');
     expect(err.exitCode).toBe(EXIT.auth);
@@ -103,8 +103,7 @@ describe('ApiClient', () => {
     const api = new ApiClient({
       baseUrl: 'https://api.test',
       token: 't',
-      fetch: (async () =>
-        new Response(sse, { headers: { 'content-type': 'text/event-stream' } })) as typeof fetch,
+      fetch: async () => new Response(sse, { headers: { 'content-type': 'text/event-stream' } }),
     });
     const got: unknown[] = [];
     for await (const line of api.tailLogs('shop', { stage: 'prod' })) got.push(line);

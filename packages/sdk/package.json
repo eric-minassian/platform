@@ -2,13 +2,17 @@
   "name": "@ericminassian/platform",
   "version": "0.3.0",
   "description": "Runtime SDK for apps on the platform, built on Effect: db, queues, events, storage, secrets, auth, realtime, metrics.",
-  "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eric-minassian/platform.git",
     "directory": "packages/sdk"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
@@ -19,7 +23,6 @@
     "./testing": "./src/testing.ts"
   },
   "publishConfig": {
-    "access": "public",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
@@ -49,12 +52,9 @@
         "types": "./dist/testing.d.ts",
         "default": "./dist/testing.js"
       }
-    }
+    },
+    "access": "public"
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "effect-tsgo tsc --noEmit && effect-tsgo tsc -p test/types",
@@ -78,6 +78,12 @@
     "@smithy/signature-v4": "^5.7.5",
     "jose": "^6.2.17"
   },
+  "devDependencies": {
+    "@effect/tsgo": "^0.69.0",
+    "@ericminassian/platform-engine": "workspace:*",
+    "@types/aws-lambda": "^8.10.164",
+    "effect": "^4.1.4"
+  },
   "peerDependencies": {
     "effect": "^4.1.4"
   },
@@ -85,11 +91,5 @@
     "effect": {
       "optional": true
     }
-  },
-  "devDependencies": {
-    "@effect/tsgo": "^0.69.0",
-    "@ericminassian/platform-engine": "workspace:*",
-    "@types/aws-lambda": "^8.10.164",
-    "effect": "^4.1.4"
   }
 }

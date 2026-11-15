@@ -86,14 +86,18 @@ export function table(rows: Array<Record<string, unknown>>, columns?: string[]):
   if (rows.length === 0) return pc.dim('(none)');
   const cols = columns ?? Object.keys(rows[0]!);
   const cell = (v: unknown) =>
-    v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    v === undefined || v === null
+      ? ''
+      : typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        ? String(v)
+        : JSON.stringify(v);
   const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => visibleLength(cell(r[c])))));
   const line = (vals: string[]) =>
     vals.map((v, i) => v + ' '.repeat(widths[i]! - visibleLength(v))).join('  ');
   return [pc.bold(line(cols)), ...rows.map((r) => line(cols.map((c) => cell(r[c]))))].join('\n');
 }
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI escape codes is the point
+// oxlint-disable-next-line eslint/no-control-regex -- matching ANSI escape codes is the point
 const ANSI = /\x1b\[[0-9;]*m/g;
 function visibleLength(s: string): number {
   return s.replace(ANSI, '').length;

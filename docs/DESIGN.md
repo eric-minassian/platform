@@ -502,7 +502,7 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 - **Web Function economics.** Idle environment lifetime isn't documented, and
   memory is billed while warm. Watch the cost page. A future `compute:
-'event'` mode (Function URL origin with a shared-secret header) could serve
+  'event'` mode (Function URL origin with a shared-secret header) could serve
   near-zero-traffic apps from the Lambda free tier.
 - **Verified on the first real deploy (2026-11-15).**
   - `updateRequestOrigin` switches from the default S3 origin to a Web

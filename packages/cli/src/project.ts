@@ -126,7 +126,7 @@ export function cliPackageRoot(): string {
 }
 
 function cliPackageJson(): Record<string, unknown> {
-  return JSON.parse(readFileSync(join(cliPackageRoot(), 'package.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(cliPackageRoot(), 'package.json'), 'utf8')) as Record<string, unknown>;
 }
 
 /**

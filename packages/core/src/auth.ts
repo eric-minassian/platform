@@ -21,7 +21,10 @@ export const AUTH_COOKIES = {
 
 export const AUTH_SCOPES = ['openid', 'email', 'profile'] as const;
 
-/** Backslashes, spaces, and ASCII control characters (`<= ' '` covers C0 and space). */
+/**
+ * Backslashes, spaces, and ASCII control characters (`<= ' '` covers C0 and space).
+ * All of them are ASCII, so checking UTF-16 code units one by one is exact.
+ */
 const unsafeInRedirect = (c: string) => c === '\\' || c <= ' ' || c === '\u007f';
 
 /**
@@ -30,7 +33,8 @@ const unsafeInRedirect = (c: string) => c === '\\' || c <= ' ' || c === '\u007f'
  * `//evil.com`), so control characters and spaces are refused too.
  */
 export function safeRedirect(target: string | null | undefined): string {
-  if (!target?.startsWith('/') || target.startsWith('//') || [...target].some(unsafeInRedirect)) return '/';
+  if (!target?.startsWith('/') || target.startsWith('//') || target.split('').some(unsafeInRedirect))
+    return '/';
   return target;
 }
 

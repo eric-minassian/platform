@@ -221,7 +221,7 @@ function memoryStores(): (name: string) => Store {
         Effect.sync(() => {
           const all: StoredObject[] = [...objects.entries()]
             .filter(([k]) => k.startsWith(prefix.replace(/^\/+/, '')) && (!opts?.cursor || k > opts.cursor))
-            .sort(([a], [b]) => (a < b ? -1 : 1))
+            .toSorted(([a], [b]) => (a < b ? -1 : 1))
             .map(([k, bytes]) => ({ key: k, size: bytes.byteLength }));
           const page = all.slice(0, opts?.limit ?? 1000);
           return page.length < all.length ? { objects: page, cursor: page.at(-1)!.key } : { objects: page };

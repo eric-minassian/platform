@@ -32,16 +32,19 @@ function hold(port: number, host: string): Promise<number | undefined> {
 }
 
 describe('portFree', () => {
-  it('sees a port taken on either loopback address', async () => {
+  it('sees a port taken on 127.0.0.1, and a free port as free', async () => {
     const v4 = (await hold(0, '127.0.0.1'))!;
     expect(await portFree(v4)).toBe(false);
 
-    // A dev server bound to `localhost` often holds ::1 alone.
-    const v6 = await hold(0, '::1');
-    if (v6 !== undefined) expect(await portFree(v6)).toBe(false);
-
     const port = await freePort();
     expect(await portFree(port)).toBe(true);
+  });
+
+  // A dev server bound to `localhost` often holds ::1 alone.
+  it('sees a port taken on ::1', async ({ skip }) => {
+    const v6 = await hold(0, '::1');
+    skip(v6 === undefined, 'no IPv6 loopback');
+    expect(await portFree(v6!)).toBe(false);
   });
 });
 

@@ -127,7 +127,7 @@ export class Realtime extends Context.Service<
     Realtime,
     Realtime.of({
       publish: (channel, event) => Effect.promise(() => realtime.publish(channel, event)),
-      publishMany: (channel, events) => Effect.promise(() => realtime.publishMany(channel, events)),
+      publishMany: (channel, batch) => Effect.promise(() => realtime.publishMany(channel, batch)),
     }),
   );
 }
@@ -206,8 +206,8 @@ export class Secrets extends Context.Service<
   Secrets,
   {
     /** The value; a defect naming the `plat secrets set` command when it isn't set. */
-    get(name: SecretName): Effect.Effect<Redacted.Redacted<string>>;
-    getOptional(name: SecretName): Effect.Effect<Option.Option<Redacted.Redacted<string>>>;
+    get(name: SecretName): Effect.Effect<Redacted.Redacted>;
+    getOptional(name: SecretName): Effect.Effect<Option.Option<Redacted.Redacted>>;
   }
 >()('@ericminassian/platform/Secrets') {
   static readonly layer: Layer.Layer<Secrets> = Layer.succeed(
