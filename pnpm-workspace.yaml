@@ -1,0 +1,13 @@
+packages:
+  - packages/*
+  - services/*
+  - foundation
+  - templates/*
+
+# esbuild ships its native binary through a postinstall script; `plat build`
+# calls esbuild's JS API, which needs it.
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - cron-parser@5.10.6

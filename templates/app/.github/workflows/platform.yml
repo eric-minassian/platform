@@ -1,0 +1,24 @@
+# Test, build and deploy on the platform. PRs get a preview at
+# https://template-app--pr-<n>.ericminassian.com (removed when the PR closes);
+# main deploys https://template-app.ericminassian.com. No AWS credentials:
+# CI signs in to the platform with GitHub's OIDC token.
+name: platform
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: platform-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  platform:
+    uses: eric-minassian/platform/.github/workflows/app.yml@main

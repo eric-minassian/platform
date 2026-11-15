@@ -1,0 +1,58 @@
+{
+  "name": "@eric-minassian/platform-engine",
+  "version": "0.1.0",
+  "description": "Idempotent AWS SDK drivers that provision and deploy platform stages (no CloudFormation).",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eric-minassian/platform.git",
+    "directory": "packages/engine"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@eric-minassian/platform-core": "workspace:*",
+    "@aws-sdk/client-iam": "^3.1169.0",
+    "@aws-sdk/client-dynamodb": "^3.1169.0",
+    "@aws-sdk/client-sqs": "^3.1169.0",
+    "@aws-sdk/client-eventbridge": "^3.1169.0",
+    "@aws-sdk/client-scheduler": "^3.1169.0",
+    "@aws-sdk/client-lambda": "^3.1169.0",
+    "@aws-sdk/client-lambda-web": "^3.1169.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1169.0",
+    "@aws-sdk/client-s3": "^3.1169.0",
+    "@aws-sdk/client-ssm": "^3.1169.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
+    "@aws-sdk/client-cloudfront": "^3.1169.0",
+    "@aws-sdk/client-cloudfront-keyvaluestore": "^3.1169.0",
+    "@aws-sdk/client-route-53": "^3.1169.0",
+    "@aws-sdk/client-acm": "^3.1169.0",
+    "@aws-sdk/client-sts": "^3.1169.0",
+    "@aws-sdk/client-sns": "^3.1169.0",
+    "@aws-sdk/client-resource-groups-tagging-api": "^3.1169.0",
+    "@aws-sdk/signature-v4a": "^3.1138.0",
+    "@smithy/node-http-handler": "^4.14.2",
+    "fflate": "^0.8.3"
+  }
+}

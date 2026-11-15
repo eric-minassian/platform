@@ -1,0 +1,7 @@
+{
+  "name": "basic-app",
+  "web": { "server": "src/server.ts", "static": "public", "spa": true },
+  "db": true,
+  "queues": { "jobs": {} },
+  "crons": { "tick": "*/5 * * * *" }
+}
