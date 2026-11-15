@@ -126,6 +126,17 @@ export interface CreateDeploymentResponse {
   uploads: Partial<Record<ArtifactFile, PresignedPost>>;
 }
 
+export interface RollbackRequest {
+  /** Default: the stage's previous deployment. */
+  deploymentId?: string;
+}
+
+export interface RollbackResponse {
+  /** The deployment the stage routes to now. */
+  currentDeployment: string;
+  url: string;
+}
+
 export interface AppSummary {
   app: AppRecord;
   stages: StageRecord[];

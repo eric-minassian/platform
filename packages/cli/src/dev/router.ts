@@ -8,7 +8,7 @@ import {
 } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { extname, join, normalize, sep } from 'node:path';
-import { decide, HOST_HEADER, type RouteRecord } from '@ericminassian/platform-core';
+import { decide, type HealthResponse, HOST_HEADER, type RouteRecord } from '@ericminassian/platform-core';
 
 /**
  * `plat dev`'s stand-in for the CloudFront router: the same `decide()` the
@@ -34,6 +34,7 @@ export type LocalDecision =
   | { kind: 'server'; target: Target }
   | { kind: 'webdev'; target: Target }
   | { kind: 'file'; path: string }
+  | { kind: 'health'; body: HealthResponse }
   | { kind: 'unavailable'; reason: string }
   | { kind: 'notfound' };
 
@@ -42,6 +43,10 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
   const pathname = uri.split('?')[0] ?? '/';
   const d = decide(state.record, pathname);
   if (d.t === 'notfound') return { kind: 'notfound' };
+  if (d.t === 'health') {
+    const { app, stage, d: revision } = state.record;
+    return { kind: 'health', body: { ok: true, app, stage, revision } };
+  }
   if (d.t === 'server') {
     return state.server
       ? { kind: 'server', target: state.server }
@@ -115,6 +120,9 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
           return proxy(req, res, d.target, false);
         case 'file':
           return serveFile(res, d.path);
+        case 'health':
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          return res.end(JSON.stringify(d.body));
         case 'unavailable':
           return text(res, 503, `${d.reason}\n`);
         case 'notfound':

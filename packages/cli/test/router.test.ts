@@ -61,6 +61,22 @@ describe('localDecision', () => {
     expect(localDecision({ record: r, server }, '/anything')).toEqual({ kind: 'server', target: server });
   });
 
+  it('answers health itself for a static-only stage, like the edge', () => {
+    const r = localRouteRecord({
+      app: 'a',
+      stage: 'local',
+      deploymentId: 'd1',
+      hasServer: false,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+    });
+    expect(localDecision({ record: r, staticDir: '/srv/www' }, '/__platform/health')).toEqual({
+      kind: 'health',
+      body: { ok: true, app: 'a', stage: 'local', revision: 'd1' },
+    });
+  });
+
   it('never escapes the static root', () => {
     expect(safeJoin('/srv/www', '/../../etc/passwd')).toBeNull();
     expect(safeJoin('/srv/www', '/a/b.js')).toBe('/srv/www/a/b.js');

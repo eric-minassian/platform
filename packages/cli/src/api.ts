@@ -25,6 +25,8 @@ import {
   PLATFORM_DEFAULTS,
   type QueueStats,
   type Resolution,
+  type RollbackRequest,
+  type RollbackResponse,
   type RouteStats,
   type SecretInfo,
   type StageRecord,
@@ -209,13 +211,10 @@ export class ApiClient {
     });
   }
   rollback(app: string, stage: string, toDeployment?: string) {
-    return this.request<DeploymentRecord | StageRecord>(
-      'POST',
-      `/v1/apps/${enc(app)}/stages/${enc(stage)}/rollback`,
-      {
-        body: toDeployment ? { deploymentId: toDeployment } : {},
-      },
-    );
+    const body: RollbackRequest = toDeployment ? { deploymentId: toDeployment } : {};
+    return this.request<RollbackResponse>('POST', `/v1/apps/${enc(app)}/stages/${enc(stage)}/rollback`, {
+      body,
+    });
   }
   createDeployment(app: string, req: CreateDeploymentRequest) {
     return this.request<CreateDeploymentResponse>('POST', `/v1/apps/${enc(app)}/deployments`, { body: req });

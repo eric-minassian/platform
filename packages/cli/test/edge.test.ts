@@ -2,12 +2,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type AppConfig, parseManifest } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
-import { edgeChecksFor, hasEdgeChecks, waitForEdge } from '../src/edge.ts';
+import { confirmServedHere, edgeChecksFor, hasEdgeChecks, waitForEdge } from '../src/edge.ts';
+import { CliError, EXIT } from '../src/util/output.ts';
 import { tempDir } from './helpers.ts';
 
 const INDEX = '<!doctype html><script type="module" src="/assets/index-new.js"></script>';
 
-function checksFor(web: NonNullable<AppConfig['web']>, opts: { index?: boolean; hasStatic?: boolean } = {}) {
+function checksFor(web: AppConfig['web'], opts: { index?: boolean; hasStatic?: boolean } = {}) {
   const root = tempDir();
   if (opts.index !== false) {
     mkdirSync(join(root, 'dist'), { recursive: true });
@@ -15,10 +16,10 @@ function checksFor(web: NonNullable<AppConfig['web']>, opts: { index?: boolean; 
   }
   return edgeChecksFor({
     root,
-    manifest: parseManifest({ name: 'shop', web }),
+    manifest: parseManifest({ name: 'shop', ...(web ? { web } : {}), queues: { jobs: {} } }),
     stage: 'prod',
     deploymentId: 'd-new',
-    hasStatic: opts.hasStatic ?? !!web.static,
+    hasStatic: opts.hasStatic ?? !!web?.static,
   });
 }
 
@@ -29,9 +30,9 @@ describe('edgeChecksFor', () => {
     expect(c.indexHtml?.toString()).toBe(INDEX);
   });
 
-  it('checks only index.html for a static site, which has no health endpoint', () => {
+  it('checks the health the edge answers for a static site, and its index.html', () => {
     const c = checksFor({ static: 'dist' });
-    expect(c).toEqual({ health: false, indexHtml: Buffer.from(INDEX) });
+    expect(c).toEqual({ health: true, indexHtml: Buffer.from(INDEX) });
   });
 
   it('checks only the revision for a server-only app', () => {
@@ -44,9 +45,12 @@ describe('edgeChecksFor', () => {
     });
   });
 
-  it('has nothing to check for a static site without index.html', () => {
-    const c = checksFor({ static: 'dist', spa: false }, { index: false });
-    expect(hasEdgeChecks(c)).toBe(false);
+  it('checks only health for a static site without index.html', () => {
+    expect(checksFor({ static: 'dist', spa: false }, { index: false })).toEqual({ health: true });
+  });
+
+  it('has nothing to check for an app without a web part (it has no route)', () => {
+    expect(hasEdgeChecks(checksFor(undefined, { index: false }))).toBe(false);
   });
 });
 
@@ -117,5 +121,26 @@ describe('waitForEdge', () => {
       { fetch, timeoutMs: 10, intervalMs: 5 },
     );
     expect(r.pending).toEqual(['/index.html → not this build']);
+  });
+});
+
+describe('confirmServedHere', () => {
+  it('fails with what it saw when this machine never gets the deployment', async () => {
+    const fetch = edge({ '/__platform/health': [health('d-old')] });
+    const err = await confirmServedHere(
+      'https://shop.example.com',
+      'd-new',
+      { health: true },
+      {
+        fetch,
+        timeoutMs: 10,
+      },
+    ).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).exitCode).toBe(EXIT.deployFailed);
+    expect((err as CliError).message).toMatch(
+      /^the platform reports d-new live, but https:\/\/shop\.example\.com did not/,
+    );
+    expect((err as CliError).hint).toBe('last seen: /__platform/health → revision d-old');
   });
 });

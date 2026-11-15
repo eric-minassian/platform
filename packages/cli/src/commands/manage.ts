@@ -114,12 +114,18 @@ export function registerManage(program: Command): void {
   withTarget(
     program
       .command('rollback')
-      .description('point a stage back at its previous deployment (instant)')
-      .option('--to <deploymentId>', 'a specific earlier deployment'),
+      .description('point a stage back at its previous deployment')
+      .option('--to <deploymentId>', 'a specific earlier deployment')
+      .option('--no-wait', "don't wait for this machine to be served the deployment"),
   ).action(
-    action(async (opts: TargetOpts & { to?: string }) => {
+    action(async (opts: TargetOpts & { to?: string; wait: boolean }) => {
       const r = await apiFor(opts).rollback(await appFor(opts), opts.stage, opts.to);
-      result(r, () => `${pc.green('✓')} rolled back ${opts.stage}`);
+      if (opts.wait) {
+        const { confirmServedHere } = await import('../edge.ts');
+        // Every routed stage answers health (its server or the edge), with the deployment id.
+        await confirmServedHere(r.url, r.currentDeployment, { health: true });
+      }
+      result(r, (v) => `${pc.green('✓')} rolled back ${opts.stage} to ${v.currentDeployment}: ${v.url}`);
     }),
   );
 

@@ -13,6 +13,8 @@ import {
   type PresignedPost,
   parseManifest,
   publicUrl,
+  type RollbackRequest,
+  type RollbackResponse,
   stageHost,
 } from '@ericminassian/platform-core';
 import { Hono } from 'hono';
@@ -63,14 +65,14 @@ export const stages = new Hono<AuthEnv>()
   })
   .post('/:app/stages/:stage/rollback', async (c) => {
     const { app } = await memberApp(c);
-    const body = (await c.req.json().catch(() => ({}))) as { deploymentId?: string };
+    const body = (await c.req.json().catch(() => ({}))) as RollbackRequest;
     try {
-      const live = await callWorker<string>('rollback', {
+      const res = await callWorker<RollbackResponse>('rollback', {
         app: app.name,
         stage: c.req.param('stage'),
         ...(body.deploymentId ? { deploymentId: body.deploymentId } : {}),
       });
-      return c.json({ currentDeployment: live });
+      return c.json(res);
     } catch (err) {
       throw new ApiError(409, 'rollback_failed', err instanceof Error ? err.message : String(err));
     }

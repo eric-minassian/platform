@@ -9,11 +9,16 @@
 //   s   - static key prefix in the sites bucket, e.g. "foo/prod/d01j..." , optional
 //   r   - server route prefixes when both o and s exist, e.g. ["/api/"]
 //   spa - 1 to serve index.html for unknown non-file paths
-// returns { t: 'server' } | { t: 'static', key: '/<prefix>/<path>' } | { t: 'notfound' }
+// returns { t: 'server' } | { t: 'static', key: '/<prefix>/<path>' } | { t: 'health' } | { t: 'notfound' }
+//   health - the router answers /__platform/health itself (HealthResponse with rec.d as the
+//            revision): a stage without a server has nothing else to report what it serves.
 
 export function decide(rec, uri) {
   if (!rec || (!rec.o && !rec.s)) return { t: 'notfound' };
-  if (uri.indexOf('/__platform/') === 0) return rec.o ? { t: 'server' } : { t: 'notfound' };
+  if (uri.indexOf('/__platform/') === 0) {
+    if (rec.o) return { t: 'server' };
+    return uri === '/__platform/health' ? { t: 'health' } : { t: 'notfound' };
+  }
   if (!rec.s) return { t: 'server' };
   if (rec.o) {
     var routes = rec.r || [];

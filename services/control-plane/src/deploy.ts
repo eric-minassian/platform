@@ -12,6 +12,7 @@ import {
   names,
   type PlatformRuntimeConfig,
   parseManifest,
+  type RollbackResponse,
 } from '@ericminassian/platform-core';
 import { createEngine, type DeployStageInput, type S3Location } from '@ericminassian/platform-engine';
 import { aws } from './aws.ts';
@@ -143,7 +144,8 @@ export async function runDeployment(id: string): Promise<void> {
       route: result.route,
       previousRoute: before?.route,
     });
-    if (result.webFunction) {
+    // A stage without a server gets its health answered by the edge router, from the route.
+    if (result.route) {
       events.push({ level: 'info', msg: 'waiting for the edge to serve this deployment' });
       await events.flush();
       const served = await waitForEdge(result.url, id);
@@ -194,7 +196,11 @@ export async function runDestroy(app: string, stage: string): Promise<void> {
 }
 
 /** Points a stage back at an earlier successful deployment (default: the previous one). */
-export async function rollback(app: string, stage: string, toDeploymentId?: string): Promise<string> {
+export async function rollback(
+  app: string,
+  stage: string,
+  toDeploymentId?: string,
+): Promise<RollbackResponse> {
   const current = await getStage(app, stage);
   if (!current?.currentDeployment) throw new Error(`${app}/${stage} has no live deployment`);
   const targetId = toDeploymentId ?? current.previousDeployment;
@@ -225,5 +231,5 @@ export async function rollback(app: string, stage: string, toDeploymentId?: stri
     ...(target.url ? { url: target.url } : {}),
   });
   await updateDeployment(app, current.currentDeployment, { status: 'rolled_back' });
-  return targetId;
+  return { currentDeployment: targetId, url: target.url ?? current.url };
 }

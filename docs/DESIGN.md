@@ -186,6 +186,10 @@ used by `plat dev`):
   origins.
 - Files go to the sites bucket under the live deployment's prefix. SPA paths
   get `index.html`.
+- A stage without a server has nothing to answer `/__platform/health`, so the
+  function answers it from the route record (`revision` is the record's
+  deployment id). Every routed stage reports which deployment it serves, for
+  the deployer, `plat deploy`/`plat rollback` and the uptime pinger.
 - Unknown hosts get a 404.
 
 The cache key includes the rewritten URI (static keys contain the deployment
@@ -217,6 +221,9 @@ comments the URL on the PR.
   destroy previews but never deploy one.
 - A failure before the route flip leaves the live version untouched. Rollback
   routes traffic to the previous Web Function revision and static prefix.
+- A deploy never deletes the static files the previous route points at:
+  edges that haven't picked up the new route still serve them. Rollback
+  refuses a deployment whose files or revision were cleaned up since.
 - Stages: `main` → `prod`. Each PR → `pr-<n>`, destroyed when the PR closes.
   A nightly reaper removes previews idle for `previewTtlDays`.
 - App repos hold no AWS credentials. They call a reusable workflow in this

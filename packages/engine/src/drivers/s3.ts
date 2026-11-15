@@ -143,6 +143,14 @@ export async function publishStaticZip(
   return files.length;
 }
 
+/** Whether any object exists under `prefix`. */
+export async function hasObjects(ctx: EngineContext, bucket: string, prefix: string): Promise<boolean> {
+  const res = await ctx.clients.s3.send(
+    new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 1 }),
+  );
+  return (res.KeyCount ?? res.Contents?.length ?? 0) > 0;
+}
+
 /** Immediate child "directories" under `prefix` (ends with `/`). */
 export async function listChildPrefixes(
   ctx: EngineContext,
