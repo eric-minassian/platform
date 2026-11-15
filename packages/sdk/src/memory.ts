@@ -1,13 +1,18 @@
-import { Context, Effect, Layer, Option, Redacted } from 'effect';
+import { randomUUID } from 'node:crypto';
+import { checkEmailMessage, type EmailMessage, emailUsageDay, names } from '@ericminassian/platform-core';
+import { Clock, Context, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
 import { Db } from './db.ts';
+import { emailRefusals } from './runtime/email.ts';
 import { encodeRealtimeEvents, realtimeChannelError } from './runtime/realtime.ts';
 import { objectKey, type StoredObject } from './runtime/storage.ts';
 import {
   AppInfo,
   Auth,
   delaySeconds,
+  Email,
+  EmailNotSent,
   Events,
   Jobs,
   Metrics,
@@ -35,6 +40,16 @@ export interface RealtimePublish {
   readonly event: unknown;
 }
 
+/** A message `Email.send` accepted, with its recipients normalized. */
+export interface SentEmail {
+  readonly id: string;
+  readonly to: ReadonlyArray<string>;
+  readonly replyTo: ReadonlyArray<string>;
+  readonly subject: string;
+  readonly text: string;
+  readonly html?: string;
+}
+
 export interface InvokedJob {
   readonly name: string;
   readonly payload: unknown;
@@ -53,6 +68,8 @@ export class PlatformMemory extends Context.Service<
     readonly sent: Effect.Effect<ReadonlyArray<SentMessage>>;
     readonly published: Effect.Effect<ReadonlyArray<PublishedEvent>>;
     readonly realtime: Effect.Effect<ReadonlyArray<RealtimePublish>>;
+    /** Messages `Email.send` accepted, oldest first. */
+    readonly emails: Effect.Effect<ReadonlyArray<SentEmail>>;
     readonly metrics: Effect.Effect<ReadonlyArray<RecordedMetric>>;
     /** Jobs invoked with `Jobs.invoke`; nothing runs them. */
     readonly invoked: Effect.Effect<ReadonlyArray<InvokedJob>>;
@@ -73,13 +90,30 @@ export interface MemoryOptions {
    * checks that channel names are well formed.
    */
   readonly realtime?: { readonly channels: ReadonlyArray<string> };
+  /**
+   * How `Email` behaves: `dailyLimit` caps recipients per UTC day (by the
+   * effect `Clock`; unlimited by default), and `paused` refuses every send,
+   * as SES does for a paused stage. Both fail with `EmailNotSent`.
+   */
+  readonly email?: { readonly dailyLimit?: number; readonly paused?: boolean };
 }
 
 /** Every platform service in memory, plus `PlatformMemory`. Each build starts empty. */
 export const layerMemory = (
   options: MemoryOptions = {},
 ): Layer.Layer<
-  AppInfo | Auth | Db | Events | Jobs | Metrics | Queues | Realtime | Secrets | Storage | PlatformMemory
+  | AppInfo
+  | Auth
+  | Db
+  | Email
+  | Events
+  | Jobs
+  | Metrics
+  | Queues
+  | Realtime
+  | Secrets
+  | Storage
+  | PlatformMemory
 > =>
   Layer.mergeAll(
     Db.layerMemory(),
@@ -100,19 +134,53 @@ export const layerMemory = (
         const invoked: InvokedJob[] = [];
         const users = new Map((options.users ?? []).map((u) => [u.id, u]));
         const secrets = new Map(Object.entries(options.secrets ?? {}));
+        const appInfo = AppInfo.of({
+          name: 'test-app',
+          stage: 'test',
+          host: 'test-app.localhost',
+          url: 'http://test-app.localhost:3000',
+          revision: 'dtest',
+          isLocal: true,
+          ...options.app,
+        });
 
-        return Context.make(
-          AppInfo,
-          AppInfo.of({
-            name: 'test-app',
-            stage: 'test',
-            host: 'test-app.localhost',
-            url: 'http://test-app.localhost:3000',
-            revision: 'dtest',
-            isLocal: true,
-            ...options.app,
-          }),
-        ).pipe(
+        const emails: SentEmail[] = [];
+        /** Recipients per UTC day, like the stage's usage rows. */
+        const emailUsage = new Map<string, number>();
+        const sendEmail = (message: EmailMessage) =>
+          Effect.gen(function* () {
+            const checked = checkEmailMessage(message);
+            if (!checked.ok) return yield* new EmailNotSent({ reason: 'rejected', message: checked.message });
+            if (options.email?.paused) {
+              const tenant = names.emailTenant(appInfo.name, appInfo.stage);
+              return yield* new EmailNotSent({
+                reason: 'paused',
+                message: emailRefusals.paused(tenant, appInfo.stage),
+              });
+            }
+            const day = emailUsageDay(yield* Clock.currentTimeMillis);
+            const used = emailUsage.get(day) ?? 0;
+            const limit = options.email?.dailyLimit;
+            const k = checked.to.length;
+            if (limit !== undefined && used + k > limit)
+              return yield* new EmailNotSent({
+                reason: 'daily-limit',
+                message: emailRefusals.dailyLimit(limit, k),
+              });
+            emailUsage.set(day, used + k);
+            const id = randomUUID();
+            emails.push({
+              id,
+              to: checked.to,
+              replyTo: checked.replyTo,
+              subject: message.subject,
+              text: message.text,
+              ...(message.html !== undefined ? { html: message.html } : {}),
+            });
+            return { id };
+          });
+
+        return Context.make(AppInfo, appInfo).pipe(
           Context.add(
             Auth,
             Auth.of({
@@ -152,6 +220,7 @@ export const layerMemory = (
               publishMany: (channel, events) => publishRealtime(channel, [...events]),
             }),
           ),
+          Context.add(Email, Email.of({ send: sendEmail })),
           Context.add(Storage, Storage.of({ store: memoryStores() })),
           Context.add(
             Secrets,
@@ -188,6 +257,7 @@ export const layerMemory = (
               sent: Effect.sync(() => [...sent]),
               published: Effect.sync(() => [...published]),
               realtime: Effect.sync(() => [...realtimeEvents]),
+              emails: Effect.sync(() => [...emails]),
               metrics: Effect.sync(() => [...recorded]),
               invoked: Effect.sync(() => [...invoked]),
             }),

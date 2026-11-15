@@ -14,6 +14,7 @@ export {
   type CronConfig,
   channel,
   defineApp,
+  type EmailConfig,
   type EventConfig,
   event,
   type QueueConfig,

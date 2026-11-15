@@ -2,8 +2,9 @@
  * `@ericminassian/platform`: what app code imports. Every platform resource
  * as an Effect service, the web server and worker entry points, and an
  * in-memory platform for unit tests. Backed by AWS (DynamoDB, SQS,
- * EventBridge, S3, SSM, Cognito, AppSync Events) through the bindings the
- * engine injects; under `plat dev` the same code talks to the AWS Emulator.
+ * EventBridge, S3, SSM, Cognito, AppSync Events, SES) through the bindings
+ * the engine injects; under `plat dev` the same code talks to the AWS
+ * Emulator, and email goes to a local inbox.
  *
  *   // src/server.ts
  *   export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)));
@@ -66,6 +67,9 @@ export type { JobContext, LogsBatch, PlatformEvent, QueueMessage } from './runti
 export {
   AppInfo,
   Auth,
+  Email,
+  type EmailMessage,
+  EmailNotSent,
   Events,
   Jobs,
   Metrics,

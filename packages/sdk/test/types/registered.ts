@@ -6,6 +6,8 @@ import {
   Db,
   type DocumentNotFound,
   defineWorker,
+  Email,
+  type EmailNotSent,
   Events,
   Platform,
   type QueueMessage,
@@ -120,6 +122,34 @@ export const wrongPayload = defineWorker({
     emails: (message: QueueMessage<{ email: string }>) => Effect.succeed(message.body.email),
     plain: () => Effect.void,
   },
+});
+
+export const email = Effect.gen(function* () {
+  const mail = yield* Email;
+  const sent: Effect.Effect<{ readonly id: string }, EmailNotSent> = mail.send({
+    to: ['a@example.com', 'b@example.com'],
+    subject: 'Welcome',
+    text: 'Hello',
+    html: '<p>Hello</p>',
+    replyTo: 'support@example.com',
+  });
+  // @ts-expect-error a send can fail with EmailNotSent
+  const unchecked: Effect.Effect<{ readonly id: string }> = mail.send({
+    to: 'a@example.com',
+    subject: 'x',
+    text: 'y',
+  });
+  // @ts-expect-error a message needs a subject
+  yield* mail.send({ to: 'a@example.com', text: 'Hello' });
+  // @ts-expect-error a message needs a text body
+  yield* mail.send({ to: 'a@example.com', subject: 'Hi', html: '<p>Hi</p>' });
+  const handled: Effect.Effect<string> = sent.pipe(
+    Effect.map(({ id }) => id),
+    Effect.catchTag('EmailNotSent', (e) =>
+      Effect.succeed(e.reason satisfies 'daily-limit' | 'paused' | 'rejected'),
+    ),
+  );
+  return [unchecked, handled];
 });
 
 const Note = Schema.Struct({ ownerId: Schema.String, noteId: Schema.String });

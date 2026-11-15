@@ -3,7 +3,18 @@ import type { Authentication } from './api.ts';
 import { Db } from './db.ts';
 import { AuthenticationLayer } from './http.ts';
 import { type MemoryOptions, layerMemory as memory, type PlatformMemory } from './memory.ts';
-import { AppInfo, Auth, Events, Jobs, Metrics, Queues, Realtime, Secrets, Storage } from './services.ts';
+import {
+  AppInfo,
+  Auth,
+  Email,
+  Events,
+  Jobs,
+  Metrics,
+  Queues,
+  Realtime,
+  Secrets,
+  Storage,
+} from './services.ts';
 
 export {
   type InvokedJob,
@@ -12,6 +23,7 @@ export {
   type PublishedEvent,
   type RealtimePublish,
   type RecordedMetric,
+  type SentEmail,
   type SentMessage,
 } from './memory.ts';
 
@@ -21,6 +33,7 @@ export type Services =
   | Auth
   | Authentication
   | Db
+  | Email
   | Events
   | Jobs
   | Metrics
@@ -33,6 +46,7 @@ export type Services =
 export const layer: Layer.Layer<Services> = Layer.mergeAll(
   AppInfo.layer,
   Db.layer,
+  Email.layer,
   Events.layer,
   Jobs.layer,
   Metrics.layer,
@@ -44,7 +58,8 @@ export const layer: Layer.Layer<Services> = Layer.mergeAll(
 
 /**
  * Every service in memory, for unit tests: no emulator, no AWS. `Memory`
- * exposes what was sent, published (events and realtime), invoked and counted.
+ * exposes what was sent (queue messages and email), published (events and
+ * realtime), invoked and counted.
  */
 export const layerMemory = (options?: MemoryOptions): Layer.Layer<Services | PlatformMemory> =>
   AuthenticationLayer.pipe(Layer.provideMerge(memory(options)));
