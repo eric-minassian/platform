@@ -1,15 +1,23 @@
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../../api.ts';
+import { useAtomValue } from '@effect/atom-react';
+import { Atom } from 'effect/reactivity';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, SERIES_COLORS } from '../../components/charts.tsx';
 import { Card, Loaded, Stat } from '../../components/ui.tsx';
 import { fmtUsd } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
 
+// Cost Explorer refreshes daily and charges per request, so an hour-old answer is fresh enough.
+const costAtom = Atom.family((app: string) =>
+  fresh(ApiClient.query('observe', 'cost', { params: { app }, query: { days: 35 }, timeToLive }), {
+    staleTime: '1 hour',
+  }),
+);
+
 export function CostTab() {
   const { app } = useApp();
-  const q = useQuery({ queryKey: ['cost', app], queryFn: () => api.cost(app, 35), staleTime: 60 * 60_000 });
+  const result = useAtomValue(costAtom(app));
   return (
-    <Loaded q={q}>
+    <Loaded result={result}>
       {(c) => {
         const last7 = c.days.slice(-7).reduce((a, d) => a + d.usd, 0);
         return (

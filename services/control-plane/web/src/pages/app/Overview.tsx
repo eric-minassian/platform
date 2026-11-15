@@ -1,27 +1,34 @@
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../../api.ts';
+import { useAtomValue } from '@effect/atom-react';
+import { Option } from 'effect';
+import { AsyncResult, Atom } from 'effect/reactivity';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, Lines, SERIES_COLORS, StackedArea } from '../../components/charts.tsx';
 import { Card, Loaded, Stat } from '../../components/ui.tsx';
 import { fmtMs, fmtNum, fmtPct } from '../../format.ts';
-import { useApp } from '../AppLayout.tsx';
+import { type Scope, useApp } from '../AppLayout.tsx';
+
+const metricsAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'metrics', { params: { app }, query: { stage, range }, timeToLive }), {
+    every: '30 seconds',
+  }),
+);
+const uptimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'uptime', { params: { app }, query: { stage, range }, timeToLive })),
+);
 
 export function OverviewTab() {
   const { app, scope } = useApp();
-  const metrics = useQuery({
-    queryKey: ['metrics', app, scope],
-    queryFn: () => api.metrics(app, scope),
-    refetchInterval: 30_000,
-  });
-  const uptime = useQuery({ queryKey: ['uptime', app, scope], queryFn: () => api.uptime(app, scope) });
+  const metrics = useAtomValue(metricsAtom({ app, ...scope }));
+  const uptime = useAtomValue(uptimeAtom({ app, ...scope }));
 
   return (
-    <Loaded q={metrics}>
+    <Loaded result={metrics}>
       {(m) => {
         const total = m.points.reduce((a, p) => a + p.req, 0);
         const errors = m.points.reduce((a, p) => a + p.s5xx, 0);
         const cold = m.points.reduce((a, p) => a + p.cold, 0);
         const p95s = m.points.map((p) => p.p95).filter((v): v is number => v !== null);
-        const checks = uptime.data ?? [];
+        const checks = Option.getOrElse(AsyncResult.value(uptime), () => []);
         const up = checks.length ? checks.filter((c) => c.ok).length / checks.length : null;
         const data = m.points.map((p) => ({ ...p, errRate: p.req ? p.s5xx / p.req : 0 }));
         return (

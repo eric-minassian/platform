@@ -6,31 +6,13 @@ import {
   type AppRecord,
   findMember,
   isPreviewStage,
-  type MemberRole,
   type PlatformConfig,
   PROD_STAGE,
   validateStageName,
 } from '@ericminassian/platform-core';
+import type { CiPrincipal, MemberPrincipal, Principal } from '@ericminassian/platform-core/platform-api';
 
-export interface MemberPrincipal {
-  kind: 'member';
-  github: string;
-  role: MemberRole;
-}
-
-/** A GitHub Actions run, identified by its OIDC token. */
-export interface CiPrincipal {
-  kind: 'ci';
-  repository: string;
-  repositoryOwner: string;
-  ref: string;
-  eventName: string;
-  sha?: string;
-  actor?: string;
-  runId?: string;
-}
-
-export type Principal = MemberPrincipal | CiPrincipal;
+export type { CiPrincipal, MemberPrincipal, Principal } from '@ericminassian/platform-core/platform-api';
 
 /** Claims we read from a GitHub Actions OIDC token. */
 export interface GithubOidcClaims {

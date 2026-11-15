@@ -4,130 +4,181 @@
  * with the session key in SSM. Membership is re-checked on every request, so
  * removing someone from `platform.config.ts` revokes access on the next deploy.
  */
-
 import { PLATFORM_DEFAULTS } from '@ericminassian/platform-core';
-import type { Context, MiddlewareHandler } from 'hono';
-import { getCookie } from 'hono/cookie';
+import {
+  Authenticated,
+  CSRF_HEADER,
+  CurrentPrincipal,
+  Forbidden,
+  type Principal,
+  Unauthenticated,
+} from '@ericminassian/platform-core/platform-api';
+import { Clock, Context, Effect, Layer, Option, Schema } from 'effect';
+import { HttpServerRequest } from 'effect/http';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, SignJWT } from 'jose';
-import { ciPrincipalFromClaims, type GithubOidcClaims, memberFor, type Principal } from './authz.ts';
-import { config, getSessionKey } from './config.ts';
-import { ApiError } from './errors.ts';
+import { ciPrincipalFromClaims, type GithubOidcClaims, memberFor } from './authz.ts';
+import { Settings } from './config.ts';
 
 export const CONSOLE_COOKIE = '__plat_console';
 const ISSUER = 'platform';
 const GITHUB_OIDC_ISSUER = 'https://token.actions.githubusercontent.com';
-const githubJwks = createRemoteJWKSet(new URL(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`));
 
 export type TokenUse = 'cli' | 'console';
 
 export const TOKEN_TTL_SECONDS: Record<TokenUse, number> = { cli: 30 * 86400, console: 7 * 86400 };
 
-export async function issueToken(
-  github: string,
-  use: TokenUse,
-): Promise<{ token: string; expiresAt: string }> {
-  const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS[use];
-  const token = await new SignJWT({ use })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuer(ISSUER)
-    .setAudience(`platform-${use}`)
-    .setSubject(github)
-    .setIssuedAt()
-    .setExpirationTime(exp)
-    .sign(await getSessionKey());
-  return { token, expiresAt: new Date(exp * 1000).toISOString() };
-}
+/** A token that doesn't verify; `message` is jose's reason. */
+export class InvalidToken extends Schema.TaggedError<InvalidToken, { readonly brand: unique symbol }>()(
+  'InvalidToken',
+  { message: Schema.String },
+) {}
 
-async function verifyPlatformToken(token: string, use: TokenUse): Promise<string> {
-  const { payload } = await jwtVerify(token, await getSessionKey(), {
-    issuer: ISSUER,
-    audience: `platform-${use}`,
-    algorithms: ['HS256'],
-  });
-  if (!payload.sub) throw new Error('token has no subject');
-  return payload.sub;
-}
+const invalid = (e: unknown) => new InvalidToken({ message: e instanceof Error ? e.message : String(e) });
 
-async function verifyGithubOidc(token: string): Promise<GithubOidcClaims> {
-  const { payload } = await jwtVerify(token, githubJwks, {
-    issuer: GITHUB_OIDC_ISSUER,
-    audience: PLATFORM_DEFAULTS.oidcAudience,
-    algorithms: ['RS256'],
-  });
-  return payload as GithubOidcClaims;
-}
-
-/** Dev-only escape hatch, set programmatically by `src/dev.ts` (never by env, so it can't reach Lambda). */
-let devUser: string | undefined;
-export function setDevAuth(github: string | undefined): void {
-  devUser = github;
-}
-
-export type AuthVia = 'bearer' | 'cookie' | 'dev';
-
-export async function authenticate(c: Context): Promise<{ principal: Principal; via: AuthVia } | null> {
-  if (devUser) {
-    const m = memberFor(config, devUser);
-    return m ? { principal: m, via: 'dev' } : null;
+export class Tokens extends Context.Service<
+  Tokens,
+  {
+    /** A platform token for a member: `cli` for `plat login`, `console` for the session cookie. */
+    issue(
+      github: string,
+      use: TokenUse,
+    ): Effect.Effect<{ readonly token: string; readonly expiresAt: string }>;
+    /** The GitHub login a platform token was issued to. */
+    verify(token: string, use: TokenUse): Effect.Effect<string, InvalidToken>;
+    /** The claims of a GitHub Actions OIDC token minted for the platform's audience. */
+    verifyGithubOidc(token: string): Effect.Effect<GithubOidcClaims, InvalidToken>;
   }
-  const header = c.req.header('authorization');
-  const bearer = header?.match(/^Bearer\s+(.+)$/i)?.[1];
-  if (bearer) {
-    let iss: string | undefined;
-    try {
-      iss = decodeJwt(bearer).iss;
-    } catch {
-      throw new ApiError(401, 'unauthenticated', 'malformed bearer token');
-    }
-    if (iss === GITHUB_OIDC_ISSUER) {
-      const claims = await verifyGithubOidc(bearer).catch((e: Error) => {
-        throw new ApiError(401, 'unauthenticated', `invalid GitHub OIDC token: ${e.message}`);
+>()('@ericminassian/platform-control-plane/Tokens') {
+  static readonly layer: Layer.Layer<Tokens, never, Settings> = Layer.effect(
+    Tokens,
+    Effect.gen(function* () {
+      const settings = yield* Settings;
+      // jose caches the key set and refetches it when GitHub rotates keys.
+      const githubJwks = createRemoteJWKSet(new URL(`${GITHUB_OIDC_ISSUER}/.well-known/jwks`));
+
+      const issue = Effect.fn('Tokens.issue')(function* (github: string, use: TokenUse) {
+        const key = yield* settings.sessionKey;
+        const exp = Math.floor((yield* Clock.currentTimeMillis) / 1000) + TOKEN_TTL_SECONDS[use];
+        const token = yield* Effect.promise(() =>
+          new SignJWT({ use })
+            .setProtectedHeader({ alg: 'HS256' })
+            .setIssuer(ISSUER)
+            .setAudience(`platform-${use}`)
+            .setSubject(github)
+            .setIssuedAt()
+            .setExpirationTime(exp)
+            .sign(key),
+        );
+        return { token, expiresAt: new Date(exp * 1000).toISOString() };
       });
-      const ci = ciPrincipalFromClaims(claims);
-      if (!ci) throw new ApiError(401, 'unauthenticated', 'GitHub OIDC token is missing repository claims');
-      return { principal: ci, via: 'bearer' };
-    }
-    const github = await verifyPlatformToken(bearer, 'cli').catch(() => {
-      throw new ApiError(401, 'unauthenticated', 'invalid or expired platform token; run `plat login`');
-    });
-    const member = memberFor(config, github);
-    if (!member) throw new ApiError(403, 'not_a_member', `${github} is not a platform member`);
-    return { principal: member, via: 'bearer' };
-  }
-  const cookie = getCookie(c, CONSOLE_COOKIE);
-  if (cookie) {
-    const github = await verifyPlatformToken(cookie, 'console').catch(() => null);
-    const member = github ? memberFor(config, github) : null;
-    if (member) return { principal: member, via: 'cookie' };
-  }
-  return null;
+
+      const verify = Effect.fn('Tokens.verify')(function* (token: string, use: TokenUse) {
+        const key = yield* settings.sessionKey;
+        const { payload } = yield* Effect.tryPromise({
+          try: () =>
+            jwtVerify(token, key, { issuer: ISSUER, audience: `platform-${use}`, algorithms: ['HS256'] }),
+          catch: invalid,
+        });
+        if (!payload.sub) return yield* new InvalidToken({ message: 'token has no subject' });
+        return payload.sub;
+      });
+
+      const verifyGithubOidc = Effect.fn('Tokens.verifyGithubOidc')(function* (token: string) {
+        const { payload } = yield* Effect.tryPromise({
+          try: () =>
+            jwtVerify(token, githubJwks, {
+              issuer: GITHUB_OIDC_ISSUER,
+              audience: PLATFORM_DEFAULTS.oidcAudience,
+              algorithms: ['RS256'],
+            }),
+          catch: invalid,
+        });
+        return payload as GithubOidcClaims;
+      });
+
+      return Tokens.of({ issue, verify, verifyGithubOidc });
+    }),
+  );
 }
 
-/** Header the console sends on every request; cross-site forms can't set it (CSRF guard). */
-export const CSRF_HEADER = 'x-platform-csrf';
+/**
+ * Dev-only escape hatch: every request acts as this member. Provided by
+ * `src/dev.ts` alone, never read from the environment here, so it can't
+ * reach Lambda.
+ */
+export const DevUser = Context.Reference<Option.Option<string>>(
+  '@ericminassian/platform-control-plane/DevUser',
+  {
+    defaultValue: () => Option.none(),
+  },
+);
+
+/** Methods a cross-site form can't send with a body, so the CSRF header isn't needed. */
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-export type AuthEnv = { Variables: { principal: Principal } };
+const notAMember = (github: string) =>
+  new Forbidden({ code: 'not_a_member', message: `${github} is not a platform member` });
 
-/** Requires some principal; routes narrow to members/CI as needed. */
-export const requireAuth: MiddlewareHandler<AuthEnv> = async (c, next) => {
-  const auth = await authenticate(c);
-  if (!auth) throw new ApiError(401, 'unauthenticated', 'sign in at the console or run `plat login`');
-  if (auth.via === 'cookie' && !SAFE_METHODS.has(c.req.method) && c.req.header(CSRF_HEADER) !== '1') {
-    throw new ApiError(403, 'csrf', `cookie-authenticated writes need the ${CSRF_HEADER} header`);
-  }
-  c.set('principal', auth.principal);
-  await next();
-};
+/** `Authenticated`: who is calling, from a bearer token or the console cookie. */
+export const AuthenticatedLive: Layer.Layer<Authenticated, never, Settings | Tokens> = Layer.effect(
+  Authenticated,
+  Effect.gen(function* () {
+    const settings = yield* Settings;
+    const tokens = yield* Tokens;
+    const devUser = yield* DevUser;
+    const member = (github: string) => Option.fromNullishOr(memberFor(settings.platform, github));
 
-export function requireMember(c: Context<AuthEnv>) {
-  const p = c.get('principal');
-  if (p.kind !== 'member') throw new ApiError(403, 'members_only', 'this endpoint needs a member token');
-  return p;
-}
+    const fromBearer = Effect.fnUntraced(function* (token: string) {
+      const iss = yield* Effect.try({
+        try: () => decodeJwt(token).iss,
+        catch: () => Unauthenticated.of('malformed bearer token'),
+      });
+      if (iss === GITHUB_OIDC_ISSUER) {
+        const claims = yield* tokens
+          .verifyGithubOidc(token)
+          .pipe(Effect.mapError((e) => Unauthenticated.of(`invalid GitHub OIDC token: ${e.message}`)));
+        const ci = ciPrincipalFromClaims(claims);
+        if (!ci) return yield* Unauthenticated.of('GitHub OIDC token is missing repository claims');
+        return ci;
+      }
+      const github = yield* tokens
+        .verify(token, 'cli')
+        .pipe(
+          Effect.mapError(() => Unauthenticated.of('invalid or expired platform token; run `plat login`')),
+        );
+      return yield* Effect.fromOption(member(github)).pipe(Effect.mapError(() => notAMember(github)));
+    });
 
-export function requireAdmin(c: Context<AuthEnv>) {
-  const p = requireMember(c);
-  if (p.role !== 'admin') throw new ApiError(403, 'admins_only', 'this endpoint is for platform admins');
-  return p;
-}
+    /** A cookie that doesn't verify, or of someone no longer a member, counts as signed out. */
+    const fromCookie = (token: string) =>
+      tokens.verify(token, 'console').pipe(
+        Effect.map(member),
+        Effect.orElseSucceed(() => Option.none()),
+      );
+
+    return Authenticated.of((httpEffect) =>
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const bearer = request.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
+        const cookie = request.cookies[CONSOLE_COOKIE];
+        const principal: Option.Option<Principal> = Option.isSome(devUser)
+          ? member(devUser.value)
+          : bearer
+            ? Option.some(yield* fromBearer(bearer))
+            : cookie
+              ? yield* fromCookie(cookie)
+              : Option.none();
+        if (Option.isNone(principal))
+          return yield* Unauthenticated.of('sign in at the console or run `plat login`');
+        const viaCookie = Option.isNone(devUser) && !bearer;
+        if (viaCookie && !SAFE_METHODS.has(request.method) && request.headers[CSRF_HEADER] !== '1') {
+          return yield* new Forbidden({
+            code: 'csrf',
+            message: `cookie-authenticated writes need the ${CSRF_HEADER} header`,
+          });
+        }
+        return yield* Effect.provideService(httpEffect, CurrentPrincipal, principal.value);
+      }),
+    );
+  }),
+);

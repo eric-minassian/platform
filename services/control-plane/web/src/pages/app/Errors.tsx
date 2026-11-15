@@ -1,7 +1,9 @@
-import type { ErrorGroup } from '@ericminassian/platform-core';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAtomSet, useAtomValue } from '@effect/atom-react';
+import type { ErrorGroup, ErrorStatus } from '@ericminassian/platform-core';
+import { Option } from 'effect';
+import { AsyncResult, Atom } from 'effect/reactivity';
 import { Link, useSearchParams } from 'react-router';
-import { api } from '../../api.ts';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import {
   Badge,
   Button,
@@ -16,6 +18,25 @@ import {
 } from '../../components/ui.tsx';
 import { fmtDateTime, fmtNum, relTime, shortId } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
+
+const STATUSES: readonly string[] = ['open', 'resolved', 'ignored'] satisfies ErrorStatus[];
+const isStatus = (s: string): s is ErrorStatus => STATUSES.includes(s);
+
+/** Reactivity key of an app's error groups, on every stage and status. */
+const errorsChanged = (app: string) => [`errors:${app}`];
+
+const errorsAtom = Atom.family(({ app, stage, status }: { app: string; stage: string; status: string }) =>
+  fresh(
+    ApiClient.query('observe', 'errors', {
+      params: { app },
+      query: { stage, status: isStatus(status) ? status : undefined },
+      reactivityKeys: errorsChanged(app),
+      timeToLive,
+    }),
+    { every: '30 seconds' },
+  ),
+);
+const updateError = ApiClient.mutation('observe', 'updateError');
 
 function Detail({ g, onStatus }: { g: ErrorGroup; onStatus: (s: ErrorGroup['status']) => void }) {
   const { app, search } = useApp();
@@ -82,17 +103,9 @@ export function ErrorsTab() {
   const [params, setParams] = useSearchParams();
   const status = params.get('status') ?? 'open';
   const fp = params.get('fp');
-  const qc = useQueryClient();
-  const q = useQuery({
-    queryKey: ['errors', app, scope.stage, status],
-    queryFn: () => api.errors(app, scope.stage, status === 'all' ? undefined : status),
-    refetchInterval: 30_000,
-  });
-  const setStatus = useMutation({
-    mutationFn: ({ fp, s }: { fp: string; s: ErrorGroup['status'] }) =>
-      api.setErrorStatus(app, scope.stage, fp, s),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['errors', app] }),
-  });
+  const result = useAtomValue(errorsAtom({ app, stage: scope.stage, status }));
+  // Nothing shows the outcome: the list refetches when it succeeds.
+  const setStatus = useAtomSet(updateError);
   const select = (next: string | null) =>
     setParams((p) => {
       if (next) p.set('fp', next);
@@ -117,7 +130,7 @@ export function ErrorsTab() {
           />
         }
       >
-        <Loaded q={q}>
+        <Loaded result={result}>
           {(groups) => (
             <Table head={['Error', 'Status', 'Count', 'Last seen', 'First seen']} empty="No errors. Nice.">
               {groups.map((g) => (
@@ -144,7 +157,7 @@ export function ErrorsTab() {
       </Card>
       <div>
         {(() => {
-          const g = q.data?.find((x) => x.fingerprint === fp);
+          const g = Option.getOrUndefined(AsyncResult.value(result))?.find((x) => x.fingerprint === fp);
           if (!g) {
             return (
               <Card>
@@ -152,7 +165,19 @@ export function ErrorsTab() {
               </Card>
             );
           }
-          return <Detail g={g} onStatus={(s) => setStatus.mutate({ fp: g.fingerprint, s })} />;
+          return (
+            <Detail
+              g={g}
+              onStatus={(s) =>
+                setStatus({
+                  params: { app, fingerprint: g.fingerprint },
+                  query: { stage: scope.stage },
+                  payload: { status: s },
+                  reactivityKeys: errorsChanged(app),
+                })
+              }
+            />
+          );
         })()}
       </div>
     </div>

@@ -1,8 +1,9 @@
+import { useAtomValue } from '@effect/atom-react';
 import type { TelemetryEvent } from '@ericminassian/platform-core';
-import { useQuery } from '@tanstack/react-query';
+import { Atom } from 'effect/reactivity';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
-import { api } from '../../api.ts';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Badge, Button, Card, Empty, Input, Loaded, Mono, type Tone } from '../../components/ui.tsx';
 import { fmtDateTime, fmtMs } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
@@ -58,7 +59,7 @@ const barColor: Record<Tone, string> = {
   warn: 'bg-warn',
 };
 
-function Waterfall({ events }: { events: TelemetryEvent[] }) {
+function Waterfall({ events }: { events: readonly TelemetryEvent[] }) {
   const { rows, total } = layout(events);
   if (rows.length === 0) return <Empty>No events found for this trace in the last 7 days.</Empty>;
   return (
@@ -98,17 +99,22 @@ function Waterfall({ events }: { events: TelemetryEvent[] }) {
   );
 }
 
+// A trace's events don't change once it has finished, and each lookup runs a Logs Insights query.
+const traceAtom = Atom.family(({ app, stage, trace }: { app: string; stage: string; trace: string }) =>
+  fresh(ApiClient.query('observe', 'trace', { params: { app, trace }, query: { stage }, timeToLive }), {
+    staleTime: '5 minutes',
+  }),
+);
+
+function Trace(key: { app: string; stage: string; trace: string }) {
+  return <Loaded result={useAtomValue(traceAtom(key))}>{(t) => <Waterfall events={t.events} />}</Loaded>;
+}
+
 export function TracesTab() {
   const { app, scope, search } = useApp();
   const { trace } = useParams();
   const navigate = useNavigate();
   const [draft, setDraft] = useState(trace ?? '');
-  const q = useQuery({
-    queryKey: ['trace', app, scope.stage, trace],
-    queryFn: () => api.trace(app, scope.stage, trace!),
-    enabled: Boolean(trace),
-    staleTime: 5 * 60_000,
-  });
   return (
     <Card
       title={
@@ -139,7 +145,7 @@ export function TracesTab() {
       }
     >
       {trace ? (
-        <Loaded q={q}>{(t) => <Waterfall events={t.events} />}</Loaded>
+        <Trace app={app} stage={scope.stage} trace={trace} />
       ) : (
         <Empty>
           Every request, job and span carries a trace id. Open one from Logs or Errors, or paste it above (

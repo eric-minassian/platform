@@ -1,13 +1,14 @@
 /**
  * Reads rollups back out of the telemetry table and shapes them into the API
- * DTOs. The mapping functions are pure (unit tested); the `read*` functions do I/O.
+ * DTOs. The mapping functions are pure (unit tested); `TelemetryQuery` does the I/O.
  */
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   type AppSummary,
   bucketStart,
   type CostResponse,
   type ErrorGroup,
+  type ErrorStatus,
   type JobStats,
   LATENCY_BUCKETS_MS,
   type MetricsPoint,
@@ -19,8 +20,9 @@ import {
   telemetryKeys,
   type UptimePoint,
 } from '@ericminassian/platform-core';
-import { aws } from '../aws.ts';
-import { getRuntimeConfig } from '../config.ts';
+import { Clock, Context, Effect, Layer } from 'effect';
+import { Aws, AwsError, tryAws } from '../aws.ts';
+import { Settings } from '../config.ts';
 
 type Item = Record<string, unknown>;
 const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
@@ -181,7 +183,7 @@ export function toErrorGroup(i: Item): ErrorGroup {
     count: num(i.count),
     firstSeen: String(i.firstSeen ?? ''),
     lastSeen: String(i.lastSeen ?? ''),
-    status: (i.status as ErrorGroup['status']) ?? 'open',
+    status: i.status === 'resolved' || i.status === 'ignored' ? i.status : 'open',
     sample: (i.sample as ErrorGroup['sample']) ?? {},
   };
 }
@@ -206,96 +208,187 @@ export function summarizeHealth(
 
 // ------------------------------------------------------------------ I/O
 
-async function queryRange(pk: string, fromSk: string, toSk: string): Promise<Item[]> {
-  const { telemetryTable } = await getRuntimeConfig();
-  const items: Item[] = [];
-  let ExclusiveStartKey: Record<string, unknown> | undefined;
-  do {
-    const res = await aws.ddb().send(
-      new QueryCommand({
-        TableName: telemetryTable,
-        KeyConditionExpression: 'pk = :pk AND sk BETWEEN :a AND :b',
-        ExpressionAttributeValues: { ':pk': pk, ':a': fromSk, ':b': toSk },
-        ExclusiveStartKey,
-      }),
-    );
-    items.push(...((res.Items ?? []) as Item[]));
-    ExclusiveStartKey = res.LastEvaluatedKey;
-  } while (ExclusiveStartKey && items.length < 20_000);
-  return items;
-}
-
 const isoRange = (r: TimeRange): [string, string] => [
   telemetryKeys.time(bucketStart(r.from, r.res)),
-  `${telemetryKeys.time(r.to)}￿`,
+  `${telemetryKeys.time(r.to)}\uffff`,
 ];
-
-export async function readMetrics(app: string, stage: string, range: TimeRange): Promise<MetricsResponse> {
-  const [a, b] = isoRange(range);
-  const items = await queryRange(telemetryKeys.stage(app, stage, range.res), a, b);
-  return { app, stage, res: range.res, points: toMetricsPoints(items, range) };
-}
 
 /** Routes/jobs/metrics series only exist at 1h and 1d. */
 const seriesRange = (r: TimeRange): TimeRange => ({ ...r, res: r.res === '1m' ? '1h' : r.res });
 
-export async function readRoutes(app: string, stage: string, range: TimeRange): Promise<RouteStats[]> {
-  const r = seriesRange(range);
-  const [a, b] = isoRange(r);
-  return toRouteStats(await queryRange(telemetryKeys.route(app, stage, r.res), a, b));
-}
-
-export async function readJobs(
-  app: string,
-  stage: string,
-  range: TimeRange,
-  declared: readonly { kind: JobStats['kind']; name: string }[],
-): Promise<JobStats[]> {
-  const r = seriesRange(range);
-  const [a, b] = isoRange(r);
-  return toJobStats(await queryRange(telemetryKeys.job(app, stage, r.res), a, b), declared);
-}
-
-export async function readErrors(app: string, stage: string): Promise<ErrorGroup[]> {
-  const { telemetryTable } = await getRuntimeConfig();
-  const res = await aws.ddb().send(
-    new QueryCommand({
-      TableName: telemetryTable,
-      KeyConditionExpression: 'pk = :pk',
-      ExpressionAttributeValues: { ':pk': telemetryKeys.errors(app, stage) },
-    }),
-  );
-  return ((res.Items ?? []) as Item[]).map(toErrorGroup).sort((x, y) => y.lastSeen.localeCompare(x.lastSeen));
-}
-
-export async function readUptime(app: string, stage: string, range: TimeRange): Promise<UptimePoint[]> {
-  const items = await queryRange(
-    telemetryKeys.uptime(app, stage),
-    telemetryKeys.time(range.from),
-    `${telemetryKeys.time(range.to)}￿`,
-  );
-  return items.map((i) => ({ ts: String(i.sk), ok: Boolean(i.ok), status: num(i.status), ms: num(i.ms) }));
-}
-
 /** Cost items: pk `cost#<app>` (or `cost#_total`), sk `YYYY-MM-DD`, written by the cost job. */
 export const costKey = (app: string) => `cost#${app}`;
 
-export async function readCost(app: string, days = 35): Promise<CostResponse> {
-  const today = new Date().toISOString().slice(0, 10);
-  const start = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  const items = await queryRange(costKey(app), start, today);
-  const series = items.map((i) => ({ date: String(i.sk), usd: num(i.usd) }));
-  const month = today.slice(0, 7);
-  const monthToDateUsd = series.filter((d) => d.date.startsWith(month)).reduce((a, d) => a + d.usd, 0);
-  return { app, currency: 'USD', days: series, monthToDateUsd: Math.round(monthToDateUsd * 100) / 100 };
-}
+const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-export async function readHealth(
-  app: string,
-  up: boolean | null,
-): Promise<NonNullable<AppSummary['health']>> {
-  const range: TimeRange = { from: Date.now() - 3_600_000, to: Date.now(), res: '1m' };
-  const [a, b] = isoRange(range);
-  const items = await queryRange(telemetryKeys.stage(app, 'prod', '1m'), a, b);
-  return summarizeHealth(toMetricsPoints(items, range), items, up);
+export class TelemetryQuery extends Context.Service<
+  TelemetryQuery,
+  {
+    metrics(app: string, stage: string, range: TimeRange): Effect.Effect<MetricsResponse>;
+    routes(app: string, stage: string, range: TimeRange): Effect.Effect<ReadonlyArray<RouteStats>>;
+    /** `declared` adds the manifest's jobs that never ran. */
+    jobs(
+      app: string,
+      stage: string,
+      range: TimeRange,
+      declared: ReadonlyArray<{ kind: JobStats['kind']; name: string }>,
+    ): Effect.Effect<ReadonlyArray<JobStats>>;
+    /** Most recently seen first. */
+    errors(app: string, stage: string): Effect.Effect<ReadonlyArray<ErrorGroup>>;
+    /** Triage from the console (the one write the API makes here); false when there's no such group. */
+    setErrorStatus(
+      app: string,
+      stage: string,
+      fingerprint: string,
+      status: ErrorStatus,
+    ): Effect.Effect<boolean>;
+    uptime(app: string, stage: string, range: TimeRange): Effect.Effect<ReadonlyArray<UptimePoint>>;
+    /** Daily cost over the last `days` days (default 35). */
+    cost(app: string, days?: number): Effect.Effect<CostResponse>;
+    /** Last-hour health of an app's prod stage. */
+    health(app: string, up: boolean | null): Effect.Effect<NonNullable<AppSummary['health']>>;
+  }
+>()('@ericminassian/platform-control-plane/TelemetryQuery') {
+  static readonly layer: Layer.Layer<TelemetryQuery, never, Aws | Settings> = Layer.effect(
+    TelemetryQuery,
+    Effect.gen(function* () {
+      const aws = yield* Aws;
+      const settings = yield* Settings;
+
+      const queryRange = Effect.fnUntraced(function* (pk: string, fromSk: string, toSk: string) {
+        const { telemetryTable } = yield* settings.runtime;
+        const items: Item[] = [];
+        let ExclusiveStartKey: Record<string, unknown> | undefined;
+        do {
+          const res = yield* tryAws(() =>
+            aws.ddb().send(
+              new QueryCommand({
+                TableName: telemetryTable,
+                KeyConditionExpression: 'pk = :pk AND sk BETWEEN :a AND :b',
+                ExpressionAttributeValues: { ':pk': pk, ':a': fromSk, ':b': toSk },
+                ExclusiveStartKey,
+              }),
+            ),
+          );
+          items.push(...(res.Items ?? []));
+          ExclusiveStartKey = res.LastEvaluatedKey;
+        } while (ExclusiveStartKey && items.length < 20_000);
+        return items;
+      });
+
+      const metrics = Effect.fn('TelemetryQuery.metrics')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const [a, b] = isoRange(range);
+        const items = yield* queryRange(telemetryKeys.stage(app, stage, range.res), a, b);
+        return {
+          app,
+          stage,
+          res: range.res,
+          points: toMetricsPoints(items, range),
+        } satisfies MetricsResponse;
+      }, Effect.orDie);
+
+      const routes = Effect.fn('TelemetryQuery.routes')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const r = seriesRange(range);
+        const [a, b] = isoRange(r);
+        return toRouteStats(yield* queryRange(telemetryKeys.route(app, stage, r.res), a, b));
+      }, Effect.orDie);
+
+      const jobs = Effect.fn('TelemetryQuery.jobs')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+        declared: ReadonlyArray<{ kind: JobStats['kind']; name: string }>,
+      ) {
+        const r = seriesRange(range);
+        const [a, b] = isoRange(r);
+        return toJobStats(yield* queryRange(telemetryKeys.job(app, stage, r.res), a, b), declared);
+      }, Effect.orDie);
+
+      const errors = Effect.fn('TelemetryQuery.errors')(function* (app: string, stage: string) {
+        const { telemetryTable } = yield* settings.runtime;
+        const res = yield* tryAws(() =>
+          aws.ddb().send(
+            new QueryCommand({
+              TableName: telemetryTable,
+              KeyConditionExpression: 'pk = :pk',
+              ExpressionAttributeValues: { ':pk': telemetryKeys.errors(app, stage) },
+            }),
+          ),
+        );
+        return (res.Items ?? []).map(toErrorGroup).sort((x, y) => y.lastSeen.localeCompare(x.lastSeen));
+      }, Effect.orDie);
+
+      const setErrorStatus = Effect.fn('TelemetryQuery.setErrorStatus')(function* (
+        app: string,
+        stage: string,
+        fingerprint: string,
+        status: ErrorStatus,
+      ) {
+        const { telemetryTable } = yield* settings.runtime;
+        return yield* tryAws(() =>
+          aws.ddb().send(
+            new UpdateCommand({
+              TableName: telemetryTable,
+              Key: { pk: telemetryKeys.errors(app, stage), sk: fingerprint },
+              UpdateExpression: 'SET #s = :s',
+              ConditionExpression: 'attribute_exists(pk)',
+              ExpressionAttributeNames: { '#s': 'status' },
+              ExpressionAttributeValues: { ':s': status },
+            }),
+          ),
+        ).pipe(
+          Effect.as(true),
+          Effect.catchIf(AwsError.is('ConditionalCheckFailedException'), () => Effect.succeed(false)),
+        );
+      }, Effect.orDie);
+
+      const uptime = Effect.fn('TelemetryQuery.uptime')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const items = yield* queryRange(
+          telemetryKeys.uptime(app, stage),
+          telemetryKeys.time(range.from),
+          `${telemetryKeys.time(range.to)}\uffff`,
+        );
+        return items.map(
+          (i): UptimePoint => ({ ts: String(i.sk), ok: Boolean(i.ok), status: num(i.status), ms: num(i.ms) }),
+        );
+      }, Effect.orDie);
+
+      const cost = Effect.fn('TelemetryQuery.cost')(function* (app: string, days = 35) {
+        const now = yield* Clock.currentTimeMillis;
+        const today = day(now);
+        const items = yield* queryRange(costKey(app), day(now - days * 86_400_000), today);
+        const series = items.map((i) => ({ date: String(i.sk), usd: num(i.usd) }));
+        const month = today.slice(0, 7);
+        const monthToDateUsd = series.filter((d) => d.date.startsWith(month)).reduce((a, d) => a + d.usd, 0);
+        return {
+          app,
+          currency: 'USD',
+          days: series,
+          monthToDateUsd: Math.round(monthToDateUsd * 100) / 100,
+        } satisfies CostResponse;
+      }, Effect.orDie);
+
+      const health = Effect.fn('TelemetryQuery.health')(function* (app: string, up: boolean | null) {
+        const now = yield* Clock.currentTimeMillis;
+        const range: TimeRange = { from: now - 3_600_000, to: now, res: '1m' };
+        const [a, b] = isoRange(range);
+        const items = yield* queryRange(telemetryKeys.stage(app, 'prod', '1m'), a, b);
+        return summarizeHealth(toMetricsPoints(items, range), items, up);
+      }, Effect.orDie);
+
+      return TelemetryQuery.of({ metrics, routes, jobs, errors, setErrorStatus, uptime, cost, health });
+    }),
+  );
 }

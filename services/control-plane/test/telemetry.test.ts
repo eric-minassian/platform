@@ -1,5 +1,10 @@
+import type { SNSClient } from '@aws-sdk/client-sns';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { assert, it as effect } from '@effect/vitest';
 import type { TelemetryEvent } from '@ericminassian/platform-core';
+import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
+import { GitHub } from '../src/github.ts';
 import { aggregate, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
 import {
   parseRange,
@@ -8,6 +13,8 @@ import {
   toMetricsPoints,
   toRouteStats,
 } from '../src/telemetry/query.ts';
+import { TelemetryWriter } from '../src/telemetry/write.ts';
+import { awsLayer, githubApp, memoryStore, runtime, settingsLayer } from './support.ts';
 
 const T = Date.parse('2026-11-14T10:15:30.000Z');
 const base = { _p: 1 as const, app: 'todo', stage: 'prod', rev: 'd1' };
@@ -160,5 +167,77 @@ describe('query mapping', () => {
     const h = summarizeHealth(toMetricsPoints(items, range), items, true);
     expect(h).toMatchObject({ up: true, errorRate: 0.1, p95: 100 });
     expect(h.reqPerMin).toBeGreaterThan(0);
+  });
+});
+
+describe('telemetry processor', () => {
+  const err = (fingerprint: string, stage = 'prod'): TelemetryEvent => ({
+    ...base,
+    stage,
+    t: 'err',
+    ts: T,
+    source: 'http',
+    name: 'TypeError',
+    message: `boom ${fingerprint}`,
+    fingerprint,
+  });
+
+  effect.effect('writes rollups and groups, and alerts on new and regressed groups only', () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const published: string[] = [];
+    const issues: string[] = [];
+    // fp-new has never been seen, fp-back was resolved, fp-known is open.
+    const before: Record<string, Record<string, unknown> | undefined> = {
+      'fp-back': { status: 'resolved' },
+      'fp-known': { status: 'open' },
+    };
+    const ddb = {
+      send: async (command: { input: Record<string, unknown> }) => {
+        updates.push(command.input);
+        const sk = (command.input.Key as { sk: string }).sk;
+        return command.input.ReturnValues === 'ALL_OLD' ? { Attributes: before[sk] } : {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const sns = {
+      send: async (command: { input: { Subject: string } }) => void published.push(command.input.Subject),
+    } as unknown as SNSClient;
+    const layer = TelemetryWriter.layer.pipe(
+      Layer.provide([
+        awsLayer({ ddb: () => ddb, sns: () => sns }),
+        settingsLayer({
+          runtime: Effect.succeed({ ...runtime, alertsTopicArn: 'arn:aws:sns:us-east-1:0:alerts' }),
+          githubApp: Effect.succeedSome(githubApp),
+        }),
+        memoryStore({
+          apps: [{ name: 'todo', repo: 'eric/todo', owners: ['eric'], createdBy: 'eric', createdAt: 'x' }],
+        }),
+        Layer.mock(GitHub, {
+          openIssue: (_app, repo, issue) =>
+            Effect.sync(() => {
+              issues.push(`${repo}: ${issue.title}`);
+              return Option.some('https://github.com/eric/todo/issues/1');
+            }),
+        }),
+      ]),
+    );
+    return Effect.gen(function* () {
+      const agg = aggregate([req(), err('fp-new'), err('fp-back'), err('fp-known')]);
+      const fresh = yield* TelemetryWriter.use((w) => w.apply(agg));
+      assert.deepStrictEqual(
+        fresh.map((g) => g.sk),
+        ['fp-new', 'fp-back'],
+      );
+      const reopened = updates.filter((u) => u.UpdateExpression === 'SET #status = :open');
+      assert.deepStrictEqual(
+        reopened.map((u) => (u.Key as { sk: string }).sk),
+        ['fp-back'],
+      );
+      assert.strictEqual(updates.filter((u) => u.TableName === 'platform-telemetry').length, updates.length);
+      assert.sameMembers(published, ['[platform] todo/prod: TypeError', '[platform] todo/prod: TypeError']);
+      assert.sameMembers(issues, [
+        'eric/todo: [error] TypeError: boom fp-new',
+        'eric/todo: [error] TypeError: boom fp-back',
+      ]);
+    }).pipe(Effect.provide(layer));
   });
 });

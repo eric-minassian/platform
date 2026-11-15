@@ -21,9 +21,16 @@ export const AUTH_COOKIES = {
 
 export const AUTH_SCOPES = ['openid', 'email', 'profile'] as const;
 
-/** Only same-origin absolute paths are allowed as post-login destinations. */
+/** Backslashes, spaces, and ASCII control characters (`<= ' '` covers C0 and space). */
+const unsafeInRedirect = (c: string) => c === '\\' || c <= ' ' || c === '\u007f';
+
+/**
+ * Only same-origin absolute paths are allowed as post-login destinations.
+ * Browsers drop tabs and newlines from URLs (`/\t/evil.com` becomes
+ * `//evil.com`), so control characters and spaces are refused too.
+ */
 export function safeRedirect(target: string | null | undefined): string {
-  if (!target?.startsWith('/') || target.startsWith('//') || target.includes('\\')) return '/';
+  if (!target?.startsWith('/') || target.startsWith('//') || [...target].some(unsafeInRedirect)) return '/';
   return target;
 }
 

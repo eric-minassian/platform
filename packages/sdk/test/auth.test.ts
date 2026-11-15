@@ -28,6 +28,9 @@ describe('cookie + pkce helpers', () => {
     expect(safeRedirect('//evil.com')).toBe('/');
     expect(safeRedirect('https://evil.com')).toBe('/');
     expect(safeRedirect('/\\evil')).toBe('/');
+    expect(safeRedirect('/\t/evil.com')).toBe('/');
+    expect(safeRedirect('/\n/evil.com')).toBe('/');
+    expect(safeRedirect(' /x')).toBe('/');
   });
 });
 

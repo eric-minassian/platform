@@ -1,109 +1,136 @@
 /**
- * Sign-in: `POST /v1/auth/cli` (exchange a GitHub token for a platform token)
- * and the console's GitHub OAuth round trip under `/auth/github/*`.
+ * Sign-in: `POST /v1/auth/cli` (exchange a GitHub token for a platform token),
+ * `GET /v1/me`, and the console's GitHub OAuth round trip under `/auth/*`,
+ * which answers redirects, cookies and plain text rather than API JSON.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import type { CliLoginRequest, CliLoginResponse, MeResponse } from '@ericminassian/platform-core';
-import { Hono } from 'hono';
-import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
-import {
-  type AuthEnv,
-  CONSOLE_COOKIE,
-  issueToken,
-  requireAuth,
-  requireMember,
-  TOKEN_TTL_SECONDS,
-} from '../auth.ts';
+import { safeRedirect } from '@ericminassian/platform-core/auth';
+import { Forbidden, PlatformApi, Unauthenticated } from '@ericminassian/platform-core/platform-api';
+import { Duration, Effect, Option } from 'effect';
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from 'effect/http';
+import { HttpApiBuilder } from 'effect/http-api';
+import { CONSOLE_COOKIE, TOKEN_TTL_SECONDS, Tokens } from '../auth.ts';
 import { memberFor } from '../authz.ts';
-import { config, consoleUrl, getGithubApp } from '../config.ts';
-import { ApiError, badRequest } from '../errors.ts';
-import { authorizeUrl, exchangeCode, githubLogin } from '../github.ts';
-import { readJson } from './context.ts';
+import { Settings } from '../config.ts';
+import { authorizeUrl, GitHub } from '../github.ts';
+import { Access } from './access.ts';
 
 const OAUTH_COOKIE = '__plat_oauth';
 
-/** Only same-origin relative paths are allowed as post-login redirects. */
-export function safeRedirect(path: string | undefined): string {
-  return path?.startsWith('/') && !path.startsWith('//') && !path.includes('\\') ? path : '/';
-}
+export const SessionLive = HttpApiBuilder.group(
+  PlatformApi,
+  'session',
+  Effect.fn(function* (handlers) {
+    const access = yield* Access;
+    const github = yield* GitHub;
+    const settings = yield* Settings;
+    const tokens = yield* Tokens;
 
-export const cliAuth = new Hono<AuthEnv>()
-  .post('/auth/cli', async (c) => {
-    const body = await readJson<CliLoginRequest>(c);
-    if (!body.githubToken) throw badRequest('githubToken is required');
-    let github: string;
-    try {
-      github = await githubLogin(body.githubToken);
-    } catch (err) {
-      throw new ApiError(401, 'unauthenticated', err instanceof Error ? err.message : String(err));
-    }
-    const member = memberFor(config, github);
-    if (!member) {
-      throw new ApiError(
-        403,
-        'not_a_member',
-        `${github} is not invited. Ask an admin to add you to platform.config.ts.`,
+    return handlers.handleAll({
+      cliLogin: ({ payload }) =>
+        Effect.gen(function* () {
+          const login = yield* github
+            .login(payload.githubToken)
+            .pipe(Effect.mapError((e) => Unauthenticated.of(e.message)));
+          const member = memberFor(settings.platform, login);
+          if (!member) {
+            return yield* new Forbidden({
+              code: 'not_a_member',
+              message: `${login} is not invited. Ask an admin to add you to platform.config.ts.`,
+            });
+          }
+          const { token, expiresAt } = yield* tokens.issue(member.github, 'cli');
+          return { token, github: member.github, role: member.role, expiresAt };
+        }),
+      me: () => Effect.map(access.member, (me) => ({ github: me.github, role: me.role })),
+    });
+  }),
+);
+
+const text = (body: string, status: number) => HttpServerResponse.text(body, { status });
+
+/** One query parameter (the first, if repeated). */
+const queryParam = (name: string) =>
+  Effect.map(HttpServerRequest.ParsedSearchParams, (params) => {
+    const value = params[name];
+    return Array.isArray(value) ? value[0] : value;
+  });
+
+/** Constant-time comparison of the state GitHub returned with the one the login set. */
+const sameState = (expected: string, actual: string) =>
+  expected.length > 0 &&
+  expected.length === actual.length &&
+  timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
+
+/** The console's sign-in with the GitHub App, which sets the session cookie `Authenticated` reads. */
+export const ConsoleSignInLive = HttpRouter.use(
+  Effect.fnUntraced(function* (router) {
+    const github = yield* GitHub;
+    const settings = yield* Settings;
+    const tokens = yield* Tokens;
+    const callbackUrl = `${settings.consoleUrl}/auth/github/callback`;
+
+    yield* router.add(
+      'GET',
+      '/auth/github/login',
+      Effect.gen(function* () {
+        const app = yield* settings.githubApp;
+        if (Option.isNone(app)) return text('GitHub sign-in is not configured yet (see docs/SETUP.md).', 503);
+        const state = randomBytes(16).toString('hex');
+        const redirect = safeRedirect(yield* queryParam('redirect'));
+        return HttpServerResponse.redirect(authorizeUrl(app.value, callbackUrl, state)).pipe(
+          HttpServerResponse.setCookieUnsafe(OAUTH_COOKIE, `${state}|${redirect}`, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'lax',
+            path: '/auth/github',
+            maxAge: '10 minutes',
+          }),
+        );
+      }),
+    );
+
+    const callback = Effect.gen(function* () {
+      const app = yield* settings.githubApp;
+      if (Option.isNone(app)) return text('GitHub sign-in is not configured.', 503);
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const [expected = '', redirect] = (request.cookies[OAUTH_COOKIE] ?? '').split('|');
+      if (!sameState(expected, (yield* queryParam('state')) ?? '')) {
+        return text('Sign-in expired or was tampered with. Try again.', 400);
+      }
+      const code = yield* queryParam('code');
+      if (!code) return text('GitHub did not return a code.', 400);
+      const login = yield* github.exchangeCode(app.value, code, callbackUrl).pipe(
+        Effect.flatMap((userToken) => github.login(userToken)),
+        Effect.result,
       );
-    }
-    const { token, expiresAt } = await issueToken(member.github, 'cli');
-    const res: CliLoginResponse = { token, github: member.github, role: member.role, expiresAt };
-    return c.json(res);
-  })
-  .get('/me', requireAuth, (c) => {
-    const me = requireMember(c);
-    const res: MeResponse = { github: me.github, role: me.role };
-    return c.json(res);
-  });
+      if (login._tag === 'Failure') return text(`GitHub sign-in failed: ${login.failure.message}`, 502);
+      const member = memberFor(settings.platform, login.success);
+      if (!member) return HttpServerResponse.redirect(`/login?denied=${encodeURIComponent(login.success)}`);
+      const { token } = yield* tokens.issue(member.github, 'console');
+      return HttpServerResponse.redirect(safeRedirect(redirect)).pipe(
+        HttpServerResponse.setCookieUnsafe(CONSOLE_COOKIE, token, {
+          httpOnly: true,
+          secure: true,
+          sameSite: 'lax',
+          path: '/',
+          maxAge: Duration.seconds(TOKEN_TTL_SECONDS.console),
+        }),
+      );
+    });
+    // The login round trip's cookie is spent whatever the outcome.
+    yield* router.add(
+      'GET',
+      '/auth/github/callback',
+      Effect.map(callback, HttpServerResponse.expireCookieUnsafe(OAUTH_COOKIE, { path: '/auth/github' })),
+    );
 
-export const consoleAuth = new Hono()
-  .get('/github/login', async (c) => {
-    const app = await getGithubApp();
-    if (!app) return c.text('GitHub sign-in is not configured yet (see docs/SETUP.md).', 503);
-    const state = randomBytes(16).toString('hex');
-    const redirect = safeRedirect(c.req.query('redirect'));
-    setCookie(c, OAUTH_COOKIE, `${state}|${redirect}`, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'Lax',
-      path: '/auth/github',
-      maxAge: 600,
-    });
-    return c.redirect(authorizeUrl(app, `${consoleUrl()}/auth/github/callback`, state));
-  })
-  .get('/github/callback', async (c) => {
-    const app = await getGithubApp();
-    if (!app) return c.text('GitHub sign-in is not configured.', 503);
-    const [expected, redirect] = (getCookie(c, OAUTH_COOKIE) ?? '').split('|');
-    const state = c.req.query('state') ?? '';
-    deleteCookie(c, OAUTH_COOKIE, { path: '/auth/github' });
-    if (
-      !expected ||
-      expected.length !== state.length ||
-      !timingSafeEqual(Buffer.from(expected), Buffer.from(state))
-    ) {
-      return c.text('Sign-in expired or was tampered with. Try again.', 400);
-    }
-    const code = c.req.query('code');
-    if (!code) return c.text('GitHub did not return a code.', 400);
-    let github: string;
-    try {
-      github = await githubLogin(await exchangeCode(app, code, `${consoleUrl()}/auth/github/callback`));
-    } catch (err) {
-      return c.text(`GitHub sign-in failed: ${err instanceof Error ? err.message : String(err)}`, 502);
-    }
-    const member = memberFor(config, github);
-    if (!member) return c.redirect(`/login?denied=${encodeURIComponent(github)}`);
-    const { token } = await issueToken(member.github, 'console');
-    setCookie(c, CONSOLE_COOKIE, token, {
-      httpOnly: true,
-      secure: true,
-      sameSite: 'Lax',
-      path: '/',
-      maxAge: TOKEN_TTL_SECONDS.console,
-    });
-    return c.redirect(safeRedirect(redirect));
-  })
-  .post('/logout', (c) => {
-    deleteCookie(c, CONSOLE_COOKIE, { path: '/' });
-    return c.body(null, 204);
-  });
+    yield* router.add(
+      'POST',
+      '/auth/logout',
+      HttpServerResponse.empty({ status: 204 }).pipe(
+        HttpServerResponse.expireCookieUnsafe(CONSOLE_COOKIE, { path: '/' }),
+      ),
+    );
+  }),
+);

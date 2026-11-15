@@ -1,7 +1,9 @@
+import { useAtomValue } from '@effect/atom-react';
 import type { AppSummary } from '@ericminassian/platform-core';
-import { useQuery } from '@tanstack/react-query';
+import { Option } from 'effect';
+import { AsyncResult } from 'effect/reactivity';
 import { Link } from 'react-router';
-import { api } from '../api.ts';
+import { ApiClient, fresh, timeToLive } from '../client.ts';
 import { Badge, Dot, Empty, Loaded, Mono, statusTone, type Tone } from '../components/ui.tsx';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../format.ts';
 
@@ -11,6 +13,13 @@ export function healthTone(s: AppSummary): Tone {
   if (s.health.errorRate > 0.05) return 'warn';
   return s.health.up ? 'ok' : 'muted';
 }
+
+/** Reactivity key of the apps list. */
+export const appsChanged = ['apps'];
+
+const appsAtom = fresh(ApiClient.query('apps', 'list', { reactivityKeys: appsChanged, timeToLive }), {
+  every: '60 seconds',
+});
 
 function AppCard({ s }: { s: AppSummary }) {
   const prod = s.stages.find((st) => st.stage === 'prod');
@@ -61,14 +70,15 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 export function AppsPage() {
-  const q = useQuery({ queryKey: ['apps'], queryFn: api.apps, refetchInterval: 60_000 });
+  const result = useAtomValue(appsAtom);
+  const apps = Option.getOrUndefined(AsyncResult.value(result));
   return (
     <div className="space-y-4">
       <div className="flex items-end justify-between">
         <h1 className="text-lg font-semibold">Apps</h1>
-        {q.data && <span className="text-[12px] text-muted">{q.data.length} apps</span>}
+        {apps && <span className="text-[12px] text-muted">{apps.length} apps</span>}
       </div>
-      <Loaded q={q}>
+      <Loaded result={result}>
         {(apps) =>
           apps.length === 0 ? (
             <div className="rounded-lg border border-border bg-panel">

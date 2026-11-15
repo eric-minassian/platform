@@ -1,15 +1,20 @@
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../../api.ts';
+import { useAtomValue } from '@effect/atom-react';
+import { Atom } from 'effect/reactivity';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Badge, Card, Loaded, Mono, Table } from '../../components/ui.tsx';
 import { fmtMs, fmtNum, fmtPct } from '../../format.ts';
-import { useApp } from '../AppLayout.tsx';
+import { type Scope, useApp } from '../AppLayout.tsx';
+
+const routesAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'routes', { params: { app }, query: { stage, range }, timeToLive })),
+);
 
 export function RequestsTab() {
   const { app, scope } = useApp();
-  const q = useQuery({ queryKey: ['routes', app, scope], queryFn: () => api.routes(app, scope) });
+  const result = useAtomValue(routesAtom({ app, ...scope }));
   return (
     <Card title="Routes">
-      <Loaded q={q}>
+      <Loaded result={result}>
         {(routes) => (
           <Table
             head={['Method', 'Route', 'Requests', '4xx', '5xx', 'Error rate', 'p50', 'p95']}

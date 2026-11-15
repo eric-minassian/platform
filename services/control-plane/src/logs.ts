@@ -3,21 +3,22 @@
  * (`/platform/apps/<app>/<stage>/{web,worker}`).
  */
 import {
-  type FilteredLogEvent,
   FilterLogEventsCommand,
   GetQueryResultsCommand,
+  type LiveTailSessionLogEvent,
   StartLiveTailCommand,
   StartQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { type LogLine, type LogsResponse, names, type TelemetryEvent } from '@ericminassian/platform-core';
-import { aws } from './aws.ts';
-import { getRuntimeConfig } from './config.ts';
+import { BadRequest } from '@ericminassian/platform-core/platform-api';
+import { Clock, Context, Effect, Layer, Schedule, Stream } from 'effect';
+import { Aws, AwsError, toAwsError, tryAws } from './aws.ts';
+import { Settings } from './config.ts';
 import { parseLogMessage } from './telemetry/aggregate.ts';
 
 const STREAMS = ['web', 'worker'] as const;
-type Stream = (typeof STREAMS)[number];
+export type LogStream = (typeof STREAMS)[number];
 
-/** Turns one raw log message into a LogLine, unwrapping platform telemetry when present. */
 /**
  * The Lambda runtime writes its own JSON records (`platform.initReport`,
  * `platform.invokeSummary` every minute for Web Functions, `platform.report`
@@ -51,7 +52,8 @@ export function runtimeRecord(message: string): string | undefined {
   }
 }
 
-export function toLogLine(stream: Stream, timestamp: number, message: string): LogLine {
+/** Turns one raw log message into a LogLine, unwrapping platform telemetry when present. */
+export function toLogLine(stream: LogStream, timestamp: number, message: string): LogLine {
   const runtime = runtimeRecord(message);
   if (runtime) return { ts: new Date(timestamp).toISOString(), stream, level: 'system', message: runtime };
   const event = parseLogMessage(message);
@@ -102,124 +104,200 @@ export function toFilterPattern(q: string | undefined): string | undefined {
   return `"${s.replace(/"/g, '\\"')}"`;
 }
 
+/** Which stream each page continues from (`next` is this, as base64url JSON). */
 interface Cursor {
   web?: string;
   worker?: string;
 }
 
-export async function searchLogs(opts: {
-  app: string;
-  stage: string;
-  from: number;
-  to: number;
-  q?: string;
-  stream?: Stream;
-  limit?: number;
-  nextToken?: string;
-}): Promise<LogsResponse> {
-  const limit = Math.min(opts.limit ?? 200, 1000);
-  const cursor: Cursor = opts.nextToken
-    ? JSON.parse(Buffer.from(opts.nextToken, 'base64url').toString())
-    : {};
-  const streams = opts.stream ? [opts.stream] : STREAMS;
-  const pattern = toFilterPattern(opts.q);
-  const next: Cursor = {};
-  const lines: LogLine[] = [];
-  await Promise.all(
-    streams.map(async (stream) => {
-      if (opts.nextToken && !cursor[stream]) return;
-      const res = await aws
-        .logs()
-        .send(
-          new FilterLogEventsCommand({
-            logGroupName: names.logGroup(opts.app, opts.stage, stream),
-            startTime: opts.from,
-            endTime: opts.to,
-            limit,
-            ...(pattern ? { filterPattern: pattern } : {}),
-            ...(cursor[stream] ? { nextToken: cursor[stream] } : {}),
+/** Logs Insights query states that won't change any more. */
+const FINISHED = new Set(['Complete', 'Failed', 'Cancelled', 'Timeout']);
+
+const encodeCursor = (c: Cursor) => Buffer.from(JSON.stringify(c)).toString('base64url');
+const decodeCursor = (token: string) => JSON.parse(Buffer.from(token, 'base64url').toString()) as Cursor;
+
+export class Logs extends Context.Service<
+  Logs,
+  {
+    /** Newest first, across the web and worker log groups. */
+    search(options: {
+      readonly app: string;
+      readonly stage: string;
+      readonly from: number;
+      readonly to: number;
+      readonly q?: string | undefined;
+      readonly stream?: LogStream | undefined;
+      readonly limit?: number | undefined;
+      readonly nextToken?: string | undefined;
+    }): Effect.Effect<LogsResponse, BadRequest>;
+    /** New log lines as they arrive (CloudWatch Live Tail), for up to 15 minutes. */
+    tail(options: {
+      readonly app: string;
+      readonly stage: string;
+      readonly q?: string | undefined;
+    }): Stream.Stream<LogLine, AwsError>;
+    /** Every telemetry event carrying `trace`, oldest first (Logs Insights over web + worker). */
+    trace(options: {
+      readonly app: string;
+      readonly stage: string;
+      readonly trace: string;
+      readonly from: number;
+      readonly to: number;
+    }): Effect.Effect<ReadonlyArray<TelemetryEvent>, BadRequest>;
+  }
+>()('@ericminassian/platform-control-plane/Logs') {
+  static readonly layer: Layer.Layer<Logs, never, Aws | Settings> = Layer.effect(
+    Logs,
+    Effect.gen(function* () {
+      const aws = yield* Aws;
+      const settings = yield* Settings;
+
+      const search = Effect.fn('Logs.search')(
+        function* (options: {
+          readonly app: string;
+          readonly stage: string;
+          readonly from: number;
+          readonly to: number;
+          readonly q?: string | undefined;
+          readonly stream?: LogStream | undefined;
+          readonly limit?: number | undefined;
+          readonly nextToken?: string | undefined;
+        }) {
+          const limit = Math.min(options.limit ?? 200, 1000);
+          const nextToken = options.nextToken;
+          const cursor = nextToken
+            ? yield* Effect.try({
+                try: () => decodeCursor(nextToken),
+                catch: () => BadRequest.of('invalid next token'),
+              })
+            : {};
+          const streams = options.stream ? [options.stream] : STREAMS;
+          const pattern = toFilterPattern(options.q);
+          const pages = yield* Effect.forEach(
+            // A continued search only reads the streams that had more.
+            streams.filter((stream) => !nextToken || cursor[stream]),
+            (stream) =>
+              tryAws(() =>
+                aws.logs().send(
+                  new FilterLogEventsCommand({
+                    logGroupName: names.logGroup(options.app, options.stage, stream),
+                    startTime: options.from,
+                    endTime: options.to,
+                    limit,
+                    ...(pattern ? { filterPattern: pattern } : {}),
+                    ...(cursor[stream] ? { nextToken: cursor[stream] } : {}),
+                  }),
+                ),
+              ).pipe(
+                // A stage that never logged on this stream has no log group yet.
+                Effect.catchIf(AwsError.is('ResourceNotFoundException'), () =>
+                  Effect.succeed({ events: [], nextToken: undefined }),
+                ),
+                Effect.map((res) => ({ stream, res })),
+              ),
+            { concurrency: 'unbounded' },
+          );
+          const next: Cursor = {};
+          const lines: LogLine[] = [];
+          for (const { stream, res } of pages) {
+            for (const e of res.events ?? [])
+              lines.push(toLogLine(stream, e.timestamp ?? 0, e.message ?? ''));
+            if (res.nextToken) next[stream] = res.nextToken;
+          }
+          lines.sort((a, b) => b.ts.localeCompare(a.ts));
+          return {
+            lines: lines.slice(0, limit),
+            ...(Object.keys(next).length > 0 ? { nextToken: encodeCursor(next) } : {}),
+          } satisfies LogsResponse;
+        },
+        Effect.catchTag('AwsError', Effect.die),
+      );
+
+      const tail = (options: {
+        readonly app: string;
+        readonly stage: string;
+        readonly q?: string | undefined;
+      }) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const { accountId, region } = yield* settings.runtime;
+            const arn = (stream: LogStream) =>
+              `arn:aws:logs:${region}:${accountId}:log-group:${names.logGroup(options.app, options.stage, stream)}`;
+            const pattern = toFilterPattern(options.q);
+            // Aborted when the stream ends: the client went away, or 15 minutes passed.
+            const session = yield* Effect.acquireRelease(
+              Effect.sync(() => new AbortController()),
+              (controller) => Effect.sync(() => controller.abort()),
+            );
+            const res = yield* tryAws(() =>
+              aws.logs().send(
+                new StartLiveTailCommand({
+                  logGroupIdentifiers: STREAMS.map(arn),
+                  ...(pattern ? { logEventFilterPattern: pattern } : {}),
+                }),
+                { abortSignal: session.signal },
+              ),
+            );
+            if (!res.responseStream) return Stream.empty;
+            return Stream.fromAsyncIterable(res.responseStream, toAwsError).pipe(
+              Stream.flatMap((event) => Stream.fromIterable(event.sessionUpdate?.sessionResults ?? [])),
+              Stream.mapEffect((r: LiveTailSessionLogEvent) =>
+                Effect.map(Clock.currentTimeMillis, (now) =>
+                  toLogLine(
+                    r.logGroupIdentifier?.endsWith('/worker') ? 'worker' : 'web',
+                    r.timestamp ?? now,
+                    r.message ?? '',
+                  ),
+                ),
+              ),
+            );
           }),
-        )
-        .catch((err: { name?: string }) => {
-          if (err.name === 'ResourceNotFoundException')
-            return { events: [] as FilteredLogEvent[], nextToken: undefined };
-          throw err;
-        });
-      for (const e of res.events ?? []) lines.push(toLogLine(stream, e.timestamp ?? 0, e.message ?? ''));
-      if (res.nextToken) next[stream] = res.nextToken;
-    }),
-  );
-  lines.sort((a, b) => b.ts.localeCompare(a.ts));
-  const hasMore = Object.keys(next).length > 0;
-  return {
-    lines: lines.slice(0, limit),
-    ...(hasMore ? { nextToken: Buffer.from(JSON.stringify(next)).toString('base64url') } : {}),
-  };
-}
+        ).pipe(Stream.interruptWhen(Effect.sleep('15 minutes')));
 
-/** Streams new log lines (CloudWatch Live Tail) until `signal` aborts or ~15 minutes pass. */
-export async function* tailLogs(opts: {
-  app: string;
-  stage: string;
-  q?: string;
-  signal: AbortSignal;
-}): AsyncGenerator<LogLine> {
-  const { accountId, region } = await getRuntimeConfig();
-  const arn = (stream: Stream) =>
-    `arn:aws:logs:${region}:${accountId}:log-group:${names.logGroup(opts.app, opts.stage, stream)}`;
-  const pattern = toFilterPattern(opts.q);
-  const stop = AbortSignal.any([opts.signal, AbortSignal.timeout(15 * 60_000)]);
-  const res = await aws.logs().send(
-    new StartLiveTailCommand({
-      logGroupIdentifiers: STREAMS.map(arn),
-      ...(pattern ? { logEventFilterPattern: pattern } : {}),
-    }),
-    { abortSignal: stop },
-  );
-  if (!res.responseStream) return;
-  for await (const event of res.responseStream) {
-    if (stop.aborted) return;
-    for (const r of event.sessionUpdate?.sessionResults ?? []) {
-      const stream: Stream = r.logGroupIdentifier?.endsWith('/worker') ? 'worker' : 'web';
-      yield toLogLine(stream, r.timestamp ?? Date.now(), r.message ?? '');
-    }
-  }
-}
+      const trace = Effect.fn('Logs.trace')(
+        function* (options: {
+          readonly app: string;
+          readonly stage: string;
+          readonly trace: string;
+          readonly from: number;
+          readonly to: number;
+        }) {
+          if (!/^[0-9a-f-]{8,64}$/i.test(options.trace)) return yield* BadRequest.of('invalid trace id');
+          const start = yield* tryAws(() =>
+            aws.logs().send(
+              new StartQueryCommand({
+                logGroupNames: STREAMS.map((s) => names.logGroup(options.app, options.stage, s)),
+                startTime: Math.floor(options.from / 1000),
+                endTime: Math.ceil(options.to / 1000),
+                queryString: `fields @timestamp, @message | filter @message like "${options.trace}" | sort @timestamp asc | limit 1000`,
+              }),
+            ),
+          );
+          const queryId = start.queryId;
+          if (!queryId) return [];
+          const done = yield* tryAws(() => aws.logs().send(new GetQueryResultsCommand({ queryId }))).pipe(
+            Effect.delay('750 millis'),
+            Effect.repeat({ until: (res) => FINISHED.has(res.status ?? ''), schedule: Schedule.forever }),
+            Effect.timeoutOrElse({
+              duration: '25 seconds',
+              orElse: () => BadRequest.of('trace query timed out'),
+            }),
+          );
+          if (done.status !== 'Complete') return yield* BadRequest.of(`trace query ${done.status}`);
+          const events: TelemetryEvent[] = [];
+          for (const row of done.results ?? []) {
+            const msg = row.find((f) => f.field === '@message')?.value;
+            const e = msg ? parseLogMessage(msg) : null;
+            if (e && e.trace === options.trace) events.push(e);
+          }
+          return events.sort((a, b) => a.ts - b.ts);
+        },
+        // Logs Insights refuses some queries (an unknown log group, a range too
+        // long); the caller gets its reason.
+        Effect.catchTag('AwsError', (e) => BadRequest.of(e.message)),
+      );
 
-/** Every telemetry event carrying `trace`, oldest first (Logs Insights over web + worker). */
-export async function getTrace(opts: {
-  app: string;
-  stage: string;
-  trace: string;
-  from: number;
-  to: number;
-}): Promise<TelemetryEvent[]> {
-  if (!/^[0-9a-f-]{8,64}$/i.test(opts.trace)) throw new Error('invalid trace id');
-  const start = await aws.logs().send(
-    new StartQueryCommand({
-      logGroupNames: STREAMS.map((s) => names.logGroup(opts.app, opts.stage, s)),
-      startTime: Math.floor(opts.from / 1000),
-      endTime: Math.ceil(opts.to / 1000),
-      queryString: `fields @timestamp, @message | filter @message like "${opts.trace}" | sort @timestamp asc | limit 1000`,
+      return Logs.of({ search, tail, trace });
     }),
   );
-  if (!start.queryId) return [];
-  const deadline = Date.now() + 25_000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 750));
-    const res = await aws.logs().send(new GetQueryResultsCommand({ queryId: start.queryId }));
-    if (res.status === 'Complete') {
-      const events: TelemetryEvent[] = [];
-      for (const row of res.results ?? []) {
-        const msg = row.find((f) => f.field === '@message')?.value;
-        const e = msg ? parseLogMessage(msg) : null;
-        if (e && e.trace === opts.trace) events.push(e);
-      }
-      return events.sort((a, b) => a.ts - b.ts);
-    }
-    if (res.status === 'Failed' || res.status === 'Cancelled' || res.status === 'Timeout') {
-      throw new Error(`trace query ${res.status}`);
-    }
-  }
-  throw new Error('trace query timed out');
 }

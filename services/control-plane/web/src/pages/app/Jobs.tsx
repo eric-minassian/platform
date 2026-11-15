@@ -1,28 +1,44 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../../api.ts';
+import { useAtom, useAtomValue } from '@effect/atom-react';
+import { Atom } from 'effect/reactivity';
+import { useState } from 'react';
+import { ApiClient, failure, fresh, succeeded, timeToLive } from '../../client.ts';
 import { Badge, Button, Card, ErrorBox, Loaded, Mono, Table } from '../../components/ui.tsx';
 import { fmtMs, fmtNum, relTime } from '../../format.ts';
-import { useApp } from '../AppLayout.tsx';
+import { type Scope, useApp } from '../AppLayout.tsx';
+
+/** Reactivity key of an app's queue depths. */
+const queuesChanged = (app: string) => [`queues:${app}`];
+
+const jobsAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'jobs', { params: { app }, query: { stage, range }, timeToLive })),
+);
+const queuesAtom = Atom.family(({ app, stage }: { app: string; stage: string }) =>
+  fresh(
+    ApiClient.query('observe', 'queues', {
+      params: { app },
+      query: { stage },
+      reactivityKeys: queuesChanged(app),
+      timeToLive,
+    }),
+    { every: '15 seconds' },
+  ),
+);
+const runCronAtom = ApiClient.mutation('manage', 'runCron');
+const redriveAtom = ApiClient.mutation('manage', 'redrive');
 
 export function JobsTab() {
   const { app, scope } = useApp();
-  const qc = useQueryClient();
-  const jobs = useQuery({ queryKey: ['jobs', app, scope], queryFn: () => api.jobs(app, scope) });
-  const queues = useQuery({
-    queryKey: ['queues', app, scope.stage],
-    queryFn: () => api.queues(app, scope.stage),
-    refetchInterval: 15_000,
-  });
-  const runCron = useMutation({ mutationFn: (name: string) => api.runCron(app, scope.stage, name) });
-  const redrive = useMutation({
-    mutationFn: (name: string) => api.redrive(app, scope.stage, name),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['queues', app] }),
-  });
+  const jobs = useAtomValue(jobsAtom({ app, ...scope }));
+  const queues = useAtomValue(queuesAtom({ app, stage: scope.stage }));
+  const [runCron, run] = useAtom(runCronAtom);
+  const [redrive, redriveQueue] = useAtom(redriveAtom);
+  // The cron whose "Run now" was pressed last, to label it "Started".
+  const [started, setStarted] = useState<string>();
 
   return (
     <div className="space-y-3">
       <Card title="Jobs">
-        <Loaded q={jobs}>
+        <Loaded result={jobs}>
           {(d) => (
             <Table
               head={['Kind', 'Name', 'OK', 'Failed', 'p95', 'Last run']}
@@ -48,8 +64,8 @@ export function JobsTab() {
       </Card>
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <Card title="Queues">
-          <ErrorBox error={redrive.error} />
-          <Loaded q={queues}>
+          <ErrorBox error={failure(redrive)} />
+          <Loaded result={queues}>
             {(qs) => (
               <Table
                 head={['Queue', 'Waiting', 'In flight', 'Dead letters', '']}
@@ -67,7 +83,16 @@ export function JobsTab() {
                     </td>
                     <td className="text-right">
                       {q.deadLetter > 0 && (
-                        <Button onClick={() => redrive.mutate(q.name)} disabled={redrive.isPending}>
+                        <Button
+                          onClick={() =>
+                            redriveQueue({
+                              params: { app, name: q.name },
+                              query: { stage: scope.stage },
+                              reactivityKeys: queuesChanged(app),
+                            })
+                          }
+                          disabled={redrive.waiting}
+                        >
                           Redrive
                         </Button>
                       )}
@@ -79,8 +104,8 @@ export function JobsTab() {
           </Loaded>
         </Card>
         <Card title="Crons">
-          <ErrorBox error={runCron.error} />
-          <Loaded q={jobs}>
+          <ErrorBox error={failure(runCron)} />
+          <Loaded result={jobs}>
             {(d) => (
               <Table head={['Cron', 'Schedule (UTC)', '']} empty="No crons on this stage.">
                 {d.crons.map((c) => (
@@ -92,8 +117,14 @@ export function JobsTab() {
                       <Mono>{c.schedule}</Mono>
                     </td>
                     <td className="text-right">
-                      <Button onClick={() => runCron.mutate(c.name)} disabled={runCron.isPending}>
-                        {runCron.isSuccess && runCron.variables === c.name ? 'Started' : 'Run now'}
+                      <Button
+                        onClick={() => {
+                          setStarted(c.name);
+                          run({ params: { app, name: c.name }, query: { stage: scope.stage } });
+                        }}
+                        disabled={runCron.waiting}
+                      >
+                        {succeeded(runCron) && started === c.name ? 'Started' : 'Run now'}
                       </Button>
                     </td>
                   </tr>

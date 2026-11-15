@@ -1,3 +1,4 @@
+import { gzipSync } from 'node:zlib';
 import { UNAUTHORIZED_BODY } from '@ericminassian/platform-core';
 import { Effect, Layer, Option, Redacted, Schema } from 'effect';
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/http-api';
@@ -202,6 +203,36 @@ describe('defineWorker', () => {
     expect(seen).toEqual([{ body: { to: 'x' }, attempt: 3, trace: 32 }]);
     expect(builds).toBe(1);
     expect(ofType('err')).toMatchObject([{ source: 'job', message: 'bounced', job: 'queue:emails' }]);
+  });
+
+  it('hands CloudWatch Logs batches to the logs handler, failing the delivery when it fails', async () => {
+    const messages: string[] = [];
+    const handler = createWorkerHandler(
+      defineWorker({
+        layer: Platform.layerMemory(),
+        logs: (batch) =>
+          Effect.gen(function* () {
+            if (batch.logGroup.endsWith('/broken')) return yield* new Bounced({ message: 'unreadable' });
+            messages.push(...batch.logEvents.map((e) => `${batch.logGroup} ${e.message}`));
+          }),
+      }),
+    );
+    const delivery = (logGroup: string) => ({
+      awslogs: {
+        data: gzipSync(
+          JSON.stringify({
+            messageType: 'DATA_MESSAGE',
+            logGroup,
+            logStream: 's',
+            logEvents: [{ id: '1', timestamp: 1, message: 'hello' }],
+          }),
+        ).toString('base64'),
+      },
+    });
+
+    await handler(delivery('/platform/apps/todo/prod/web'), {});
+    expect(messages).toEqual(['/platform/apps/todo/prod/web hello']);
+    await expect(handler(delivery('/platform/apps/todo/prod/broken'), {})).rejects.toThrow('unreadable');
   });
 });
 

@@ -1,235 +1,401 @@
 /**
  * The deployer: runs one deployment through the engine and records progress.
  * Runs in the worker (`invoke.deploy`) so it gets the 15-minute timeout; the
- * API only queues it. Rollback is fast (usually a route write), so the API
- * has the worker run `rollbackStage` synchronously.
+ * API only queues it. Rollbacks also run in the worker (see jobs/call.ts),
+ * which the API waits for.
  */
-import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
-import { log } from '@ericminassian/platform';
 import {
   type ArtifactFile,
   type DeploymentEventEntry,
-  names,
-  type PlatformRuntimeConfig,
+  ManifestError,
   parseManifest,
+  type ResolvedManifest,
   type RollbackResponse,
+  type RouteRecord,
 } from '@ericminassian/platform-core';
-import { createEngine, type DeployStageInput, type S3Location } from '@ericminassian/platform-engine';
-import { aws } from './aws.ts';
-import { getRuntimeConfig, logRetentionDays } from './config.ts';
-import { EDGE_TIMEOUT_MS, waitForEdge } from './edge.ts';
-import { appendDeploymentEvents, getDeployment, getStage, updateDeployment, updateStage } from './store.ts';
+import {
+  createEngine,
+  type DeployStageInput,
+  type DeployStageResult,
+  type DestroyStageInput,
+  type EngineLogEntry,
+  type RollbackStageInput,
+} from '@ericminassian/platform-engine';
+import {
+  Cause,
+  Clock,
+  Context,
+  DateTime,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Queue,
+  Schedule,
+  Schema,
+  Stream,
+} from 'effect';
+import { HttpClient } from 'effect/http';
+import { type ArtifactRef, Artifacts } from './artifacts.ts';
+import { logRetentionDays, Settings } from './config.ts';
+import { EDGE_TIMEOUT_SECONDS, waitForEdge } from './edge.ts';
+import { type StageItem, Store } from './store.ts';
 
-const now = () => new Date().toISOString();
+/** A deployment step that can't go on; `message` lands in the deployment's record. */
+export class DeployFailed extends Schema.TaggedError<DeployFailed, { readonly brand: unique symbol }>()(
+  'DeployFailed',
+  { message: Schema.String, cause: Schema.optional(Schema.Defect()) },
+) {}
 
-/** Buffers engine log lines and appends them to the deployment record in small batches. */
-class EventLog {
-  private pending: DeploymentEventEntry[] = [];
-  private timer: NodeJS.Timeout | undefined;
-  private chain: Promise<void> = Promise.resolve();
-  private readonly app: string;
-  private readonly id: string;
-  constructor(app: string, id: string) {
-    this.app = app;
-    this.id = id;
+/** The stage can't be rolled back as asked; the API answers 409 with `message`. */
+export class RollbackRefused extends Schema.TaggedError<RollbackRefused, { readonly brand: unique symbol }>()(
+  'RollbackRefused',
+  { message: Schema.String },
+) {}
+
+const engineFailed = (cause: unknown) =>
+  new DeployFailed({ message: cause instanceof Error ? cause.message : String(cause), cause });
+
+/** The engine (promise-based, shared with the CLI and the foundation). */
+export class StageEngine extends Context.Service<
+  StageEngine,
+  {
+    deploy(
+      input: DeployStageInput,
+      log: (entry: EngineLogEntry) => void,
+    ): Effect.Effect<DeployStageResult, DeployFailed>;
+    /** Points the stage at an earlier deployment; answers the route it now has. */
+    rollback(input: RollbackStageInput): Effect.Effect<RouteRecord, DeployFailed>;
+    destroy(
+      input: DestroyStageInput,
+      log: (entry: EngineLogEntry) => void,
+    ): Effect.Effect<void, DeployFailed>;
   }
-  push(e: Omit<DeploymentEventEntry, 'ts'>): void {
-    this.pending.push({ ts: Date.now(), ...e });
-    if (this.pending.length >= 20) void this.flush();
-    else this.timer ??= setTimeout(() => void this.flush(), 1_500);
-  }
-  flush(): Promise<void> {
-    clearTimeout(this.timer);
-    this.timer = undefined;
-    const batch = this.pending.splice(0);
-    this.chain = this.chain
-      .then(() => appendDeploymentEvents(this.app, this.id, batch))
-      .catch((err) => log.warn('failed to record deployment events', { err: String(err) }));
-    return this.chain;
-  }
-}
-
-async function readText(bucket: string, key: string): Promise<string> {
-  const res = await aws.s3().send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-  return (await res.Body?.transformToString()) ?? '';
-}
-
-async function locate(bucket: string, key: string): Promise<S3Location | undefined> {
-  try {
-    const head = await aws.s3().send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
-    return { bucket, key, ...(head.VersionId ? { versionId: head.VersionId } : {}) };
-  } catch (err) {
-    const name = (err as { name?: string }).name;
-    if (name === 'NotFound' || name === 'NoSuchKey') return undefined;
-    throw err;
-  }
-}
-
-export async function findArtifacts(
-  platform: PlatformRuntimeConfig,
-  app: string,
-  stage: string,
-  id: string,
-): Promise<DeployStageInput['artifacts']> {
-  const files: Array<[keyof DeployStageInput['artifacts'], ArtifactFile]> = [
-    ['server', 'server.zip'],
-    ['worker', 'worker.zip'],
-    ['static', 'static.zip'],
-  ];
-  const found = await Promise.all(
-    files.map(
-      async ([slot, file]) =>
-        [slot, await locate(platform.artifactsBucket, names.artifactKey(app, stage, id, file))] as const,
-    ),
+>()('@ericminassian/platform-control-plane/StageEngine') {
+  static readonly layer: Layer.Layer<StageEngine> = Layer.succeed(
+    StageEngine,
+    StageEngine.of({
+      deploy: (input, log) =>
+        Effect.tryPromise({
+          try: () => createEngine({ region: input.platform.region, log }).deployStage(input),
+          catch: engineFailed,
+        }),
+      rollback: (input) =>
+        Effect.tryPromise({
+          try: () => createEngine({ region: input.platform.region }).rollbackStage(input),
+          catch: engineFailed,
+        }),
+      destroy: (input, log) =>
+        Effect.tryPromise({
+          try: () => createEngine({ region: input.platform.region, log }).destroyStage(input),
+          catch: engineFailed,
+        }),
+    }),
   );
-  const artifacts: DeployStageInput['artifacts'] = {};
-  for (const [slot, loc] of found) if (loc) artifacts[slot] = loc;
-  return artifacts;
 }
 
-export async function runDeployment(id: string): Promise<void> {
-  const dep = await getDeployment(id);
-  if (!dep) {
-    log.warn('deploy job for unknown deployment', { id });
-    return;
-  }
-  // Idempotent under Lambda async retries: only one run moves it out of `queued`.
-  if (!(await updateDeployment(dep.app, id, { status: 'running', startedAt: now() }, 'queued'))) {
-    log.info('deployment already handled', { id, status: dep.status });
-    return;
-  }
-  const { app, stage } = dep;
-  const events = new EventLog(app, id);
-  const before = await getStage(app, stage);
-  try {
-    const platform = await getRuntimeConfig();
-    events.push({ level: 'info', msg: `deploying ${app} to ${stage}` });
-    const raw = await readText(platform.artifactsBucket, names.artifactKey(app, stage, id, 'manifest.json'));
-    // `plat build` writes { manifest, resolved, build }; accept a bare manifest too.
-    const doc = JSON.parse(raw) as { manifest?: unknown };
-    const manifest = parseManifest(doc.manifest ?? doc);
-    if (manifest.name !== app)
-      throw new Error(`plat.config.ts name "${manifest.name}" does not match app "${app}"`);
-    const artifacts = await findArtifacts(platform, app, stage, id);
-    if (manifest.web?.server && !artifacts.server)
-      throw new Error('manifest declares web.server but server.zip was not uploaded');
-    if (manifest.worker && !artifacts.worker)
-      throw new Error('manifest needs a worker but worker.zip was not uploaded');
+type Push = (entry: Omit<DeploymentEventEntry, 'ts'>) => void;
 
-    const engine = createEngine({
-      region: platform.region,
-      log: (e) => {
-        events.push(e);
-        log.info(e.msg, { deployment: id, ...(e.resource ? { resource: e.resource } : {}) });
-      },
-    });
-    const result = await engine.deployStage({
-      manifest,
-      stage,
-      deploymentId: id,
-      platform,
-      artifacts,
-      webMode: 'function',
-      logRetentionDays: logRetentionDays(stage),
-    });
+const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
-    await updateStage(app, stage, {
-      status: 'active',
-      host: result.host,
-      url: result.url,
-      currentDeployment: id,
-      previousDeployment: before?.currentDeployment,
-      currentRevision: result.webFunction?.revisionId,
-      previousRevision: before?.currentRevision,
-      route: result.route,
-      previousRoute: before?.route,
-    });
-    // A stage without a server gets its health answered by the edge router, from the route.
-    if (result.route) {
-      events.push({ level: 'info', msg: 'waiting for the edge to serve this deployment' });
-      await events.flush();
-      const served = await waitForEdge(result.url, id);
-      events.push(
-        served
-          ? { level: 'info', msg: 'edge is serving this deployment' }
-          : {
-              level: 'warn',
-              msg: `the edge was not serving this deployment after ${EDGE_TIMEOUT_MS / 1000}s; it should catch up shortly`,
-            },
+/** The message a failed deployment records. */
+const failureMessage = (cause: Cause.Cause<unknown>): string => {
+  const error = Cause.squash(cause);
+  return error instanceof Error ? error.message : String(error);
+};
+
+export class Deployer extends Context.Service<
+  Deployer,
+  {
+    /** Runs a queued deployment; a second run of the same one does nothing. */
+    run(id: string): Effect.Effect<void>;
+    /** Tears a stage down (prod keeps its data); fails, so the job retries, if the engine fails. */
+    destroy(app: string, stage: string): Effect.Effect<void, DeployFailed>;
+    /** Points a stage back at an earlier successful deployment (default: the previous one). */
+    rollback(
+      app: string,
+      stage: string,
+      toDeployment?: string,
+    ): Effect.Effect<RollbackResponse, RollbackRefused>;
+  }
+>()('@ericminassian/platform-control-plane/Deployer') {
+  static readonly layer: Layer.Layer<
+    Deployer,
+    never,
+    Artifacts | HttpClient.HttpClient | Settings | StageEngine | Store
+  > = Layer.effect(
+    Deployer,
+    Effect.gen(function* () {
+      const artifacts = yield* Artifacts;
+      const http = yield* HttpClient.HttpClient;
+      const settings = yield* Settings;
+      const engine = yield* StageEngine;
+      const store = yield* Store;
+
+      /**
+       * Progress, which the engine reports through a synchronous callback. Each
+       * entry is logged, and with `deployment` also appended to its event log
+       * in batches (20 entries or 1.5 s), which `plat deploy` streams. Closing
+       * the scope writes what is left.
+       */
+      const progress = Effect.fnUntraced(function* (deployment?: {
+        readonly app: string;
+        readonly id: string;
+      }) {
+        const clock = yield* Clock.Clock;
+        const queue = yield* Queue.unbounded<DeploymentEventEntry, Cause.Done>();
+        const writer = yield* Stream.fromQueue(queue).pipe(
+          Stream.tap((e) =>
+            (e.level === 'error' ? Effect.logError : e.level === 'warn' ? Effect.logWarning : Effect.logInfo)(
+              e.msg,
+            ).pipe(Effect.annotateLogs(e.resource ? { resource: e.resource } : {})),
+          ),
+          Stream.groupedWithin(20, '1.5 seconds'),
+          Stream.runForEach((batch) =>
+            deployment
+              ? store
+                  .appendDeploymentEvents(deployment.app, deployment.id, batch)
+                  .pipe(
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning('failed to record deployment events', cause),
+                    ),
+                  )
+              : Effect.void,
+          ),
+          Effect.forkScoped,
+        );
+        yield* Effect.addFinalizer(() => Queue.end(queue).pipe(Effect.andThen(Fiber.join(writer))));
+        const push: Push = (entry) => {
+          Queue.offerUnsafe(queue, { ts: clock.currentTimeMillisUnsafe(), ...entry });
+        };
+        return push;
+      });
+
+      const findArtifacts = Effect.fnUntraced(function* (ref: ArtifactRef) {
+        const slots: ReadonlyArray<readonly [keyof DeployStageInput['artifacts'], ArtifactFile]> = [
+          ['server', 'server.zip'],
+          ['worker', 'worker.zip'],
+          ['static', 'static.zip'],
+        ];
+        const found = yield* Effect.forEach(
+          slots,
+          ([slot, file]) => Effect.map(artifacts.locate(ref, file), (loc) => [slot, loc] as const),
+          { concurrency: 'unbounded' },
+        );
+        const located: DeployStageInput['artifacts'] = {};
+        for (const [slot, loc] of found) if (Option.isSome(loc)) located[slot] = loc.value;
+        return located;
+      }, Effect.orDie);
+
+      /** Everything up to the route flip and the edge check; the caller records the outcome. */
+      const deployStage = Effect.fnUntraced(function* (
+        ref: ArtifactRef,
+        before: Option.Option<StageItem>,
+        push: Push,
+      ) {
+        const { app, stage, deployment: id } = ref;
+        const platform = yield* settings.runtime;
+        push({ level: 'info', msg: `deploying ${app} to ${stage}` });
+        const raw = yield* artifacts.readText(ref, 'manifest.json');
+        const manifest = yield* Effect.try({
+          try: () => {
+            // `plat build` writes { manifest, resolved, build }; accept a bare manifest too.
+            const doc = JSON.parse(raw) as { manifest?: unknown };
+            return parseManifest(doc.manifest ?? doc);
+          },
+          catch: (e) =>
+            new DeployFailed({
+              message: e instanceof ManifestError || e instanceof Error ? e.message : String(e),
+            }),
+        });
+        if (manifest.name !== app)
+          return yield* new DeployFailed({
+            message: `plat.config.ts name "${manifest.name}" does not match app "${app}"`,
+          });
+        const located = yield* findArtifacts(ref);
+        if (manifest.web?.server && !located.server)
+          return yield* new DeployFailed({
+            message: 'manifest declares web.server but server.zip was not uploaded',
+          });
+        if (manifest.worker && !located.worker)
+          return yield* new DeployFailed({
+            message: 'manifest needs a worker but worker.zip was not uploaded',
+          });
+
+        const result = yield* engine.deploy(
+          {
+            manifest,
+            stage,
+            deploymentId: id,
+            platform,
+            artifacts: located,
+            webMode: 'function',
+            logRetentionDays: logRetentionDays(settings.platform, stage),
+          },
+          push,
+        );
+
+        const previous = Option.getOrUndefined(before);
+        yield* store.updateStage(app, stage, {
+          status: 'active',
+          host: result.host,
+          url: result.url,
+          currentDeployment: id,
+          previousDeployment: previous?.currentDeployment,
+          currentRevision: result.webFunction?.revisionId,
+          previousRevision: previous?.currentRevision,
+          route: result.route,
+          previousRoute: previous?.route,
+        });
+        // A stage without a server gets its health answered by the edge router, from the route.
+        if (result.route) {
+          push({ level: 'info', msg: 'waiting for the edge to serve this deployment' });
+          const served = yield* waitForEdge(result.url, id).pipe(
+            Effect.provideService(HttpClient.HttpClient, http),
+          );
+          push(
+            served
+              ? { level: 'info', msg: 'edge is serving this deployment' }
+              : {
+                  level: 'warn',
+                  msg: `the edge was not serving this deployment after ${EDGE_TIMEOUT_SECONDS}s; it should catch up shortly`,
+                },
+          );
+        }
+        push({ level: 'info', msg: `live at ${result.url}` });
+        return { result, manifest } satisfies { result: DeployStageResult; manifest: ResolvedManifest };
+      });
+
+      const run = Effect.fn('Deployer.run')(
+        function* (id: string) {
+          const found = yield* store.getDeployment(id);
+          if (Option.isNone(found)) return yield* Effect.logWarning('deploy job for unknown deployment');
+          const { app, stage, status } = found.value;
+          // Idempotent under Lambda async retries: only one run moves it out of `queued`.
+          const claimed = yield* store.updateDeployment(
+            app,
+            id,
+            { status: 'running', startedAt: yield* nowIso },
+            'queued',
+          );
+          if (!claimed)
+            return yield* Effect.logInfo('deployment already handled').pipe(Effect.annotateLogs({ status }));
+          const before = yield* store.getStage(app, stage);
+
+          // The event log is complete before the status is final: the CLI stops
+          // reading events once the deployment succeeded or failed.
+          const outcome = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const push = yield* progress({ app, id });
+              const exit = yield* Effect.exit(deployStage({ app, stage, deployment: id }, before, push));
+              if (Exit.isFailure(exit)) push({ level: 'error', msg: failureMessage(exit.cause) });
+              return exit;
+            }),
+          );
+
+          if (Exit.isSuccess(outcome)) {
+            const { result, manifest } = outcome.value;
+            // The stage already serves this deployment. If this write failed, the job's
+            // retry would find it `running` and stop, leaving a live deployment that
+            // never succeeds; so ride out throttling here.
+            yield* store
+              .updateDeployment(app, id, {
+                status: 'succeeded',
+                finishedAt: yield* nowIso,
+                url: result.url,
+                manifest,
+                route: result.route,
+                revisionId: result.webFunction?.revisionId,
+              })
+              .pipe(
+                Effect.catchDefect(Effect.fail),
+                Effect.retry({ schedule: Schedule.exponential('200 millis'), times: 6 }),
+                Effect.orDie,
+              );
+            return;
+          }
+          yield* Effect.logError('deployment failed', outcome.cause);
+          yield* store.updateDeployment(app, id, {
+            status: 'failed',
+            finishedAt: yield* nowIso,
+            error: failureMessage(outcome.cause),
+          });
+          // The previous deployment (if any) is still live: failures never flip the route.
+          const live = Option.isSome(before) && before.value.currentDeployment !== undefined;
+          yield* store.updateStage(app, stage, { status: live ? 'active' : 'failed' });
+        },
+        (effect, id) => Effect.annotateLogs(effect, { deployment: id }),
       );
-    }
-    events.push({ level: 'info', msg: `live at ${result.url}` });
-    await events.flush();
-    await updateDeployment(app, id, {
-      status: 'succeeded',
-      finishedAt: now(),
-      url: result.url,
-      manifest,
-      route: result.route,
-      revisionId: result.webFunction?.revisionId,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    log.error('deployment failed', { id, err });
-    events.push({ level: 'error', msg: message });
-    await events.flush();
-    await updateDeployment(app, id, { status: 'failed', finishedAt: now(), error: message });
-    // The previous deployment (if any) is still live: failures never flip the route.
-    await updateStage(app, stage, { status: before?.currentDeployment ? 'active' : 'failed' });
-  }
-}
 
-export async function runDestroy(app: string, stage: string): Promise<void> {
-  const platform = await getRuntimeConfig();
-  const engine = createEngine({
-    region: platform.region,
-    log: (e) => log.info(e.msg, { app, stage, ...(e.resource ? { resource: e.resource } : {}) }),
-  });
-  try {
-    await engine.destroyStage({ app, stage, platform, keepData: stage === 'prod' });
-    await updateStage(app, stage, { status: 'destroyed', route: undefined, previousRoute: undefined });
-  } catch (err) {
-    log.error('destroy failed', { app, stage, err });
-    await updateStage(app, stage, { status: 'failed' });
-    throw err;
-  }
-}
+      const destroy = Effect.fn('Deployer.destroy')(
+        function* (app: string, stage: string) {
+          const platform = yield* settings.runtime;
+          const destroyed = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const push = yield* progress();
+              return yield* Effect.exit(
+                engine.destroy({ app, stage, platform, keepData: stage === 'prod' }, push),
+              );
+            }),
+          );
+          if (Exit.isFailure(destroyed)) {
+            yield* Effect.logError('destroy failed', destroyed.cause);
+            yield* store.updateStage(app, stage, { status: 'failed' });
+            return yield* Effect.failCause(destroyed.cause);
+          }
+          yield* store.updateStage(app, stage, {
+            status: 'destroyed',
+            route: undefined,
+            previousRoute: undefined,
+          });
+        },
+        (effect, app, stage) => Effect.annotateLogs(effect, { app, stage }),
+      );
 
-/** Points a stage back at an earlier successful deployment (default: the previous one). */
-export async function rollback(
-  app: string,
-  stage: string,
-  toDeploymentId?: string,
-): Promise<RollbackResponse> {
-  const current = await getStage(app, stage);
-  if (!current?.currentDeployment) throw new Error(`${app}/${stage} has no live deployment`);
-  const targetId = toDeploymentId ?? current.previousDeployment;
-  if (!targetId) throw new Error(`${app}/${stage} has no previous deployment to roll back to`);
-  if (targetId === current.currentDeployment) throw new Error(`${targetId} is already live`);
-  const target = await getDeployment(targetId);
-  if (!target || target.app !== app || target.stage !== stage)
-    throw new Error(`deployment ${targetId} is not part of ${app}/${stage}`);
-  if (!target.route) throw new Error(`deployment ${targetId} has no recorded route (it never went live)`);
+      const refuse = (message: string) => Effect.fail(new RollbackRefused({ message }));
 
-  const platform = await getRuntimeConfig();
-  const engine = createEngine({ region: platform.region });
-  const route = await engine.rollbackStage({
-    app,
-    stage,
-    platform,
-    route: target.route,
-    ...(target.revisionId ? { revisionId: target.revisionId } : {}),
-  });
-  await updateStage(app, stage, {
-    status: 'active',
-    currentDeployment: targetId,
-    previousDeployment: current.currentDeployment,
-    currentRevision: target.revisionId,
-    previousRevision: current.currentRevision,
-    route,
-    previousRoute: current.route,
-    ...(target.url ? { url: target.url } : {}),
-  });
-  await updateDeployment(app, current.currentDeployment, { status: 'rolled_back' });
-  return { currentDeployment: targetId, url: target.url ?? current.url };
+      const rollback = Effect.fn('Deployer.rollback')(function* (
+        app: string,
+        stage: string,
+        toDeployment?: string,
+      ) {
+        const current = Option.getOrUndefined(yield* store.getStage(app, stage));
+        if (!current?.currentDeployment) return yield* refuse(`${app}/${stage} has no live deployment`);
+        const targetId = toDeployment ?? current.previousDeployment;
+        if (!targetId) return yield* refuse(`${app}/${stage} has no previous deployment to roll back to`);
+        if (targetId === current.currentDeployment) return yield* refuse(`${targetId} is already live`);
+        const target = Option.getOrUndefined(yield* store.getDeployment(targetId));
+        if (!target || target.app !== app || target.stage !== stage)
+          return yield* refuse(`deployment ${targetId} is not part of ${app}/${stage}`);
+        if (!target.route)
+          return yield* refuse(`deployment ${targetId} has no recorded route (it never went live)`);
+
+        const platform = yield* settings.runtime;
+        const route = yield* engine
+          .rollback({
+            app,
+            stage,
+            platform,
+            route: target.route,
+            ...(target.revisionId ? { revisionId: target.revisionId } : {}),
+          })
+          .pipe(Effect.catchTag('DeployFailed', (e) => refuse(e.message)));
+        yield* store.updateStage(app, stage, {
+          status: 'active',
+          currentDeployment: targetId,
+          previousDeployment: current.currentDeployment,
+          currentRevision: target.revisionId,
+          previousRevision: current.currentRevision,
+          route,
+          previousRoute: current.route,
+          ...(target.url ? { url: target.url } : {}),
+        });
+        yield* store.updateDeployment(app, current.currentDeployment, { status: 'rolled_back' });
+        return { currentDeployment: targetId, url: target.url ?? current.url };
+      });
+
+      return Deployer.of({ run, destroy, rollback });
+    }),
+  );
 }

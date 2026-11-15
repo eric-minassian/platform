@@ -1,27 +1,44 @@
 /** Admin-only overview: members, app/stage counts, platform-wide cost. */
-import { Hono } from 'hono';
-import { type AuthEnv, requireAdmin } from '../auth.ts';
-import { config } from '../config.ts';
+import { PlatformApi } from '@ericminassian/platform-core/platform-api';
+import { Effect, Option } from 'effect';
+import { HttpApiBuilder } from 'effect/http-api';
+import { Settings } from '../config.ts';
 import { PLATFORM_COST_KEY, TOTAL_COST_KEY } from '../jobs/cost.ts';
-import { listAllStages, listApps } from '../store.ts';
-import { readCost } from '../telemetry/query.ts';
+import { Store } from '../store.ts';
+import { TelemetryQuery } from '../telemetry/query.ts';
+import { Access } from './access.ts';
+import { ifAvailable } from './apps.ts';
 
-export const admin = new Hono<AuthEnv>().get('/overview', async (c) => {
-  requireAdmin(c);
-  const [apps, stages, total, shared] = await Promise.all([
-    listApps(),
-    listAllStages(),
-    readCost(TOTAL_COST_KEY).catch(() => null),
-    readCost(PLATFORM_COST_KEY).catch(() => null),
-  ]);
-  const live = stages.filter((s) => s.status !== 'destroyed');
-  return c.json({
-    members: config.members,
-    limits: config.limits,
-    apps: apps.length,
-    stages: live.length,
-    previews: live.filter((s) => s.preview).length,
-    down: live.filter((s) => s.up === false).map((s) => s.app),
-    cost: { total, shared },
-  });
-});
+export const AdminLive = HttpApiBuilder.group(
+  PlatformApi,
+  'admin',
+  Effect.fn(function* (handlers) {
+    const access = yield* Access;
+    const settings = yield* Settings;
+    const store = yield* Store;
+    const telemetry = yield* TelemetryQuery;
+
+    const cost = (key: string) => Effect.map(ifAvailable('cost', telemetry.cost(key)), Option.getOrNull);
+
+    return handlers.handleAll({
+      overview: () =>
+        Effect.gen(function* () {
+          yield* access.admin;
+          const [apps, stages, total, shared] = yield* Effect.all(
+            [store.listApps, store.listAllStages, cost(TOTAL_COST_KEY), cost(PLATFORM_COST_KEY)],
+            { concurrency: 'unbounded' },
+          );
+          const live = stages.filter((s) => s.status !== 'destroyed');
+          return {
+            members: settings.platform.members,
+            limits: settings.platform.limits,
+            apps: apps.length,
+            stages: live.length,
+            previews: live.filter((s) => s.preview).length,
+            down: live.filter((s) => s.up === false).map((s) => s.app),
+            cost: { total, shared },
+          };
+        }),
+    });
+  }),
+);

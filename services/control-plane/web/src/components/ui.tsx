@@ -1,4 +1,6 @@
+import { AsyncResult } from 'effect/reactivity';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
+import { errorMessage } from '../client.ts';
 
 export const cx = (...c: Array<string | false | null | undefined>): string => c.filter(Boolean).join(' ');
 
@@ -211,7 +213,7 @@ export function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
   return (
     <div className="rounded-md border border-bad/40 bg-bad/10 px-3 py-2 text-[12px] text-bad">
-      {error instanceof Error ? error.message : String(error)}
+      {errorMessage(error)}
     </div>
   );
 }
@@ -220,15 +222,17 @@ export function Mono({ children, className }: { children: ReactNode; className?:
   return <span className={cx('font-mono text-[11.5px]', className)}>{children}</span>;
 }
 
-/** Renders a query's loading/error states, then children. */
-export function Loaded<T>({
-  q,
+/** Renders a query's loading and error states, then children. */
+export function Loaded<A, E>({
+  result,
   children,
 }: {
-  q: { data: T | undefined; error: unknown; isPending: boolean };
-  children: (data: T) => ReactNode;
+  result: AsyncResult.AsyncResult<A, E>;
+  children: (value: A) => ReactNode;
 }) {
-  if (q.error) return <ErrorBox error={q.error} />;
-  if (q.isPending || q.data === undefined) return <Spinner />;
-  return <>{children(q.data)}</>;
+  return AsyncResult.match(result, {
+    onInitial: () => <Spinner />,
+    onFailure: ({ cause }) => <ErrorBox error={cause} />,
+    onSuccess: ({ value }) => <>{children(value)}</>,
+  });
 }

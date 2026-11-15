@@ -1,16 +1,18 @@
-import { useQuery } from '@tanstack/react-query';
+import { useAtomValue } from '@effect/atom-react';
 import { Link } from 'react-router';
-import { api } from '../api.ts';
+import { ApiClient, fresh, timeToLive } from '../client.ts';
 import { Bars, SERIES_COLORS } from '../components/charts.tsx';
 import { Badge, Card, Loaded, Mono, Stat, Table } from '../components/ui.tsx';
 import { fmtUsd } from '../format.ts';
 
+const overviewAtom = fresh(ApiClient.query('admin', 'overview', { timeToLive }));
+
 export function AdminPage() {
-  const q = useQuery({ queryKey: ['admin'], queryFn: api.adminOverview });
+  const result = useAtomValue(overviewAtom);
   return (
     <div className="space-y-4">
       <h1 className="text-lg font-semibold">Admin</h1>
-      <Loaded q={q}>
+      <Loaded result={result}>
         {(o) => (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-5">

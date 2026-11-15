@@ -1,13 +1,22 @@
+import { assert, it as effect } from '@effect/vitest';
+import { type Duration, Effect, Layer, Option } from 'effect';
+import { FetchHttpClient } from 'effect/http';
 import { describe, expect, it } from 'vitest';
-import { safeRedirect } from '../src/api/session.ts';
-import { hostConflict, type Resolver } from '../src/dns.ts';
+import { Dns, type Resolver } from '../src/dns.ts';
 import { waitForEdge } from '../src/edge.ts';
 import { PLATFORM_COST_KEY, parseCostResults, TOTAL_COST_KEY } from '../src/jobs/cost.ts';
-import { nextUptimeState } from '../src/jobs/pinger.ts';
+import { nextUptimeState, Pinger } from '../src/jobs/pinger.ts';
 import { stalePreviews } from '../src/jobs/reaper.ts';
 import { STUCK_AFTER_MS, stuckDeployments, suspectStages } from '../src/jobs/watchdog.ts';
 import { describe as describeEvent, runtimeRecord, toFilterPattern, toLogLine } from '../src/logs.ts';
 import type { DeploymentItem, StageItem } from '../src/store.ts';
+import { awsLayer, memoryStore, settingsLayer } from './support.ts';
+
+/** Effect's HTTP client over a fake `fetch`. */
+const fetchLayer = (fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) =>
+  FetchHttpClient.layer.pipe(
+    Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch as typeof globalThis.fetch)),
+  );
 
 describe('uptime state', () => {
   it('needs two failures before going down and alerts once', () => {
@@ -68,33 +77,48 @@ describe('reaper', () => {
 
 describe('dns conflicts', () => {
   const none = Object.assign(new Error('no data'), { code: 'ENODATA' });
-  const resolver = (over: Partial<Resolver>): Resolver => ({
-    resolveNs: async () => Promise.reject(none),
-    resolveCname: async () => Promise.reject(none),
-    resolve4: async () => Promise.reject(none),
-    ...over,
-  });
-  it('accepts free names and the platform wildcard', async () => {
-    expect(await hostConflict('a.example.com', 'edge.example.com', resolver({}))).toBeNull();
-    expect(
-      await hostConflict(
-        'a.example.com',
-        'edge.example.com',
-        resolver({ resolveCname: async () => ['edge.example.com.'] }),
+  const conflict = (host: string, edge: string, over: Partial<Resolver>) =>
+    Dns.use((dns) => dns.hostConflict(host, edge)).pipe(
+      Effect.provide(
+        Dns.layerWith({
+          resolveNs: async () => Promise.reject(none),
+          resolveCname: async () => Promise.reject(none),
+          resolve4: async () => Promise.reject(none),
+          ...over,
+        }),
       ),
-    ).toBeNull();
-  });
-  it('rejects delegations, foreign CNAMEs and A records', async () => {
-    expect(await hostConflict('a.example.com', 'e', resolver({ resolveNs: async () => ['ns1'] }))).toMatch(
-      /delegated/,
+      Effect.map(Option.getOrElse(() => '')),
     );
-    expect(
-      await hostConflict('a.example.com', 'e', resolver({ resolveCname: async () => ['x.github.io'] })),
-    ).toMatch(/points at x.github.io/);
-    expect(await hostConflict('a.example.com', 'e', resolver({ resolve4: async () => ['1.2.3.4'] }))).toMatch(
-      /A record/,
-    );
-  });
+
+  effect.effect('accepts free names and the platform wildcard', () =>
+    Effect.gen(function* () {
+      assert.strictEqual(yield* conflict('a.example.com', 'edge.example.com', {}), '');
+      assert.strictEqual(
+        yield* conflict('a.example.com', 'edge.example.com', {
+          resolveCname: async () => ['edge.example.com.'],
+        }),
+        '',
+      );
+      // A DNS outage never blocks app creation.
+      assert.strictEqual(
+        yield* conflict('a.example.com', 'e', {
+          resolveNs: async () => Promise.reject(new Error('SERVFAIL')),
+        }),
+        '',
+      );
+    }),
+  );
+
+  effect.effect('rejects delegations, foreign CNAMEs and A records', () =>
+    Effect.gen(function* () {
+      assert.match(yield* conflict('a.example.com', 'e', { resolveNs: async () => ['ns1'] }), /delegated/);
+      assert.match(
+        yield* conflict('a.example.com', 'e', { resolveCname: async () => ['x.github.io'] }),
+        /points at x.github.io/,
+      );
+      assert.match(yield* conflict('a.example.com', 'e', { resolve4: async () => ['1.2.3.4'] }), /A record/);
+    }),
+  );
 });
 
 describe('logs', () => {
@@ -141,15 +165,6 @@ describe('logs', () => {
     expect(toFilterPattern(undefined)).toBeUndefined();
     expect(toFilterPattern('timeout')).toBe('"timeout"');
     expect(toFilterPattern('{ $.status = 500 }')).toBe('{ $.status = 500 }');
-  });
-});
-
-describe('redirects', () => {
-  it('only allows same-origin paths', () => {
-    expect(safeRedirect('/apps/todo')).toBe('/apps/todo');
-    expect(safeRedirect('//evil.com')).toBe('/');
-    expect(safeRedirect('https://evil.com')).toBe('/');
-    expect(safeRedirect(undefined)).toBe('/');
   });
 });
 
@@ -205,23 +220,62 @@ describe('watchdog', () => {
 
 describe('edge wait', () => {
   const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status });
-
-  it('resolves once the edge serves the new deployment', async () => {
-    const answers = [reply(404, {}), reply(200, { revision: 'd-old' }), reply(200, { revision: 'd-new' })];
-    const fetch = (async () =>
-      answers.shift() ?? reply(200, { revision: 'd-new' })) as typeof globalThis.fetch;
-    expect(await waitForEdge('https://x.example.com', 'd-new', { fetch, intervalMs: 1 })).toBe(true);
-    expect(answers).toHaveLength(0);
-  });
-
-  it('gives up at the deadline without throwing', async () => {
-    const fetch = (async () => {
-      throw new Error('ENOTFOUND');
-    }) as typeof globalThis.fetch;
-    expect(await waitForEdge('https://x.example.com', 'd', { fetch, timeoutMs: 20, intervalMs: 5 })).toBe(
-      false,
+  const wait = (
+    fetch: () => Promise<Response>,
+    options: { timeout?: Duration.Input; interval?: Duration.Input } = {},
+  ) =>
+    waitForEdge('https://x.example.com', 'd-new', { interval: '1 millis', ...options }).pipe(
+      Effect.provide(fetchLayer(fetch)),
     );
-  });
+
+  effect.live('resolves once the edge serves the new deployment', () =>
+    Effect.gen(function* () {
+      const answers = [reply(404, {}), reply(200, { revision: 'd-old' }), reply(200, { revision: 'd-new' })];
+      assert.isTrue(yield* wait(async () => answers.shift() ?? reply(200, { revision: 'd-new' })));
+      assert.lengthOf(answers, 0);
+    }),
+  );
+
+  effect.live('gives up at the deadline without failing', () =>
+    Effect.gen(function* () {
+      const served = yield* wait(() => Promise.reject(new Error('ENOTFOUND')), {
+        timeout: '20 millis',
+        interval: '5 millis',
+      });
+      assert.isFalse(served);
+    }),
+  );
+});
+
+describe('pinger', () => {
+  const pinger = (fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) =>
+    Pinger.layer.pipe(
+      Layer.provide([awsLayer({}), settingsLayer(), memoryStore()]),
+      Layer.provideMerge(fetchLayer(fetch)),
+    );
+
+  effect.live('counts 2xx as up, and a redirect or no answer as down', () =>
+    Effect.gen(function* () {
+      const seen: Array<RequestInit['redirect']> = [];
+      const statuses = [200, 301];
+      const check = Pinger.use((p) => p.check('https://shop.example.com'));
+      const layer = pinger(async (_input, init) => {
+        seen.push(init?.redirect);
+        const status = statuses.shift();
+        return status ? new Response(null, { status }) : Promise.reject(new Error('timeout'));
+      });
+      const results = yield* Effect.all([check, check, check]).pipe(Effect.provide(layer));
+      assert.deepStrictEqual(
+        results.map((r) => [r.ok, r.status]),
+        [
+          [true, 200],
+          [false, 301],
+          [false, 0],
+        ],
+      );
+      assert.deepStrictEqual(seen, ['manual', 'manual', 'manual']);
+    }),
+  );
 });
 
 describe('runtime records', () => {

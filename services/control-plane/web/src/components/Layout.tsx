@@ -1,22 +1,27 @@
-import { useQuery } from '@tanstack/react-query';
+import { useAtomSet, useAtomValue } from '@effect/atom-react';
+import type { MeResponse } from '@ericminassian/platform-core';
+import { Exit } from 'effect';
+import { AsyncResult } from 'effect/reactivity';
 import { NavLink, Outlet } from 'react-router';
-import { api } from '../api.ts';
+import { ApiClient, fresh, logout, timeToLive } from '../client.ts';
 import { Button, cx, ErrorBox, Spinner } from './ui.tsx';
 
-export function useMe() {
-  return useQuery({ queryKey: ['me'], queryFn: api.me, staleTime: 5 * 60_000 });
-}
+const meAtom = fresh(ApiClient.query('session', 'me', { timeToLive }), { staleTime: '5 minutes' });
 
 export function Layout() {
-  const me = useMe();
-  if (me.isPending) return <Spinner label="Signing in…" />;
-  if (me.error) {
-    return (
+  return AsyncResult.match(useAtomValue(meAtom), {
+    onInitial: () => <Spinner label="Signing in…" />,
+    onFailure: ({ cause }) => (
       <div className="mx-auto max-w-md p-8">
-        <ErrorBox error={me.error} />
+        <ErrorBox error={cause} />
       </div>
-    );
-  }
+    ),
+    onSuccess: ({ value: me }) => <Shell me={me} />,
+  });
+}
+
+function Shell({ me }: { me: MeResponse }) {
+  const signOut = useAtomSet(logout, { mode: 'promiseExit' });
   const link = ({ isActive }: { isActive: boolean }) =>
     cx('rounded-md px-2 py-1 text-[12px]', isActive ? 'bg-panel-2 text-fg' : 'text-muted hover:text-fg');
   return (
@@ -31,21 +36,20 @@ export function Layout() {
             <NavLink to="/" end className={link}>
               Apps
             </NavLink>
-            {me.data.role === 'admin' && (
+            {me.role === 'admin' && (
               <NavLink to="/admin" className={link}>
                 Admin
               </NavLink>
             )}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-[12px] text-muted">
-            <a href={`https://github.com/${me.data.github}`} className="hover:text-fg">
-              @{me.data.github}
+            <a href={`https://github.com/${me.github}`} className="hover:text-fg">
+              @{me.github}
             </a>
             <Button
               variant="ghost"
               onClick={async () => {
-                await api.logout();
-                location.assign('/login');
+                if (Exit.isSuccess(await signOut())) location.assign('/login');
               }}
             >
               Sign out
