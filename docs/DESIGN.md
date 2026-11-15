@@ -641,8 +641,10 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
   - In the SES sandbox SES authorizes each recipient as an identity, so an
     unverified recipient is AccessDenied on `identity/<address>`; the SDK
     reports that as `rejected` with the reason.
-  - SES production access was requested the same day and denied within half
-    an hour (a day-old account). Until AWS grants it, apps can only mail
+  - SES production access was requested the same day. Within half an hour
+    the API reported the review as `DENIED`, but the support case asked for
+    more detail and a verified identity in the region, which the account
+    gets with the foundation deploy. Until AWS grants it, apps can only mail
     verified addresses and the user pool keeps Cognito's sender. See
     `docs/SETUP.md` step 11.
 - **Custom domains** (non-`ericminassian.com`) need their own certificate.

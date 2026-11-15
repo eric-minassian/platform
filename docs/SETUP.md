@@ -219,10 +219,14 @@ aws sesv2 put-account-details --profile platform-prod --region us-east-1 \
 aws sesv2 get-account --profile platform-prod --region us-east-1 --query Details.ReviewDetails
 ```
 
-AWS answers in the account's Support Center case (the `CaseId` above),
-usually within a day. A denial can be answered there with more detail. Once
-`ProductionAccessEnabled` is true, the next platform deploy moves the user
-pool's mail to SES (`login@mail.platform.ericminassian.com`).
+AWS answers in the account's Support Center case (the `CaseId` above). It
+may ask for the site, the kinds of email, daily volume, how recipients opt
+in, how bounces and complaints are handled, and a sample email: answer all of
+them in one reply. The API can show the review as `DENIED` while that case
+is open. Access needs a verified identity in the region, which the domain is
+once the foundation deploy has run. Once `ProductionAccessEnabled` is true,
+the next platform deploy moves the user pool's mail to SES
+(`login@mail.platform.ericminassian.com`).
 
 While in the sandbox, verify an address to test with:
 
