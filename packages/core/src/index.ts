@@ -7,6 +7,7 @@ export * from './cron.ts';
 export * from './ids.ts';
 export * from './manifest.ts';
 export * from './naming.ts';
+export * from './realtime.ts';
 export * from './router.ts';
 export * from './runtime-config.ts';
 export * from './telemetry.ts';

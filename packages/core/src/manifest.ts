@@ -1,6 +1,7 @@
 import { Effect, Schema } from 'effect';
 import { validateCron } from './cron.ts';
 import { APP_NAME_PATTERN, ENV_NAME_PATTERN, EVENT_TYPE_PATTERN, RESOURCE_KEY_PATTERN } from './naming.ts';
+import { CHANNEL_DECLARATION_PATTERN, CHANNEL_MESSAGE, realtimeIssues } from './realtime.ts';
 
 /**
  * The app's config file, at the app root. `plat` evaluates it and sends the
@@ -87,6 +88,13 @@ const AuthSchema = Schema.Union([
   Schema.Struct({ required: Schema.Boolean.pipe(orElse(false)) }),
 ]);
 
+const RealtimeSubscribeSchema = Schema.Literals(['public', 'signed-in']);
+
+const RealtimeSchema = Schema.Struct({
+  subscribe: RealtimeSubscribeSchema.pipe(orElse('public')),
+  channels: recordOf(CHANNEL_DECLARATION_PATTERN, Schema.Struct({}), CHANNEL_MESSAGE),
+});
+
 export const ManifestSchema = Schema.Struct({
   // Reserved names are enforced when an app is registered (API), not here:
   // the control plane itself is the app named `platform`.
@@ -108,7 +116,19 @@ export const ManifestSchema = Schema.Struct({
   storage: Schema.Array(resourceKey).pipe(orElse([])),
   secrets: Schema.Array(envName).pipe(orElse([])),
   env: recordOf(ENV_NAME_PATTERN, Schema.String).pipe(orElse({})),
-});
+  realtime: Schema.optional(RealtimeSchema),
+}).check(
+  Schema.makeFilter((m) => {
+    if (!m.realtime) return undefined;
+    const issues = realtimeIssues({
+      subscribe: m.realtime.subscribe,
+      channels: Object.keys(m.realtime.channels),
+      auth: m.auth !== false,
+      server: Boolean(m.web?.server),
+    });
+    return issues.map((i) => ({ path: ['realtime', ...i.path], issue: i.message }));
+  }),
+);
 
 /** The evaluated config as JSON: what the CLI sends and deployments store. */
 export type ManifestInput = typeof ManifestSchema.Encoded;
@@ -176,6 +196,29 @@ export type EventConfig<Detail = unknown> = Payload<Detail>;
 /** 5-field cron in UTC (`0 3 * * *`) or `rate(5 minutes)`. */
 export type CronConfig = string | { schedule: string; timezone?: string };
 
+/** Declare one with `channel<Event>()` to type what is published and received. */
+export type ChannelConfig<Event = unknown> = Payload<Event>;
+
+/**
+ * Live updates pushed to browsers. The server and worker publish; browsers
+ * subscribe (they never publish). Events aren't stored: a browser that was
+ * away re-reads what it shows after reconnecting.
+ */
+export interface RealtimeConfig {
+  /**
+   * Who may subscribe: anyone (`public`, the default), or signed-in users of
+   * this app (`signed-in`, needs `auth` and `web.server`).
+   */
+  subscribe?: 'public' | 'signed-in';
+  /**
+   * Channels and their event types: `board: channel<BoardEvent>()`, or
+   * `'boards/*': channel<BoardEvent>()` for every channel below `boards/`.
+   * Names are 1-4 segments of a-z, 0-9 and hyphens. `'user/*'` channels
+   * (`user/<user id>/...`) are private to that user (`signed-in` only).
+   */
+  channels: { readonly [pattern: string]: ChannelConfig };
+}
+
 export interface AppConfig {
   /** 3-30 chars of a-z, 0-9 and single hyphens; also the app's host name. */
   name: string;
@@ -199,6 +242,8 @@ export interface AppConfig {
   secrets?: readonly string[];
   /** Plain, non-secret configuration exposed as environment variables. */
   env?: { readonly [name: string]: string };
+  /** Live updates pushed to browsers on typed channels. */
+  realtime?: RealtimeConfig;
 }
 
 /**
@@ -235,6 +280,11 @@ export function event<Detail>(): EventConfig<Detail> {
   return {};
 }
 
+/** A realtime channel whose events are `Event`: `realtime: { channels: { board: channel<BoardEvent>() } }`. */
+export function channel<Event>(): ChannelConfig<Event> {
+  return {};
+}
+
 // ---------------------------------------------------------------------------
 
 /**
@@ -262,6 +312,10 @@ export const ResolvedManifest = Schema.Struct({
   storage: Schema.Array(Schema.String),
   secrets: Schema.Array(Schema.String),
   env: Schema.Record(Schema.String, Schema.String),
+  /** Present when the stage has a channel namespace. `channels` are the declared patterns. */
+  realtime: Schema.optional(
+    Schema.Struct({ subscribe: RealtimeSubscribeSchema, channels: Schema.Array(Schema.String) }),
+  ),
 });
 export type ResolvedManifest = typeof ResolvedManifest.Type;
 
@@ -323,5 +377,8 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     storage: [...new Set(m.storage)],
     secrets: [...new Set(m.secrets)],
     env: m.env,
+    ...(m.realtime
+      ? { realtime: { subscribe: m.realtime.subscribe, channels: Object.keys(m.realtime.channels) } }
+      : {}),
   };
 }

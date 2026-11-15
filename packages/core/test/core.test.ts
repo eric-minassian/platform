@@ -10,6 +10,10 @@ import {
   parseManifest,
   parseStageHost,
   percentile,
+  REALTIME_KVS_KEY,
+  REALTIME_PATH,
+  REALTIME_TOKEN_PATH,
+  type RealtimeEdgeEntry,
   type RouteRecord,
   stageHost,
   toSchedulerExpression,
@@ -112,6 +116,17 @@ describe('router decide', () => {
     });
     expect(decide(null, '/')).toEqual({ t: 'notfound' });
   });
+  it('keeps the realtime path for the router when the stage has realtime', () => {
+    const rt = { ...both, rt: { n: 'a--prod', m: 'p' as const } };
+    expect(decide(rt, REALTIME_PATH)).toEqual({ t: 'realtime' });
+    expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p', rt: rt.rt }, REALTIME_PATH)).toEqual({
+      t: 'realtime',
+    });
+    // The token is the server's; a stage without realtime treats the path like any platform path.
+    expect(decide(rt, REALTIME_TOKEN_PATH)).toEqual({ t: 'server' });
+    expect(decide(both, REALTIME_PATH)).toEqual({ t: 'server' });
+    expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, REALTIME_PATH)).toEqual({ t: 'notfound' });
+  });
   it('builds a CloudFront Function with the decision inlined', () => {
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' });
     expect(code).toContain('cf.kvs("kvs-123")');
@@ -124,8 +139,9 @@ describe('router decide', () => {
   });
 
   /** Runs the generated function with a stub `cloudfront` module serving `routes`. */
-  function edge(routes: Record<string, RouteRecord>) {
+  function edge(routes: Record<string, RouteRecord | RealtimeEdgeEntry>) {
     const origins: string[] = [];
+    const originConfigs: Array<Record<string, unknown>> = [];
     const cf = {
       kvs: () => ({
         get: async (host: string) => {
@@ -133,7 +149,10 @@ describe('router decide', () => {
           return JSON.stringify(routes[host]);
         },
       }),
-      updateRequestOrigin: (o: { domainName: string }) => origins.push(o.domainName),
+      updateRequestOrigin: (o: { domainName: string }) => {
+        origins.push(o.domainName);
+        originConfigs.push(o);
+      },
     };
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' }).replace("import cf from 'cloudfront';", '');
     const handler = new Function('cf', `${code}\nreturn handler;`)(cf) as (event: unknown) => Promise<{
@@ -142,10 +161,66 @@ describe('router decide', () => {
       body?: string;
       uri?: string;
     }>;
-    const request = (host: string, uri: string) =>
-      handler({ request: { uri, headers: { host: { value: host } }, cookies: {} } });
-    return { request, origins };
+    const request = (host: string, uri: string, headers: Record<string, { value: string }> = {}) =>
+      handler({
+        request: { uri, querystring: {}, headers: { host: { value: host }, ...headers }, cookies: {} },
+      });
+    return { request, origins, originConfigs };
   }
+
+  it('answers the realtime config and passes WebSockets to AppSync', async () => {
+    const entry: RealtimeEdgeEntry = {
+      v: 1,
+      o: 'rt.appsync.example',
+      h: 'http.appsync.example',
+      k: 'da2-key',
+    };
+    const pub: RouteRecord = { ...both, app: 'draw', rt: { n: 'draw--prod', m: 'p' } };
+    const signed: RouteRecord = { ...both, app: 'notes', rt: { n: 'notes--prod', m: 's' } };
+    const { request, origins, originConfigs } = edge({
+      'draw.example.com': pub,
+      'notes.example.com': signed,
+      'shop.example.com': both,
+      [REALTIME_KVS_KEY]: entry,
+    });
+
+    const config = await request('draw.example.com', REALTIME_PATH);
+    expect(config.statusCode).toBe(200);
+    expect(config.headers['cache-control']?.value).toBe('no-store');
+    expect(JSON.parse(config.body!)).toEqual({
+      v: 1,
+      host: 'http.appsync.example',
+      namespace: 'draw--prod',
+      subscribe: 'public',
+      apiKey: 'da2-key',
+    });
+    // Signed-in stages never hand out the key.
+    expect(JSON.parse((await request('notes.example.com', REALTIME_PATH)).body!)).toEqual({
+      v: 1,
+      host: 'http.appsync.example',
+      namespace: 'notes--prod',
+      subscribe: 'signed-in',
+    });
+
+    // CloudFront strips `Upgrade` before functions run, so the handshake is recognized by its key.
+    const ws = await request('draw.example.com', REALTIME_PATH, {
+      'sec-websocket-key': { value: 'abc==' },
+      authorization: { value: 'x' },
+    });
+    expect(ws.uri).toBe('/event/realtime');
+    expect(ws.headers.authorization).toBeUndefined();
+    expect(origins).toEqual(['rt.appsync.example']);
+    expect(originConfigs[0]).toMatchObject({ originAccessControlConfig: { enabled: false } });
+
+    // No realtime on the stage: the path is the server's like any other platform path.
+    await request('shop.example.com', REALTIME_PATH);
+    expect(origins).toEqual(['rt.appsync.example', 'fn.example']);
+  });
+
+  it('answers 404 for realtime until the platform entry exists', async () => {
+    const { request } = edge({ 'draw.example.com': { ...both, rt: { n: 'draw--prod', m: 'p' } } });
+    expect((await request('draw.example.com', REALTIME_PATH)).statusCode).toBe(404);
+  });
 
   it('answers health from the route when the stage has no server', async () => {
     const site: RouteRecord = { v: 1, app: 'docs', stage: 'prod', d: 'd7', s: 'docs/prod/d7', spa: 1 };

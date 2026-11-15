@@ -18,6 +18,12 @@ export interface RouteRecord {
   /** Server route prefixes (only meaningful when both `o` and `s` exist). */
   r?: readonly string[];
   spa?: 0 | 1;
+  /**
+   * Realtime (`plat.config.ts` `realtime`): the stage's channel namespace and
+   * who subscribes (`p` public with the API key, `s` signed-in with a token).
+   * The router answers `REALTIME_PATH` only for records that have it.
+   */
+  rt?: { n: string; m: 'p' | 's' };
 }
 
 export function encodeRouteRecord(rec: RouteRecord): string {
