@@ -7,6 +7,7 @@ queue, an event, a cron and file storage. It lives at https://template-app.ericm
 pnpm install
 pnpm dev        # http://template-app.localhost:3000 (AWS Emulator; install `aws-emulator` once)
 pnpm test
+pnpm test:e2e   # browser tests (Playwright); run `pnpm exec playwright install chromium` once
 ```
 
 Pull requests deploy previews and `main` deploys production (`.github/workflows/platform.yml`). For

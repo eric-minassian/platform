@@ -48,3 +48,37 @@ jobs:
           aws-emulator -v
       - name: Integration tests (engine, SDK, CLI against the emulator)
         run: pnpm test:integration
+
+  # The template's browser tests, against `plat dev` (Playwright starts it), so
+  # the suite every new app starts with keeps passing.
+  template-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: templates/app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Install the AWS Emulator
+        run: |
+          curl -fsSLo /tmp/aws-emulator.deb https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/latest/aws-emulator_amd64.deb
+          sudo apt-get install -y /tmp/aws-emulator.deb
+          aws-emulator -v
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Browser tests (plat dev)
+        run: pnpm run test:e2e
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: templates/app/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
