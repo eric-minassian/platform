@@ -37,6 +37,16 @@ export const HOST_HEADER = 'x-platform-host';
 /** Trace propagation header (W3C traceparent is also honored). */
 export const TRACE_HEADER = 'x-platform-trace';
 
+/**
+ * The client's `ip:port` as the edge saw the connection; IPv6 is unbracketed
+ * (`2001:db8::7:51234`). CloudFront sets it and replaces any copy a client
+ * sends (so does `plat dev`), and Web Function endpoints only take requests
+ * signed by the edge, so apps can trust it.
+ */
+export const VIEWER_ADDRESS_HEADER = 'cloudfront-viewer-address';
+/** The client's country (ISO 3166-1 alpha-2), from the edge; absent locally. */
+export const VIEWER_COUNTRY_HEADER = 'cloudfront-viewer-country';
+
 /** Tags on every AWS resource the engine creates. */
 export const TAGS = {
   managed: 'platform:managed',

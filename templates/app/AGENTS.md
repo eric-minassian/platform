@@ -69,6 +69,7 @@ serves `index.html`, which is how client-side routing works. Change the server p
 import {
   AppInfo,
   Auth,
+  clientInfo,
   CurrentUser,
   Db,
   Events,
@@ -102,6 +103,7 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `Authentication`, `CurrentUser`  | `.middleware(Authentication)` on a group, then `yield* CurrentUser` in its handlers; signed out → 401     |
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
 | `loginUrl/logoutUrl`             | `loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                          |
+| `clientInfo`                     | `const client = yield* clientInfo`: `client.network` to rate-limit by, `client.ip`, `client.country`      |
 | `Jobs`                           | `yield* jobs.invoke('reindex', { id })`: runs the worker's `invoke.reindex` handler asynchronously        |
 | `Metrics`                        | `yield* metrics.count('signups')`, `metrics.value('cart.total', 42.5, 'usd')`: free, shown in the console |
 | `Effect.log*`                    | `Effect.logInfo('charged').pipe(Effect.annotateLogs({ orderId }))`: structured, traced, searchable        |
@@ -161,6 +163,15 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   4. Read it in a layer or handler: `Redacted.value(yield* secrets.get('STRIPE_KEY'))`.
 - **Protected endpoints.** Add `.middleware(Authentication)` to the group and read `yield* CurrentUser`.
   To require sign-in for everything, including pages, set `auth: { required: true }`.
+- **Rate limits and dedupe.** Key abuse controls (rate limits, one vote per client, signup throttles) by
+  `client.network` from `yield* clientInfo`: the IPv4 address, or the IPv6 /64, since one IPv6 client
+  rotates through the addresses in its /64. The edge sets the client address and replaces any copy a
+  client sends, so trust it, and never read `X-Forwarded-For` or other headers yourself. `client.country`
+  is absent under `plat dev`.
+  - One per client: `votes.insert({ pollId, network: client.network })` fails `DocumentExists` the second
+    time; add `ttl` to let it lapse.
+  - Unit test requests need the address: `headers: clientHeaders('203.0.113.7')` from
+    `@ericminassian/platform/testing`. Without it, `clientInfo` is a defect (500).
 - **Plain config.** Use `env: { FEATURE_X: 'on' }` and read it with `yield* Config.String('FEATURE_X')`.
   Not for secrets.
 - **Custom metric.** `yield* metrics.count('name')` or `metrics.value('name', n)`. It appears in the

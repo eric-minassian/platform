@@ -6,7 +6,13 @@
  * For tests against real (emulated) resources use `plat test`, which starts
  * the AWS Emulator, provisions the app and sets PLATFORM_BINDINGS for vitest.
  */
-import type { Bindings, TelemetryEvent } from '@ericminassian/platform-core';
+import {
+  type Bindings,
+  type TelemetryEvent,
+  VIEWER_ADDRESS_HEADER,
+  VIEWER_COUNTRY_HEADER,
+} from '@ericminassian/platform-core';
+import { clientInfoFromHeaders } from './client-info.ts';
 import { setBindings } from './runtime/bindings.ts';
 import { resetClients, type SendClient, setClient } from './runtime/clients.ts';
 import { setRealtimeTransport } from './runtime/realtime.ts';
@@ -43,6 +49,19 @@ export function useTestBindings(overrides: Partial<Bindings> = {}): Bindings {
   const b = testBindings(overrides);
   setBindings(b);
   return b;
+}
+
+/**
+ * The headers the edge adds for a client at `ip` (IPv4 or IPv6), so
+ * `clientInfo` sees it: `new Request(url, { headers: clientHeaders('203.0.113.7') })`.
+ */
+export function clientHeaders(ip: string, options: { country?: string } = {}): Record<string, string> {
+  const headers: Record<string, string> = {
+    [VIEWER_ADDRESS_HEADER]: `${ip}:50000`,
+    ...(options.country ? { [VIEWER_COUNTRY_HEADER]: options.country } : {}),
+  };
+  if (!clientInfoFromHeaders(headers)) throw new Error(`clientHeaders: ${ip} is not an IP address`);
+  return headers;
 }
 
 /** Replace an AWS client with a fake `{ send(command) }`. */

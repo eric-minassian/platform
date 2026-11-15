@@ -20,6 +20,7 @@ import {
   HOST_HEADER,
   PLATFORM_PATH_PREFIX,
   TRACE_HEADER,
+  VIEWER_COUNTRY_HEADER,
 } from '@ericminassian/platform-core';
 import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
@@ -84,8 +85,8 @@ export function createPlatformFetch(handler: FetchHandlerLike): (request: Reques
         status: response.status,
         dur: Math.round((performance.now() - t0) * 10) / 10,
         ...(lengthOf(response) !== undefined ? { bytes: lengthOf(response)! } : {}),
-        ...(incoming.headers.get('cloudfront-viewer-country')
-          ? { country: incoming.headers.get('cloudfront-viewer-country')! }
+        ...(incoming.headers.get(VIEWER_COUNTRY_HEADER)
+          ? { country: incoming.headers.get(VIEWER_COUNTRY_HEADER)! }
           : {}),
         ...(ctx.user ? { user: fingerprint([ctx.user.id]) } : {}),
         ...(wasCold ? { cold: true } : {}),
