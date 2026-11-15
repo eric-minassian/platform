@@ -1,7 +1,12 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import type { Server } from 'node:http';
 import { resolve } from 'node:path';
-import { LOCAL_STAGE, type ResolvedManifest } from '@ericminassian/platform-core';
+import {
+  EMAIL_INBOX_PATH,
+  LOCAL_MAIL_URL_ENV,
+  LOCAL_STAGE,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import pc from 'picocolors';
 import { SDK_SERVER } from '../build.ts';
@@ -11,7 +16,8 @@ import { CliError, info, step, success, warn } from '../util/output.ts';
 import { type LocalCron, scheduleCrons } from './crons.ts';
 import { tsxArgs } from './entries.ts';
 import { type LocalStage, localEnv, startLocalStage } from './local-stage.ts';
-import { prefixer } from './pretty.ts';
+import { createInbox, localMailUrl } from './mail.ts';
+import { formatMail, prefixer } from './pretty.ts';
 import { killTree } from './proc.ts';
 import { type Interceptor, type LocalRouterState, localRouteRecord, startLocalRouter } from './router.ts';
 import { startWebDev } from './web-dev.ts';
@@ -32,7 +38,8 @@ export const DEV_CONTROL_PREFIX = '/__plat_dev/';
  *  emulator ← engine (same code as prod; `webMode: 'external'`)
  *  web server (SDK wrapper, tsx watch) ─┐
  *  frontend dev server (web.dev) ───────┼─ local router (core `decide()`)
- *  local sign-in page ──────────────────┘
+ *  local sign-in page ──────────────────┤
+ *  mail inbox (`Email.send` posts here) ┘
  *  worker (real Node, tsx watch) ← dispatcher (emulator SQS + EventBridge tap + local crons)
  */
 export async function runDev(opts: DevOptions): Promise<void> {
@@ -104,11 +111,22 @@ export async function runDev(opts: DevOptions): Promise<void> {
     ...(stage.realtime ? { realtime: stage.realtime } : {}),
   };
 
+  // ------------------------------------------------------------ mail
+  // Nothing is sent locally: the server and worker post each message to the
+  // inbox the router serves, and every message gets a line here.
+  const inboxUrl = `http://${manifest.name}.localhost:${opts.port}${EMAIL_INBOX_PATH}`;
+  const inbox = createInbox({
+    app: manifest.name,
+    onMessage: (mail) => info(`${pc.cyan('mail  │')} ${formatMail(mail, `${inboxUrl}/${mail.id}`)}`),
+  });
+  cleanups.push(() => inbox.close());
+  const mailUrl = localMailUrl(`http://127.0.0.1:${opts.port}`);
+
   // ------------------------------------------------------------ worker
   let dispatcher: Dispatcher | undefined;
   let workerPort: number | undefined;
   if (manifest.worker) {
-    const worker = await startLocalWorker(stage, manifest, root);
+    const worker = await startLocalWorker(stage, manifest, root, { mailUrl });
     workerPort = worker.port;
     children.push(worker.child);
     const out = prefixer(pc.yellow('worker│'), (s) => process.stdout.write(s), { spans: opts.spans });
@@ -141,12 +159,10 @@ export async function runDev(opts: DevOptions): Promise<void> {
 
   // ------------------------------------------------------------ web server
   if (manifest.web?.server) {
-    const { child, port: serverPort } = await spawnWebServer(
-      stage,
-      manifest,
-      root,
-      workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {},
-    );
+    const { child, port: serverPort } = await spawnWebServer(stage, manifest, root, {
+      ...(workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {}),
+      mailUrl,
+    });
     children.push(child);
     const out = prefixer(pc.green('web   │'), (s) => process.stdout.write(s), { spans: opts.spans });
     child.stdout!.on('data', out);
@@ -220,9 +236,15 @@ export async function runDev(opts: DevOptions): Promise<void> {
     },
   ];
   // Local sign-in (`/__platform/auth/*`) is served by the SDK's server wrapper in local mode.
-  router = await startLocalRouter({ port: opts.port, host: '127.0.0.1', state: () => state, intercept });
+  router = await startLocalRouter({
+    port: opts.port,
+    host: '127.0.0.1',
+    state: () => state,
+    inbox,
+    intercept,
+  });
 
-  printBanner(manifest, stage, opts.port, crons);
+  printBanner(manifest, stage, opts.port, crons, inboxUrl);
   await new Promise(() => {}); // run until signalled
 }
 
@@ -234,7 +256,12 @@ export async function spawnWebServer(
   stage: LocalStage,
   manifest: ResolvedManifest,
   root: string,
-  opts: { watch?: boolean; workerUrl?: string } = {},
+  opts: {
+    watch?: boolean;
+    workerUrl?: string;
+    /** `PLATFORM_LOCAL_MAIL_URL`: the local inbox the SDK posts mail to. */
+    mailUrl?: string;
+  } = {},
 ): Promise<{ child: ChildProcess; port: number }> {
   if (!manifest.web?.server) throw new Error('manifest has no web.server');
   const port = await freePort();
@@ -245,6 +272,7 @@ export async function spawnWebServer(
     PLATFORM_SDK_SERVER: resolveFromApp(root, SDK_SERVER),
     // `Jobs.invoke` locally: the SDK posts here instead of invoking the emulator's sandboxed Lambda.
     ...(opts.workerUrl ? { PLATFORM_LOCAL_WORKER_URL: opts.workerUrl } : {}),
+    ...(opts.mailUrl ? { [LOCAL_MAIL_URL_ENV]: opts.mailUrl } : {}),
   });
   const child = spawn(process.execPath, tsxArgs('server-entry', opts.watch !== false), {
     cwd: root,
@@ -260,6 +288,7 @@ function printBanner(
   stage: LocalStage,
   port: number,
   crons: ReturnType<typeof scheduleCrons> | undefined,
+  inboxUrl: string,
 ): void {
   const b = stage.bindings;
   const lines = [
@@ -280,6 +309,10 @@ function printBanner(
     const who =
       manifest.realtime.subscribe === 'signed-in' ? 'signed-in (tokens not checked locally)' : 'public';
     lines.push(`  ${pc.dim('➜')} Realtime:  ${manifest.realtime.channels.join(', ')} ${pc.dim(`· ${who}`)}`);
+  }
+  if (manifest.email) {
+    const from = b.email ? `from ${b.email.from}, ` : '';
+    lines.push(`  ${pc.dim('➜')} Mail:      ${pc.underline(inboxUrl)} ${pc.dim(`· ${from}nothing is sent`)}`);
   }
   for (const name of Object.keys(manifest.crons)) {
     const next = crons?.next(name);

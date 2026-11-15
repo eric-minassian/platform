@@ -6,7 +6,9 @@ import { promisify } from 'node:util';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import {
   APPSYNC_SUBPROTOCOL,
+  type CapturedEmail,
   channelPath,
+  EMAIL_INBOX_PATH,
   REALTIME_PATH,
   type RealtimeClientConfig,
   type ResolvedManifest,
@@ -15,7 +17,8 @@ import { findEmulatorBinary } from '@ericminassian/platform-engine';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnWebServer } from '../src/dev/index.ts';
 import { emulatorClientConfig, type LocalStage, localEnv, startLocalStage } from '../src/dev/local-stage.ts';
-import { localRouteRecord, startLocalRouter } from '../src/dev/router.ts';
+import { createInbox, localMailUrl } from '../src/dev/mail.ts';
+import { type LocalRouterState, localRouteRecord, startLocalRouter } from '../src/dev/router.ts';
 import {
   type Dispatcher,
   type LocalWorker,
@@ -181,5 +184,116 @@ describe.skipIf(!findEmulatorBinary())('local realtime on the AWS Emulator', () 
     } finally {
       ws.close();
     }
+  });
+});
+
+// Mail the way `plat dev` handles it: the app's server sends with the SDK on a
+// stage whose bindings say `local`, the send counts against the stage's limit
+// in the emulator's telemetry table, and the message lands in the inbox the
+// local router serves. Nothing reaches SES.
+describe.skipIf(!findEmulatorBinary())('local email on the AWS Emulator', () => {
+  const emailManifest: ResolvedManifest = {
+    ...manifest,
+    // The fixture server sends what it's given; paths resolve from the app's root.
+    web: { ...manifest.web!, server: '../email-server.ts' },
+    email: { name: 'Basic', dailyLimit: 2 },
+  };
+  let stage: LocalStage;
+  let router: Server;
+  let server: ChildProcess | undefined;
+  let base: string;
+  const inbox = createInbox({ app: emailManifest.name });
+  const state: LocalRouterState = {
+    record: localRouteRecord({
+      app: emailManifest.name,
+      stage: 'test',
+      deploymentId: 'd-email',
+      hasServer: true,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+    }),
+    staticDir: root,
+  };
+
+  beforeAll(async () => {
+    stage = await startLocalStage({ root, manifest: emailManifest, stage: 'test', port: 3997 });
+    router = await startLocalRouter({ port: 0, state: () => state, inbox });
+    const port = (router.address() as AddressInfo).port;
+    base = `http://127.0.0.1:${port}`;
+    const spawned = await spawnWebServer(stage, emailManifest, root, {
+      watch: false,
+      mailUrl: localMailUrl(base),
+    });
+    server = spawned.child;
+    let output = '';
+    server.stdout?.on('data', (c) => (output += c));
+    server.stderr?.on('data', (c) => (output += c));
+    await waitForPort(spawned.port, '127.0.0.1', 30_000).catch((err) => {
+      throw new Error(`${(err as Error).message}\n${output}`);
+    });
+    state.server = { host: '127.0.0.1', port: spawned.port };
+  });
+
+  afterAll(async () => {
+    inbox.close();
+    server?.kill('SIGTERM');
+    router?.close();
+    await stage?.stop();
+  });
+
+  const send = async (message: object) => {
+    const res = await fetch(`${base}/api/send`, { method: 'POST', body: JSON.stringify(message) });
+    return { status: res.status, body: (await res.json()) as { id?: string; reason?: string } };
+  };
+
+  it('binds the stage to its tenant in local mode', () => {
+    expect(stage.bindings.email).toMatchObject({
+      mode: 'local',
+      name: 'Basic',
+      tenant: 'basic-app--test',
+      dailyLimit: 2,
+      usageTable: stage.platform.telemetryTable,
+    });
+    expect(stage.bindings.email?.from).toMatch(/^basic-app--test@mail\./);
+  });
+
+  it('shows what the server sends in the inbox, and counts it against the daily limit', async () => {
+    const sent = await send({
+      to: ['alice@example.com'],
+      subject: 'Welcome to Basic',
+      text: 'Hello Alice',
+      html: '<p>Hello <b>Alice</b></p>',
+    });
+    expect(sent.status).toBe(200);
+
+    const list = (await (await fetch(`${base}${EMAIL_INBOX_PATH}/messages`)).json()) as {
+      messages: CapturedEmail[];
+    };
+    expect(list.messages).toEqual([
+      {
+        id: sent.body.id,
+        at: expect.any(String),
+        app: 'basic-app',
+        stage: 'test',
+        from: `"Basic" <${stage.bindings.email!.from}>`,
+        // A reserved test domain: deployed stages would skip it, the inbox shows it.
+        to: ['alice@example.com'],
+        replyTo: [],
+        subject: 'Welcome to Basic',
+        text: 'Hello Alice',
+        html: '<p>Hello <b>Alice</b></p>',
+      },
+    ]);
+    const page = await (await fetch(`${base}${EMAIL_INBOX_PATH}`)).text();
+    expect(page).toContain('Welcome to Basic');
+    const body = await (await fetch(`${base}${EMAIL_INBOX_PATH}/${sent.body.id}/html`)).text();
+    expect(body).toContain('<p>Hello <b>Alice</b></p>');
+
+    // The limit is 2 recipients a day: one is left, so two more are refused and nothing arrives.
+    const refused = await send({ to: ['b@example.com', 'c@example.com'], subject: 'Two', text: 'x' });
+    expect(refused).toMatchObject({ status: 409, body: { reason: 'daily-limit' } });
+    expect((await send({ to: 'b@example.com', subject: 'One more', text: 'x' })).status).toBe(200);
+    expect(inbox.messages().map((m) => m.subject)).toEqual(['One more', 'Welcome to Basic']);
   });
 });

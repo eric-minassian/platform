@@ -29,19 +29,19 @@ reference over anything you remember about Effect 2 or 3.
 
 ## Layout
 
-| Path                         | What                                                                                             |
-| ---------------------------- | ------------------------------------------------------------------------------------------------ |
-| `plat.config.ts`             | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env, realtime) |
-| `src/domain.ts`              | Schemas and tagged errors, shared by server, worker and web                                      |
-| `src/api.ts`                 | The HTTP API as an `HttpApi` definition. The web app imports it: no server-only code             |
-| `src/todos.ts`               | The `Todos` service: the app's rules, over the platform's services                               |
-| `src/http.ts`                | Handlers for `src/api.ts` (`HttpLive`)                                                           |
-| `src/server.ts`              | `export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)))`                    |
-| `src/worker.ts`              | Background handlers: `defineWorker({ layer, queues, events, crons })`                            |
-| `web/`                       | React SPA (Vite) on a client generated from `src/api.ts`; built into `web/dist`                  |
-| `test/*.test.ts`             | Unit tests on the in-memory platform (`pnpm test`)                                               |
-| `test/*.integration.test.ts` | The real services against the AWS Emulator (`plat test`)                                         |
-| `e2e/*.spec.ts`              | Browser tests (Playwright) against a running stage (`pnpm test:e2e`)                             |
+| Path                         | What                                                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `plat.config.ts`             | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env, realtime, email) |
+| `src/domain.ts`              | Schemas and tagged errors, shared by server, worker and web                                             |
+| `src/api.ts`                 | The HTTP API as an `HttpApi` definition. The web app imports it: no server-only code                    |
+| `src/todos.ts`               | The `Todos` service: the app's rules, over the platform's services                                      |
+| `src/http.ts`                | Handlers for `src/api.ts` (`HttpLive`)                                                                  |
+| `src/server.ts`              | `export default toFetchHandler(HttpLive.pipe(Layer.provide(Platform.layer)))`                           |
+| `src/worker.ts`              | Background handlers: `defineWorker({ layer, queues, events, crons })`                                   |
+| `web/`                       | React SPA (Vite) on a client generated from `src/api.ts`; built into `web/dist`                         |
+| `test/*.test.ts`             | Unit tests on the in-memory platform (`pnpm test`)                                                      |
+| `test/*.integration.test.ts` | The real services against the AWS Emulator (`plat test`)                                                |
+| `e2e/*.spec.ts`              | Browser tests (Playwright) against a running stage (`pnpm test:e2e`)                                    |
 
 Requests for `/api/*` and `/__platform/*` go to the server; files go to `web/dist`. Any other path
 serves `index.html`, which is how client-side routing works. Change the server prefixes with
@@ -72,6 +72,7 @@ import {
   clientInfo,
   CurrentUser,
   Db,
+  Email,
   Events,
   Jobs,
   Metrics,
@@ -101,6 +102,7 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 |                                  | `yield* uploads.uploadUrl(key, { contentType })`: browser-direct upload URL (HTTP PUT); `downloadUrl`     |
 | `Secrets`                        | `yield* secrets.get('STRIPE_KEY')` → `Redacted` (a defect naming the fix if unset), `getOptional`         |
 | `Realtime`                       | `yield* realtime.publish('boards/b1', event)`, `publishMany`: to browsers subscribed right now            |
+| `Email`                          | `yield* email.send({ to, subject, text, html, replyTo })` → `{ id }`; fails `EmailNotSent`                |
 | `RealtimeClient` (browser)       | `RealtimeClient.subscribe('boards/b1')` → `Stream` of events; `.status` → `Stream` of connection states   |
 | `Authentication`, `CurrentUser`  | `.middleware(Authentication)` on a group, then `yield* CurrentUser` in its handlers; signed out → 401     |
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
@@ -210,6 +212,31 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   5 KB delivered, so publish small hints (ids, small diffs) and batch fast streams such as cursors on the
   server (a few per second, `publishMany`). Events over 240 KB are refused.
 
+- **Email.** Transactional mail (sign-in links, receipts, notifications), sent from
+  `template-app@mail.platform.ericminassian.com` (previews: `template-app--pr-<n>@…`).
+  1. Declare it in `plat.config.ts`: `email: { name: 'Todo' }` (the display name recipients see), or
+     `email: true`.
+  2. Send from a queue handler in `src/worker.ts`, like the template's `emails` queue:
+     `yield* email.send({ to, subject, text, html })`. A failed send then retries the message and finally
+     dead-letters it instead of failing a request. `to` takes up to 50 addresses; `html` is optional.
+  3. Set `replyTo` when replies matter: the sending address takes no mail.
+
+  Every recipient counts against `email.dailyLimit` per UTC day (default 200; previews and `plat dev` get
+  at most 50). `email.send` fails with `EmailNotSent`, whose `reason` is:
+  - `daily-limit`: today's recipients would pass the limit;
+  - `paused`: sending is paused for the stage (too many bounces or complaints, or paused by hand).
+    `plat email` shows why and `plat email resume` resumes it;
+  - `rejected`: the message or an address is invalid, or SES refused it.
+
+  Catch it with `Effect.catchTag('EmailNotSent', …)` where the app can do something else. An address that
+  bounced or complained is suppressed: the send succeeds but nothing is delivered (`plat email suppressed`,
+  `plat email unsuppress <address>`).
+
+  Locally nothing is sent: `plat dev` shows every message at `http://template-app.localhost:3000/__platform/mail`
+  and prints a line for it. Deployed stages skip recipients at reserved test domains (`example.com`,
+  `example.net`, `example.org`, `*.test`, `*.example`, `*.invalid`, `localhost`) with a log line, so use
+  those in tests and seed data.
+
 - **Browser test.** Add a test to `e2e/`. Use it for what only a browser shows: rendering, styles, focus,
   client-side state.
   - CI runs the suite against the PR's preview and, after each deploy, production, with the stage's URL in
@@ -225,10 +252,15 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 - **Unit tests** (`test/*.test.ts`, `@effect/vitest`) run the whole app on `Platform.layerMemory()`: the
   platform's server wrapper, routing, validation, sign-in and handlers, with no emulator. In memory,
   `Authorization: Bearer <id>` signs a request in as the user with that id (`layerMemory({ users })`).
-  `Platform.Memory` returns what was sent, published (events and realtime) and counted. The in-memory `Db` follows DynamoDB's
-  key, index, ordering and cursor rules.
+  `Platform.Memory` returns what was sent (queue messages and `emails`), published (events and realtime)
+  and counted. `layerMemory({ email: { dailyLimit: 1 } })` or `{ email: { paused: true } }` makes
+  `Email.send` fail as a deployed stage would. The in-memory `Db` follows DynamoDB's key, index, ordering
+  and cursor rules.
+- **Worker tests** run the handlers as Lambda does (`createWorkerHandler`); `captureEmails()` from
+  `@ericminassian/platform/testing` records what they send (see `test/worker.test.ts`).
 - **Integration tests** (`test/*.integration.test.ts`, `plat test`) use `Platform.layer` against the AWS
-  Emulator with a provisioned `test` stage.
+  Emulator with a provisioned `test` stage. Mail goes to `plat test`'s inbox: `waitForEmail((m) => …)`
+  from `@ericminassian/platform/testing` waits for a message the worker sends.
 - `it.effect` runs on a test clock that starts at 0; use `it.live` or `layer(..., { excludeTestServices:
   true })` where real time matters.
 
@@ -249,6 +281,7 @@ plat dev run-cron cleanup    # fire a cron in the running `plat dev`
 
 - It provisions real (emulated) DynamoDB, SQS, EventBridge, S3, Cognito, SSM and realtime channels.
   Signed-in realtime tokens aren't checked locally (the emulator skips the authorizer).
+- Email is never sent: it appears at `/__platform/mail` on the app's local URL.
 - The worker runs as a real Lambda inside the emulator.
 - The server restarts when you edit, and so does the worker.
 - Sign-in uses a local page where any email works.

@@ -1,11 +1,13 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { LOCAL_MAIL_URL_ENV } from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import { withLocalBin } from '../build.ts';
 import { loadProject } from '../project.ts';
 import { CliError, step, success } from '../util/output.ts';
 import { localEnv, startLocalStage } from './local-stage.ts';
+import { createInbox, startInboxServer } from './mail.ts';
 import { type Dispatcher, type LocalWorker, startLocalWorker, startWorkerDispatch } from './worker.ts';
 
 export const INTEGRATION_CONFIG = 'vitest.integration.config.ts';
@@ -13,7 +15,8 @@ export const INTEGRATION_CONFIG = 'vitest.integration.config.ts';
 /**
  * `plat test`: a throwaway emulator with this app's resources (stage `test`),
  * then vitest with the same environment the deployed code gets. Uses
- * `vitest.integration.config.ts` when present.
+ * `vitest.integration.config.ts` when present. Mail goes to an inbox on a
+ * loopback port that tests read (`localInbox` in the SDK's testing module).
  */
 export async function runTests(opts: { cwd: string; args: string[] }): Promise<number> {
   const { root, manifest } = await loadProject(opts.cwd);
@@ -29,9 +32,12 @@ export async function runTests(opts: { cwd: string; args: string[] }): Promise<n
   success(`provisioned ${manifest.name} (stage test)`);
   let worker: LocalWorker | undefined;
   let dispatcher: Dispatcher | undefined;
+  let mail: Awaited<ReturnType<typeof startInboxServer>> | undefined;
   try {
+    const inbox = await startInboxServer(createInbox({ app: manifest.name }));
+    mail = inbox;
     if (manifest.worker) {
-      worker = await startLocalWorker(stage, manifest, root, { watch: false });
+      worker = await startLocalWorker(stage, manifest, root, { watch: false, mailUrl: inbox.url });
       worker.child.stdout?.pipe(process.stdout);
       worker.child.stderr?.pipe(process.stderr);
       dispatcher = await startWorkerDispatch(stage, manifest, worker);
@@ -49,6 +55,7 @@ export async function runTests(opts: { cwd: string; args: string[] }): Promise<n
           root,
           localEnv(stage, manifest, {
             PLATFORM_TEST: '1',
+            [LOCAL_MAIL_URL_ENV]: inbox.url,
             ...(worker ? { PLATFORM_LOCAL_WORKER_URL: `http://127.0.0.1:${worker.port}/` } : {}),
           }),
         ),
@@ -63,6 +70,7 @@ export async function runTests(opts: { cwd: string; args: string[] }): Promise<n
   } finally {
     dispatcher?.stop();
     worker?.stop();
+    await mail?.stop();
     await stage.stop();
   }
 }

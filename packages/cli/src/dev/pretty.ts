@@ -1,4 +1,4 @@
-import { isTelemetryEvent, type TelemetryEvent } from '@ericminassian/platform-core';
+import { type CapturedEmail, isTelemetryEvent, type TelemetryEvent } from '@ericminassian/platform-core';
 import pc from 'picocolors';
 
 /**
@@ -75,6 +75,11 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
       e satisfies never;
       return null;
   }
+}
+
+/** One captured message, for the dev terminal: who it's to, its subject, and where to read it. */
+export function formatMail(mail: CapturedEmail, url: string): string {
+  return `to ${mail.to.join(', ')} ${pc.dim('·')} ${mail.subject} ${pc.dim(url)}`;
 }
 
 /** Prefix every line of a child process stream. */

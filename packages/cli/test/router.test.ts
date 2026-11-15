@@ -2,8 +2,17 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
 import { type AddressInfo, createServer as createTcpServer, type Server as TcpServer } from 'node:net';
 import { join } from 'node:path';
-import { REALTIME_PATH, REALTIME_TOKEN_PATH, type RealtimeEdgeEntry } from '@ericminassian/platform-core';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { localInbox, waitForEmail } from '@ericminassian/platform/testing';
+import {
+  type CapturedEmail,
+  EMAIL_INBOX_PATH,
+  LOCAL_MAIL_URL_ENV,
+  REALTIME_PATH,
+  REALTIME_TOKEN_PATH,
+  type RealtimeEdgeEntry,
+} from '@ericminassian/platform-core';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createInbox, type LocalInbox, localMailUrl, startInboxServer } from '../src/dev/mail.ts';
 import {
   type LocalRealtime,
   type LocalRouterState,
@@ -329,5 +338,217 @@ describe('startLocalRouter realtime', () => {
       req.end();
     });
     expect(status).toBe(501);
+  });
+});
+
+describe('startLocalRouter mail', () => {
+  let upstream: Server;
+  let router: Server;
+  let base: string;
+  let inbox: LocalInbox;
+  let arrived: CapturedEmail[];
+  const serverSaw: string[] = [];
+  const savedUrl = process.env[LOCAL_MAIL_URL_ENV];
+
+  const mail = (overrides: Partial<CapturedEmail> = {}): CapturedEmail => ({
+    id: crypto.randomUUID(),
+    at: '2026-11-15T12:00:00.000Z',
+    app: 'shop',
+    stage: 'local',
+    from: '"Shop" <shop--local@mail.localhost>',
+    to: ['alice@example.com'],
+    replyTo: [],
+    subject: 'Your order',
+    text: 'Thanks for your order.',
+    ...overrides,
+  });
+  const post = (body: unknown, contentType = 'application/json') =>
+    fetch(`${base}${EMAIL_INBOX_PATH}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': contentType },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    });
+
+  beforeAll(async () => {
+    upstream = createServer((req, res) => {
+      serverSaw.push(req.url ?? '');
+      res.writeHead(200).end('server');
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
+    const up = { host: '127.0.0.1', port: (upstream.address() as AddressInfo).port };
+    inbox = createInbox({ app: 'shop', capacity: 3, onMessage: (m) => arrived.push(m) });
+    router = await startLocalRouter({ port: 0, state: () => ({ record, server: up }), inbox });
+    base = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+  });
+  beforeEach(() => {
+    arrived = [];
+  });
+  afterEach(() => {
+    if (savedUrl === undefined) delete process.env[LOCAL_MAIL_URL_ENV];
+    else process.env[LOCAL_MAIL_URL_ENV] = savedUrl;
+  });
+  afterAll(() => {
+    inbox.close();
+    router?.close();
+    upstream?.close();
+  });
+
+  it('takes the inbox paths ahead of routing, which would send /__platform/* to the server', async () => {
+    expect(localDecision({ record, server }, EMAIL_INBOX_PATH)).toEqual({ kind: 'server', target: server });
+    for (const path of [
+      EMAIL_INBOX_PATH,
+      `${EMAIL_INBOX_PATH}/`,
+      `${EMAIL_INBOX_PATH}/messages`,
+      `${EMAIL_INBOX_PATH}/nope`,
+    ])
+      await (await fetch(`${base}${path}`)).arrayBuffer();
+    expect(serverSaw).toEqual([]);
+    expect(await (await fetch(`${base}/__platform/mailbox`)).text()).toBe('server');
+    expect(serverSaw).toEqual(['/__platform/mailbox']);
+  });
+
+  it('keeps what the SDK posts, newest first, for the JSON list and the SDK’s test helpers', async () => {
+    const first = mail({ subject: 'First' });
+    const second = mail({ subject: 'Second', to: ['bob@example.com'] });
+    expect((await post(first)).status).toBe(201);
+    const res = await post(second);
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ id: second.id });
+    expect(arrived).toEqual([first, second]);
+
+    const list = await fetch(`${base}${EMAIL_INBOX_PATH}/messages`);
+    expect(list.headers.get('content-type')).toBe('application/json');
+    expect(((await list.json()) as { messages: CapturedEmail[] }).messages.slice(0, 2)).toEqual([
+      second,
+      first,
+    ]);
+
+    process.env[LOCAL_MAIL_URL_ENV] = localMailUrl(base);
+    expect((await localInbox()).slice(0, 2)).toEqual([second, first]);
+    expect(await waitForEmail((m) => m.to.includes('bob@example.com'))).toEqual(second);
+    await expect(waitForEmail((m) => m.subject === 'never', { timeoutMs: 150 })).rejects.toThrow(
+      /within 150 ms/,
+    );
+  });
+
+  it('keeps only the newest messages', async () => {
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const m = mail({ subject: `n${i}` });
+      ids.push(m.id);
+      await post(m);
+    }
+    expect(inbox.messages().map((m) => m.id)).toEqual(ids.slice(2).reverse());
+    expect((await fetch(`${base}${EMAIL_INBOX_PATH}/${ids[0]}`)).status).toBe(404);
+  });
+
+  it('accepts only JSON messages', async () => {
+    expect((await post(mail(), 'text/plain')).status).toBe(415);
+    expect((await post('{nope')).status).toBe(400);
+    expect((await post({ ...mail(), to: 'alice@example.com' })).status).toBe(400);
+    expect((await post({ ...mail(), id: '../x' })).status).toBe(400);
+    expect((await post({ ...mail(), id: '..' })).status).toBe(400);
+    const put = await fetch(`${base}${EMAIL_INBOX_PATH}/messages`, { method: 'PUT' });
+    expect(put.status).toBe(405);
+    expect(put.headers.get('allow')).toBe('GET, POST');
+    expect((await fetch(`${base}${EMAIL_INBOX_PATH}`, { method: 'POST' })).status).toBe(405);
+    expect(arrived).toEqual([]);
+  });
+
+  it('lists messages on the inbox page, escaped', async () => {
+    const m = mail({ subject: '<script>alert(1)</script> & more', to: ['carol@example.com'] });
+    await post(m);
+    const res = await fetch(`${base}${EMAIL_INBOX_PATH}`);
+    expect(res.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(res.headers.get('content-security-policy')).toContain("default-src 'none'");
+    const page = await res.text();
+    expect(page).toContain('&lt;script&gt;alert(1)&lt;/script&gt; &amp; more');
+    expect(page).not.toContain('<script>alert(1)');
+    expect(page).toContain('carol@example.com');
+    expect(page).toContain('&quot;Shop&quot; &lt;shop--local@mail.localhost&gt;');
+    expect(page).toContain(`href="${EMAIL_INBOX_PATH}/${m.id}"`);
+    expect(page).toContain('<time datetime="2026-11-15T12:00:00.000Z">2026-11-15 12:00:00 UTC</time>');
+    expect(page).toContain('3 messages');
+  });
+
+  it('shows a message with its HTML in a sandboxed frame that runs no scripts', async () => {
+    const m = mail({
+      html: '<!DOCTYPE html><p>Hi <a href="http://shop.localhost:3000/verify">verify</a></p>',
+      replyTo: ['help@shop.example'],
+    });
+    await post(m);
+    const page = await (await fetch(`${base}${EMAIL_INBOX_PATH}/${m.id}`)).text();
+    expect(page).toContain('<h2>Your order</h2>');
+    expect(page).toContain('<dt>Reply-To</dt><dd>help@shop.example</dd>');
+    const frame = /<iframe [^>]*>/.exec(page)?.[0] ?? '';
+    expect(frame).toContain(`src="${EMAIL_INBOX_PATH}/${m.id}/html"`);
+    expect(frame).toMatch(/ sandbox="[^"]*"/);
+    expect(frame).not.toContain('allow-scripts');
+    expect(frame).not.toContain('allow-same-origin');
+    expect(page).toContain('<pre>Thanks for your order.</pre>');
+
+    const body = await fetch(`${base}${EMAIL_INBOX_PATH}/${m.id}/html`);
+    const csp = body.headers.get('content-security-policy') ?? '';
+    expect(csp).toMatch(/^sandbox /);
+    expect(csp).not.toContain('allow-scripts');
+    expect(csp).not.toMatch(/script-src/);
+    // Links open outside the frame, after the doctype so the document keeps its mode.
+    expect(await body.text()).toBe(
+      '<!DOCTYPE html><base target="_blank"><p>Hi <a href="http://shop.localhost:3000/verify">verify</a></p>',
+    );
+  });
+
+  it('shows a text-only message without a frame', async () => {
+    const m = mail();
+    await post(m);
+    const page = await (await fetch(`${base}${EMAIL_INBOX_PATH}/${m.id}`)).text();
+    expect(page).not.toContain('<iframe');
+    expect(page).not.toContain('Reply-To');
+    expect((await fetch(`${base}${EMAIL_INBOX_PATH}/${m.id}/html`)).status).toBe(404);
+    expect((await fetch(`${base}${EMAIL_INBOX_PATH}/missing-id`)).status).toBe(404);
+    expect((await fetch(`${base}${EMAIL_INBOX_PATH}/%E0%A4%A`)).status).toBe(404);
+  });
+
+  it('tells open pages about each new message', async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${base}${EMAIL_INBOX_PATH}/events`, { signal: controller.signal });
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
+    const reader = res.body!.getReader();
+    const m = mail();
+    await post(m);
+    let text = '';
+    while (!text.includes('data:')) text += new TextDecoder().decode((await reader.read()).value);
+    expect(text).toContain(`data: {"id":"${m.id}"}`);
+    controller.abort();
+  });
+});
+
+describe('startInboxServer', () => {
+  it('serves the inbox on its own port for plat test', async () => {
+    const inbox = createInbox({ app: 'shop' });
+    const server = await startInboxServer(inbox);
+    try {
+      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/__platform\/mail\/messages$/);
+      const posted = await fetch(server.url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: 'm1',
+          at: new Date().toISOString(),
+          app: 'shop',
+          stage: 'test',
+          from: 'shop--test@mail.localhost',
+          to: ['a@example.com'],
+          replyTo: [],
+          subject: 'Hi',
+          text: 'Hello',
+        }),
+      });
+      expect(posted.status).toBe(201);
+      expect(((await (await fetch(server.url)).json()) as { messages: unknown[] }).messages).toHaveLength(1);
+      expect((await fetch(new URL('/elsewhere', server.url))).status).toBe(404);
+    } finally {
+      await server.stop();
+    }
   });
 });

@@ -21,7 +21,7 @@ import {
   SetQueueAttributesCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
-import { names, type ResolvedManifest } from '@ericminassian/platform-core';
+import { LOCAL_MAIL_URL_ENV, names, type ResolvedManifest } from '@ericminassian/platform-core';
 import { SDK_WORKER } from '../build.ts';
 import { resolveFromApp } from '../project.ts';
 import { freePort, waitForPort } from '../util/net.ts';
@@ -53,7 +53,11 @@ export async function startLocalWorker(
   stage: LocalStage,
   manifest: ResolvedManifest,
   root: string,
-  opts: { watch?: boolean } = {},
+  opts: {
+    watch?: boolean;
+    /** `PLATFORM_LOCAL_MAIL_URL`: the local inbox the SDK posts mail to. */
+    mailUrl?: string;
+  } = {},
 ): Promise<LocalWorker> {
   if (!manifest.worker) throw new Error('manifest has no worker');
   const port = await freePort();
@@ -65,6 +69,7 @@ export async function startLocalWorker(
     PLATFORM_WORKER_FUNCTION:
       stage.result.workerFunction?.name ?? names.workerFunction(manifest.name, stage.stage),
     PLATFORM_LOG_PRETTY: '1',
+    ...(opts.mailUrl ? { [LOCAL_MAIL_URL_ENV]: opts.mailUrl } : {}),
   });
   const child = spawn(process.execPath, tsxArgs('worker-host', opts.watch !== false), {
     cwd: root,

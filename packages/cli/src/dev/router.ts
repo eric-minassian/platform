@@ -19,6 +19,7 @@ import {
   type RouteRecord,
   VIEWER_ADDRESS_HEADER,
 } from '@ericminassian/platform-core';
+import { isInboxPath, type LocalInbox } from './mail.ts';
 
 /**
  * `plat dev`'s stand-in for the CloudFront router: the same `decide()` the
@@ -145,6 +146,11 @@ export interface LocalRouterOptions {
   port: number;
   host?: string;
   state: () => LocalRouterState;
+  /**
+   * The local inbox, served at `EMAIL_INBOX_PATH` on every host ahead of
+   * routing: the path exists only locally, where mail is captured, not sent.
+   */
+  inbox?: Pick<LocalInbox, 'handle'>;
   /** Handled before routing (local sign-in, dev endpoints). Return true when handled. */
   intercept?: Interceptor[];
   onRequest?: (line: { method: string; url: string; status: number; ms: number; kind: string }) => void;
@@ -164,6 +170,11 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
       }),
     );
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    if (opts.inbox && isInboxPath(url.pathname)) {
+      kind = 'mail';
+      await opts.inbox.handle(req, res, url);
+      return;
+    }
     for (const fn of opts.intercept ?? []) if (await fn(req, res, url)) return;
     const d = localDecision(opts.state(), req.url ?? '/');
     kind = d.kind;
