@@ -44,7 +44,7 @@ export const platform: PlatformConfig = definePlatformConfig({
   ],
   reservedAppNames: ['www'],
   previewTtlDays: 7,
-  limits: { appsPerMember: 2, stagesPerApp: 3 },
+  limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000 },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });
 

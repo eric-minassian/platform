@@ -28,6 +28,6 @@ export default definePlatformConfig({
     'simply-personalized-beta',
   ],
   previewTtlDays: 7,
-  limits: { appsPerMember: 50, stagesPerApp: 20 },
+  limits: { appsPerMember: 50, stagesPerApp: 20, emailsPerDay: 2000 },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });

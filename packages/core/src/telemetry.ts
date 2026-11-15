@@ -196,6 +196,11 @@ export const telemetryKeys = {
   metric: (app: string, stage: string, res: Resolution) => `c#${app}#${stage}#${res}`,
   errors: (app: string, stage: string) => `e#${app}#${stage}`,
   uptime: (app: string, stage: string) => `u#${app}#${stage}`,
+  /**
+   * Email usage: sk `YYYY-MM-DD` (UTC), `n` recipients sent. The SDK writes it
+   * with the stage role, whose IAM grant covers only this partition.
+   */
+  email: (app: string, stage: string) => `mail#${app}#${stage}`,
   time: (ts: number) => new Date(ts).toISOString(),
 } as const;
 

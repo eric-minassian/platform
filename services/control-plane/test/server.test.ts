@@ -271,7 +271,7 @@ describe('authentication', () => {
           { github: 'ada', role: 'admin' },
           { github: 'bob', role: 'member' },
         ],
-        limits: { appsPerMember: 2, stagesPerApp: 3 },
+        limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000 },
         apps: 1,
         stages: 1,
         previews: 0,

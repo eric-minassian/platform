@@ -4,6 +4,7 @@ export * from './bindings.ts';
 export * from './config.ts';
 export * from './constants.ts';
 export * from './cron.ts';
+export * from './email.ts';
 export * from './ids.ts';
 export * from './manifest.ts';
 export * from './naming.ts';

@@ -112,6 +112,8 @@ export const names = {
   scheduleGroup: (app: string, stage: string) => `${app}--${stage}`,
   schedule: (cronKey: string) => cronKey,
   userPoolClient: (app: string, stage: string) => `${app}--${stage}`,
+  /** SES tenant and its configuration set (≤ 64 chars each; the base is ≤ 52). */
+  emailTenant: (app: string, stage: string) => `${app}--${stage}`,
   /** AppSync Events channel namespace; names are ≤ 50 chars, so long ones are hashed. */
   realtimeNamespace: (app: string, stage: string) => fit(`${app}--${stage}`, 50),
   /**
