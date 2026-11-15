@@ -5,7 +5,7 @@
  * a few seconds more, so `plat deploy` repeats the check from the machine it
  * runs on (`packages/cli/src/edge.ts`) before it returns.
  */
-import { HEALTH_PATH } from '@ericminassian/platform-core';
+import { HEALTH_PATH, type HealthResponse } from '@ericminassian/platform-core';
 
 export async function waitForEdge(
   url: string,
@@ -21,7 +21,7 @@ export async function waitForEdge(
         headers: { 'cache-control': 'no-cache' },
       });
       if (res.ok) {
-        const body = (await res.json()) as { revision?: string };
+        const body = (await res.json()) as Partial<HealthResponse>;
         if (body.revision === deploymentId) return true;
       } else {
         await res.body?.cancel();

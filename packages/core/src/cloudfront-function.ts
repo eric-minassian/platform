@@ -18,6 +18,11 @@ const kvs = cf.kvs(${JSON.stringify(opts.kvsId)});
 
 ${decideSrc}
 
+function health(rec) {
+  var body = JSON.stringify({ ok: true, app: rec.app, stage: rec.stage, revision: rec.d });
+  return { statusCode: 200, statusDescription: 'OK', headers: { 'content-type': { value: 'application/json' }, 'cache-control': { value: 'no-store' } }, body: body };
+}
+
 function notFound() {
   return { statusCode: 404, statusDescription: 'Not Found', headers: { 'content-type': { value: 'text/plain' }, 'cache-control': { value: 'no-store' } }, body: 'Nothing is deployed here.' };
 }
@@ -32,6 +37,7 @@ async function handler(event) {
   try { rec = JSON.parse(raw); } catch (e) { return notFound(); }
   var d = decide(rec, req.uri);
   if (d.t === 'notfound') return notFound();
+  if (d.t === 'health') return health(rec);
   req.headers[${JSON.stringify(HOST_HEADER)}] = { value: host };
   if (d.t === 'static') {
     req.uri = d.key;

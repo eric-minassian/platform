@@ -27,7 +27,7 @@ import { deleteUserPoolClient, ensureUserPoolClient } from './drivers/cognito.ts
 import { deleteTable, describeTable, ensureTable, stageTableSpec } from './drivers/dynamodb.ts';
 import { deleteEventBus, deleteRule, ensureEventBus, ensureRule, listRules } from './drivers/events.ts';
 import { deleteRole, ensureRole } from './drivers/iam.ts';
-import { deleteRoute, putRoute } from './drivers/kvs.ts';
+import { deleteRoute, getRoute, putRoute } from './drivers/kvs.ts';
 import {
   deleteEventSourceMapping,
   deleteFunction,
@@ -38,7 +38,7 @@ import {
   removePermission,
 } from './drivers/lambda.ts';
 import { deleteLogGroup, ensureLogGroup, listLogGroups } from './drivers/logs.ts';
-import { deletePrefix, listChildPrefixes, publishStaticZip } from './drivers/s3.ts';
+import { deletePrefix, hasObjects, listChildPrefixes, publishStaticZip } from './drivers/s3.ts';
 import {
   deleteSchedule,
   deleteScheduleGroup,
@@ -55,6 +55,7 @@ import {
   ensureRouterAccess,
   ensureWebFunction,
   getEndpoint,
+  getRevisionState,
   pruneRevisions,
   setEndpointRevision,
 } from './drivers/web-function.ts';
@@ -354,6 +355,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
 
   // 12. Route flip — the only step that changes what users see.
   let route: RouteRecord | undefined;
+  let previousRoute: RouteRecord | undefined;
   if (webMode === 'function' && (webFunction || staticPrefix)) {
     route = {
       v: 1,
@@ -366,6 +368,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       ...(staticPrefix ? { spa: m.web?.spa === false ? (0 as const) : (1 as const) } : {}),
     };
     if (platform.kvsArn) {
+      previousRoute = await getRoute(ctx, platform.kvsArn, host);
       await putRoute(ctx, platform.kvsArn, host, route);
       resources.push({ type: 'route', name: host });
     } else {
@@ -375,11 +378,8 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
 
   // 13. Garbage-collect old static deployments.
   if (staticPrefix) {
-    const prefixes = (await listChildPrefixes(ctx, platform.sitesBucket, `${app}/${stage}/`))
-      .sort()
-      .reverse();
-    for (const p of prefixes.slice(STATIC_DEPLOYMENTS_KEPT)) {
-      if (p.startsWith(staticPrefix)) continue;
+    const prefixes = await listChildPrefixes(ctx, platform.sitesBucket, `${app}/${stage}/`);
+    for (const p of staleStaticPrefixes(prefixes, [staticPrefix, previousRoute?.s])) {
       await deletePrefix(ctx, platform.sitesBucket, p);
     }
   }
@@ -501,8 +501,44 @@ async function removeWorker(ctx: EngineContext, app: string, stage: string): Pro
   await deleteFunction(ctx, workerName);
 }
 
+/**
+ * Static prefixes (`<app>/<stage>/<deployment>/`) to delete after a deploy:
+ * all but the newest few, never one in `keep`. That includes the prefix the
+ * previous route pointed at: edges that haven't picked up the new route
+ * still serve it, and it is what a rollback returns to. After a rollback to
+ * an earlier deployment it can be older than the newest few.
+ */
+export function staleStaticPrefixes(prefixes: string[], keep: Array<string | undefined>): string[] {
+  const kept = new Set(keep.filter(Boolean).map((k) => `${k}/`));
+  // Deployment ids sort by creation time.
+  return [...prefixes]
+    .sort()
+    .reverse()
+    .slice(STATIC_DEPLOYMENTS_KEPT)
+    .filter((p) => !kept.has(p));
+}
+
+/**
+ * Rollback targets lose their files to garbage collection after enough
+ * deploys. Check before changing anything, so a stage is never pointed at a
+ * deployment that can no longer serve.
+ */
+async function assertCanRollBack(ctx: EngineContext, input: RollbackStageInput): Promise<void> {
+  const { app, stage, platform, route } = input;
+  const gone = (what: string) => new Error(`deployment ${route.d} can't be rolled back to: ${what}`);
+  if (route.s && !(await hasObjects(ctx, platform.sitesBucket, `${route.s}/`))) {
+    throw gone('its static files have been cleaned up');
+  }
+  if (input.revisionId) {
+    const state = await getRevisionState(ctx, names.webFunction(app, stage), input.revisionId);
+    if (!state) throw gone('its server revision has been cleaned up');
+    if (state !== 'Active') throw gone(`its server revision is ${state}`);
+  }
+}
+
 export async function rollbackStage(ctx: EngineContext, input: RollbackStageInput): Promise<void> {
   const { app, stage, platform } = input;
+  await assertCanRollBack(ctx, input);
   if (input.revisionId) {
     await setEndpointRevision(ctx, {
       functionName: names.webFunction(app, stage),

@@ -16,6 +16,7 @@
 import {
   fingerprint,
   HEALTH_PATH,
+  type HealthResponse,
   HOST_HEADER,
   PLATFORM_PATH_PREFIX,
   TRACE_HEADER,
@@ -133,10 +134,8 @@ async function platformRoute(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === HEALTH_PATH) {
     const b = getBindings();
-    return Response.json(
-      { ok: true, app: b.app, stage: b.stage, revision: b.revision },
-      { headers: { 'cache-control': 'no-store' } },
-    );
+    const body: HealthResponse = { ok: true, app: b.app, stage: b.stage, revision: b.revision };
+    return Response.json(body, { headers: { 'cache-control': 'no-store' } });
   }
   const authResponse = await handleAuthRoute(request);
   if (authResponse) return authResponse;

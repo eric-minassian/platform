@@ -20,6 +20,18 @@ export const PLATFORM_DEFAULTS = {
 export const PLATFORM_PATH_PREFIX = '/__platform/';
 export const HEALTH_PATH = '/__platform/health';
 
+/**
+ * Body served at `HEALTH_PATH`: by the SDK when the stage has a server, else
+ * by the edge router from its route record. `revision` is the deployment id,
+ * so a poller can tell which deployment answered.
+ */
+export interface HealthResponse {
+  ok: true;
+  app: string;
+  stage: string;
+  revision: string;
+}
+
 /** Header the router sets so apps (and the cache key) see the public host. */
 export const HOST_HEADER = 'x-platform-host';
 /** Trace propagation header (W3C traceparent is also honored). */

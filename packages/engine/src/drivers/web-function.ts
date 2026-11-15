@@ -122,6 +122,18 @@ export async function createRevision(ctx: EngineContext, spec: RevisionSpec): Pr
   return res.revisionId!;
 }
 
+/** A revision's state, or undefined if it (or its function) no longer exists. */
+export async function getRevisionState(
+  ctx: EngineContext,
+  functionName: string,
+  revisionId: string,
+): Promise<string | undefined> {
+  const r = await ignoreNotFound(
+    ctx.clients.lambdaWeb.send(new GetWebFunctionRevisionCommand({ functionName, revisionId })),
+  );
+  return r?.state;
+}
+
 async function waitRevisionActive(
   ctx: EngineContext,
   functionName: string,

@@ -3,6 +3,7 @@ import { buildRouterFunctionCode } from '../src/cloudfront-function.ts';
 import {
   decide,
   errorFingerprint,
+  HEALTH_PATH,
   latencyBucket,
   names,
   newDeploymentId,
@@ -97,7 +98,9 @@ describe('router decide', () => {
   });
   it('handles server-only, static-only and ssr', () => {
     expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', o: 'fn' }, '/x')).toEqual({ t: 'server' });
-    expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, '/__platform/health')).toEqual({
+    // No server to answer health: the router reports the route's deployment itself.
+    expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, HEALTH_PATH)).toEqual({ t: 'health' });
+    expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, '/__platform/auth/me')).toEqual({
       t: 'notfound',
     });
     expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, '/docs/')).toEqual({
@@ -113,10 +116,52 @@ describe('router decide', () => {
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' });
     expect(code).toContain('cf.kvs("kvs-123")');
     expect(code).toContain('function decide(rec, uri)');
+    expect(code).toContain("if (d.t === 'health') return health(rec);");
     expect(code).not.toContain('export ');
     expect(code.length).toBeLessThan(10 * 1024);
     // Runtime 2.0 rejects `await` inside call arguments ("await in arguments not supported").
     expect(code).not.toMatch(/\(\s*await\b/);
+  });
+
+  /** Runs the generated function with a stub `cloudfront` module serving `routes`. */
+  function edge(routes: Record<string, RouteRecord>) {
+    const origins: string[] = [];
+    const cf = {
+      kvs: () => ({
+        get: async (host: string) => {
+          if (!routes[host]) throw new Error('key not found');
+          return JSON.stringify(routes[host]);
+        },
+      }),
+      updateRequestOrigin: (o: { domainName: string }) => origins.push(o.domainName),
+    };
+    const code = buildRouterFunctionCode({ kvsId: 'kvs-123' }).replace("import cf from 'cloudfront';", '');
+    const handler = new Function('cf', `${code}\nreturn handler;`)(cf) as (event: unknown) => Promise<{
+      statusCode?: number;
+      headers: Record<string, { value: string }>;
+      body?: string;
+      uri?: string;
+    }>;
+    const request = (host: string, uri: string) =>
+      handler({ request: { uri, headers: { host: { value: host } }, cookies: {} } });
+    return { request, origins };
+  }
+
+  it('answers health from the route when the stage has no server', async () => {
+    const site: RouteRecord = { v: 1, app: 'docs', stage: 'prod', d: 'd7', s: 'docs/prod/d7', spa: 1 };
+    const { request, origins } = edge({ 'docs.example.com': site, 'shop.example.com': both });
+
+    const res = await request('docs.example.com', HEALTH_PATH);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['cache-control']?.value).toBe('no-store');
+    expect(JSON.parse(res.body!)).toEqual({ ok: true, app: 'docs', stage: 'prod', revision: 'd7' });
+
+    expect((await request('docs.example.com', '/about')).uri).toBe('/docs/prod/d7/index.html');
+    expect((await request('docs.example.com', '/__platform/auth/me')).statusCode).toBe(404);
+    expect((await request('nothing.example.com', HEALTH_PATH)).statusCode).toBe(404);
+    // A stage with a server answers health from the server.
+    expect((await request('shop.example.com', HEALTH_PATH)).statusCode).toBeUndefined();
+    expect(origins).toEqual(['fn.example']);
   });
 });
 

@@ -12,6 +12,7 @@ import type {
   MeResponse,
   MetricsResponse,
   QueueStats,
+  RollbackResponse,
   RouteStats,
   SecretInfo,
   StageRecord,
@@ -103,10 +104,7 @@ export const api = {
   destroyStage: (app: string, stage: string, confirm?: string) =>
     request<{ status: string }>(`${a(app)}/stages/${stage}${qs({ confirm })}`, json('DELETE')),
   rollback: (app: string, stage: string, deploymentId?: string) =>
-    request<{ currentDeployment: string }>(
-      `${a(app)}/stages/${stage}/rollback`,
-      json('POST', { deploymentId }),
-    ),
+    request<RollbackResponse>(`${a(app)}/stages/${stage}/rollback`, json('POST', { deploymentId })),
   deployments: (app: string, stage?: string) =>
     request<DeploymentRecord[]>(`${a(app)}/deployments${qs({ stage })}`),
   deployment: (id: string) => request<DeploymentRecord>(`/v1/deployments/${id}`),

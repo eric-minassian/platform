@@ -8,7 +8,9 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { decide, HEALTH_PATH, type ResolvedManifest } from '@ericminassian/platform-core';
+import pc from 'picocolors';
 import { localRouteRecord } from './dev/router.ts';
+import { CliError, EXIT, info, step } from './util/output.ts';
 
 export const INDEX_PATH = '/index.html';
 
@@ -39,7 +41,8 @@ export function edgeChecksFor(opts: {
     serverRoutes: [...(manifest.web?.serverRoutes ?? ['/api/'])],
     spa: manifest.web?.spa ?? true,
   });
-  const health = decide(record, HEALTH_PATH).t === 'server';
+  // The server answers health; for a stage without one, the edge router does.
+  const health = decide(record, HEALTH_PATH).t !== 'notfound';
   // `serverRoutes` can claim `/index.html` for the server; only a static answer is the built file.
   const index =
     opts.hasStatic && manifest.web?.static && decide(record, INDEX_PATH).t === 'static'
@@ -58,6 +61,29 @@ export interface EdgeWaitResult {
   ms: number;
   /** What each check that never passed saw last, e.g. `/__platform/health → revision d01…`. */
   pending: string[];
+}
+
+/**
+ * The platform reports a deployment live once the edge nearest the control
+ * plane serves it; return only once the edge nearest this machine does too.
+ * Throws after `timeoutMs`.
+ */
+export async function confirmServedHere(
+  url: string,
+  deploymentId: string,
+  checks: EdgeChecks,
+  opts: { timeoutMs?: number; fetch?: typeof fetch } = {},
+): Promise<void> {
+  if (!hasEdgeChecks(checks)) return;
+  step(`waiting for ${url} to serve ${deploymentId} to this machine`);
+  const r = await waitForEdge(url, deploymentId, checks, opts);
+  if (!r.ok) {
+    throw new CliError(
+      `the platform reports ${deploymentId} live, but ${url} did not serve it to this machine within ${Math.round(r.ms / 1000)}s`,
+      { hint: `last seen: ${r.pending.join('; ')}`, exitCode: EXIT.deployFailed },
+    );
+  }
+  info(`  ${pc.dim(`served to this machine after ${(r.ms / 1000).toFixed(1)}s`)}`);
 }
 
 /** Polls `url` until every check sees `deploymentId`, or `timeoutMs` passes. */
