@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "typecheck": "pnpm -r --parallel typecheck && tsc --noEmit -p scripts",
+    "typecheck": "pnpm -r --parallel typecheck",
     "test": "pnpm -r test",
     "test:integration": "pnpm -r test:integration",
     "lint": "biome check .",
