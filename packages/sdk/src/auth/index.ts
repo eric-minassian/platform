@@ -1,4 +1,5 @@
 import {
+  APP_CONFIG_FILE,
   AUTH_COOKIES,
   AUTH_ROUTES,
   AUTH_SCOPES,
@@ -35,7 +36,7 @@ const FLOW_MAX_AGE = 600;
 
 function authBindings(): AuthBindings {
   const a = getBindings().auth;
-  if (!a) throw new Error('Auth is not enabled for this app. Add `"auth": true` to platform.json.');
+  if (!a) throw new Error(`Auth is not enabled for this app. Add \`auth: true\` to ${APP_CONFIG_FILE}.`);
   return a;
 }
 

@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { validateAppName } from '@ericminassian/platform-core';
+import { APP_CONFIG_FILE, validateAppName } from '@ericminassian/platform-core';
 import { cliPackageRoot, cliVersion } from './project.ts';
 import { CliError, EXIT } from './util/output.ts';
 
@@ -39,9 +39,9 @@ const TEXT_EXT = new Set([
 /** Published CLI: `template/` inside the package. In this repo: `templates/app`. */
 export function templateDir(): string {
   const packaged = join(cliPackageRoot(), 'template');
-  if (existsSync(join(packaged, 'platform.json'))) return packaged;
+  if (existsSync(join(packaged, APP_CONFIG_FILE))) return packaged;
   const repo = resolve(cliPackageRoot(), '..', '..', 'templates', 'app');
-  if (existsSync(join(repo, 'platform.json'))) return repo;
+  if (existsSync(join(repo, APP_CONFIG_FILE))) return repo;
   throw new CliError('app template not found (broken CLI install?)');
 }
 

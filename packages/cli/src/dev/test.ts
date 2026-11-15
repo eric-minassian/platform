@@ -16,7 +16,7 @@ export const INTEGRATION_CONFIG = 'vitest.integration.config.ts';
  * `vitest.integration.config.ts` when present.
  */
 export async function runTests(opts: { cwd: string; args: string[] }): Promise<number> {
-  const { root, manifest } = loadProject(opts.cwd);
+  const { root, manifest } = await loadProject(opts.cwd);
   step('starting the AWS Emulator');
   let stage: Awaited<ReturnType<typeof startLocalStage>>;
   try {

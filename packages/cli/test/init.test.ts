@@ -1,19 +1,24 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseManifest } from '@ericminassian/platform-core';
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { initApp, replaceAppName, rewritePackageJson, TEMPLATE_APP_NAME, templateDir } from '../src/init.ts';
-import { cliVersion } from '../src/project.ts';
+import { cliVersion, loadProject } from '../src/project.ts';
 import { tempDir } from './helpers.ts';
 
 describe('plat init', () => {
-  it('copies the template with the app name everywhere', () => {
+  it('copies the template with the app name everywhere', async () => {
     const dir = join(tempDir(), 'my-notes');
     const r = initApp({ dir });
     expect(r.name).toBe('my-notes');
 
-    const manifest = parseManifest(JSON.parse(readFileSync(join(dir, 'platform.json'), 'utf8')));
+    // Evaluate the new app's plat.config.ts the way `plat` does, against the
+    // template's installed packages.
+    symlinkSync(join(templateDir(), 'node_modules'), join(dir, 'node_modules'));
+    const { manifest } = await loadProject(dir);
     expect(manifest.name).toBe('my-notes');
+    expect(Object.keys(manifest.queues)).toEqual(['emails']);
+    expect(manifest.events).toEqual(['todo.created']);
 
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     expect(pkg.name).toBe('my-notes');
@@ -32,7 +37,7 @@ describe('plat init', () => {
     expect(readFileSync(join(dir, 'AGENTS.md'), 'utf8')).toContain('my-notes--pr-<n>.ericminassian.com');
     expect(existsSync(join(dir, '.gitignore'))).toBe(true);
     expect(existsSync(join(dir, '.github/workflows/platform.yml'))).toBe(true);
-    expect(existsSync(join(dir, 'node_modules'))).toBe(false);
+    expect(r.files.some((f) => f.startsWith('node_modules/'))).toBe(false);
     expect(r.files).not.toContain('web/dist/index.html');
   });
 
@@ -66,6 +71,6 @@ describe('plat init', () => {
   });
 
   it('finds the template in the repo', () => {
-    expect(existsSync(join(templateDir(), 'platform.json'))).toBe(true);
+    expect(existsSync(join(templateDir(), APP_CONFIG_FILE))).toBe(true);
   });
 });

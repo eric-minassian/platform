@@ -192,6 +192,6 @@ describe('collection operations', () => {
 
   it('explains a missing database binding', async () => {
     useTestBindings({});
-    await expect(todos().get({ userId: 'u1', id: 't1' })).rejects.toThrow(/"db": true/);
+    await expect(todos().get({ userId: 'u1', id: 't1' })).rejects.toThrow(/`db: true` to plat\.config\.ts/);
   });
 });

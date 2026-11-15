@@ -50,7 +50,7 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
   if (state.webDev) return { kind: 'webdev', target: state.webDev };
   if (state.webDevStarting) return { kind: 'unavailable', reason: 'the frontend dev server is starting' };
   if (!state.staticDir)
-    return { kind: 'unavailable', reason: 'no frontend: set web.static or web.dev in platform.json' };
+    return { kind: 'unavailable', reason: 'no frontend: set web.static or web.dev in plat.config.ts' };
   const prefix = `/${state.record.s ?? ''}`;
   const rel = d.key.startsWith(prefix) ? d.key.slice(prefix.length) : d.key;
   const file = safeJoin(state.staticDir, decodeURIComponent(rel));

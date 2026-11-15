@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/platform-core",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Shared contracts for the platform: naming, manifest schema, bindings, telemetry, routing.",
   "type": "module",
   "license": "MIT",
@@ -30,14 +30,12 @@
   },
   "files": [
     "dist",
-    "src",
-    "platform.schema.json"
+    "src"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && mkdir -p dist/router && cp src/router/decide.js src/router/decide.d.ts dist/router/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "schema": "node scripts/schema.ts",
     "prepack": "pnpm run build"
   },
   "dependencies": {

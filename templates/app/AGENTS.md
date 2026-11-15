@@ -6,10 +6,13 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 
 ## Golden rules
 
-1. **No infrastructure code and no AWS SDK in this repo.** Declare what you need in `platform.json`; use it
-   through `@ericminassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
-2. **Every name in `platform.json` must match code.** Each queue, event and cron needs a handler in
-   `src/worker.ts`, and every handler needs a `platform.json` entry.
+1. **No infrastructure code and no AWS SDK in this repo.** Declare what you need in `plat.config.ts`; use
+   it through `@ericminassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
+2. **`plat.config.ts` is the source of truth for names and payload types.** `pnpm typecheck` fails unless
+   `src/worker.ts` handles exactly its queues, events and crons, and every `queue()`, `events.publish()`,
+   `storage()` and `secrets.get()` uses a declared name with the declared payload type. Declare message
+   types there (`queue<EmailJob>()`, `event<TodoCreated>()`) rather than annotating handlers, and keep the
+   `Register` block at the end of the file.
 3. **Never commit secrets.** Use `plat secrets set NAME` for deployed stages and `.env.local` (git-ignored)
    for `plat dev`. Declare each name under `secrets`.
 4. **Run `pnpm typecheck && pnpm test` before you push.** CI runs the same checks, plus `plat test` when
@@ -19,7 +22,7 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 
 | Path                         | What                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------- |
-| `platform.json`              | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env) |
+| `plat.config.ts`             | Everything the app needs (web, auth, db, queues, events, crons, storage, secrets, env) |
 | `src/server.ts`              | HTTP API (Hono). `export default app`. Routes under `/api/*`                           |
 | `src/worker.ts`              | Background handlers: `defineWorker({ queues, events, crons })`                         |
 | `src/types.ts`               | Types shared by server, worker and web                                                 |
@@ -29,7 +32,7 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 
 Requests for `/api/*` and `/__platform/*` go to the server; files go to `web/dist`. Any other path
 serves `index.html`, which is how client-side routing works. Change the server prefixes with
-`web.serverRoutes` (default `["/api/"]`).
+`web.serverRoutes` (default `['/api/']`).
 
 ## SDK reference (`@ericminassian/platform`)
 
@@ -44,8 +47,8 @@ import { defineWorker, invokeJob } from '@ericminassian/platform/worker';
 | `db.collection`             | `const todos = db.collection<Todo>('todos', { partition: 'userId', sort: 'id' })`                           |
 | `.get/.put/.update/.delete` | `await todos.put(t, { ifNotExists: true })`, `await todos.update({ userId, id }, { done: true })`           |
 | `.query`                    | `await todos.query({ userId }, { beginsWith: '2026', limit: 20, reverse: true })` → `{ items, cursor }`     |
-| `queue(name).send`          | `await queue<EmailJob>('emails').send({ to, subject, body }, { delaySeconds: 60 })`                         |
-| `events.publish`            | `await events.publish('todo.created', { id })` (anything can publish; subscribers are listed in `events`)   |
+| `queue(name).send`          | `await queue('emails').send({ to, subject, body }, { delaySeconds: 60 })`                                   |
+| `events.publish`            | `await events.publish('todo.created', { userId, id, title })`                                               |
 | `storage(name)`             | `await storage('uploads').put(key, bytes, { contentType })`, `.get`, `.getText`, `.list(prefix)`, `.delete` |
 |                             | `await storage('uploads').uploadUrl(key, { contentType })`: browser-direct upload URL (HTTP PUT)            |
 | `secrets.get`               | `await secrets.get('STRIPE_KEY')` (throws if unset), `secrets.getOptional(...)`                             |
@@ -54,7 +57,7 @@ import { defineWorker, invokeJob } from '@ericminassian/platform/worker';
 | `auth.loginUrl/logoutUrl`   | `auth.loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                       |
 | `metrics`                   | `metrics.count('signups')`, `metrics.value('cart.total', 42.5, 'usd')`: free, shows up in the console       |
 | `log`                       | `log.info('charged', { orderId })`, `log.error('failed', err)`: structured, traced, searchable              |
-| `defineWorker`              | `defineWorker({ queues: { emails: async (msg) => {} }, events: {...}, crons: {...} })`                      |
+| `defineWorker`              | `defineWorker({ queues: { emails: async (msg) => {} }, events: {...}, crons: {...} })`; `msg.body` is typed |
 | `invokeJob`                 | `await invokeJob('reindex', { id })`: async call to an `invoke` handler on this stage's worker              |
 
 User ids (`user.id`) are stable and shared across all platform apps. Every request, job, database call,
@@ -63,32 +66,34 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 ## Recipes
 
 - **New collection or index.** Declare it in code; no infra change is needed. `db: true` must be in
-  `platform.json`. For a secondary index:
+  `plat.config.ts`. For a secondary index:
   `db.collection<User>('users', { partition: 'id', indexes: { byEmail: { slot: 1, partition: 'email' } } })`,
   then `users.query({ email }, { index: 'byEmail' })`.
   - Slots 1-3 are fixed GSIs. Never reuse a slot for a different key in the same collection.
   - For expiry, set `ttl: 'expiresAt'` (epoch seconds).
 - **Queue.**
-  1. Add `"queues": { "thumbnails": { "batchSize": 5 } }` to `platform.json`.
+  1. Add `thumbnails: queue<ThumbnailJob>({ batchSize: 5 })` under `queues` in `plat.config.ts`, with
+     `ThumbnailJob` in `src/types.ts`.
   2. Add a `queues.thumbnails` handler in `src/worker.ts`.
   3. Send with `queue('thumbnails').send(...)`.
 
   Throwing in the handler retries the message; after `maxReceiveCount` (default 5) it goes to the
   dead-letter queue, which you can inspect and redrive from the console.
-- **Event subscription.** Add the type to `"events"`, then add an `events['order.paid']` handler.
-- **Cron.** Add `"crons": { "digest": "0 8 * * 1-5" }` (5-field cron, UTC; or
-  `{ "schedule": "...", "timezone": "America/Los_Angeles" }`, or `"rate(15 minutes)"`), then add a
+- **Event subscription.** Add `'order.paid': event<OrderPaid>()` under `events`, then add an
+  `events['order.paid']` handler. Publish with `events.publish('order.paid', detail)`.
+- **Cron.** Add `digest: '0 8 * * 1-5'` under `crons` (5-field cron, UTC; or
+  `{ schedule: '...', timezone: 'America/Los_Angeles' }`, or `'rate(15 minutes)'`), then add a
   `crons.digest` handler.
-- **File store.** Add `"storage": ["avatars"]`, then use `storage('avatars')`. For browser uploads, return
+- **File store.** Add `'avatars'` to `storage`, then use `storage('avatars')`. For browser uploads, return
   `uploadUrl(...)` from an API route and `PUT` the file to it.
 - **Secret.**
-  1. Add `"secrets": ["STRIPE_KEY"]` to `platform.json`.
+  1. Add `'STRIPE_KEY'` to `secrets` in `plat.config.ts`.
   2. Set it: `plat secrets set STRIPE_KEY --stage prod`, or `--shared` for all stages.
   3. Locally, put `STRIPE_KEY=...` in `.env.local`.
   4. Read it: `await secrets.get('STRIPE_KEY')`.
 - **Protected route.** Call `const user = await auth.requireUser(c.req.raw)` first. To require sign-in
-  for everything, set `"auth": { "required": true }`.
-- **Plain config.** Use `"env": { "FEATURE_X": "on" }`, read via `process.env.FEATURE_X`. Not for secrets.
+  for everything, set `auth: { required: true }`.
+- **Plain config.** Use `env: { FEATURE_X: 'on' }`, read via `process.env.FEATURE_X`. Not for secrets.
 - **Custom metric.** Use `metrics.count('name')` or `metrics.value('name', n)`. It appears in the console
   and in `plat metrics`.
 

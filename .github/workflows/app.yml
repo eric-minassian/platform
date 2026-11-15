@@ -21,7 +21,7 @@ on:
         type: string
         default: "24"
       working-directory:
-        description: Directory containing platform.json
+        description: Directory containing plat.config.ts
         type: string
         default: "."
 

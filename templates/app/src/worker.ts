@@ -1,12 +1,12 @@
 import { log, metrics } from '@ericminassian/platform';
-import { defineWorker, type PlatformEvent, type QueueMessage } from '@ericminassian/platform/worker';
-import type { EmailJob, TodoCreated } from './types.ts';
+import { defineWorker } from '@ericminassian/platform/worker';
 
-// Every key here must match platform.json: `queues`, `events` and `crons`.
+// Handles exactly the `queues`, `events` and `crons` in plat.config.ts (a missing
+// or extra handler is a type error), with the payload types declared there.
 // Throwing retries the job (queues: up to maxReceiveCount, then the dead-letter queue).
 export default defineWorker({
   queues: {
-    emails: async (message: QueueMessage<EmailJob>) => {
+    emails: async (message) => {
       // Swap in a real email provider here (store its API key with `plat secrets set`).
       log.info('would send email', {
         to: message.body.to,
@@ -18,7 +18,7 @@ export default defineWorker({
   },
 
   events: {
-    'todo.created': async (event: PlatformEvent<TodoCreated>) => {
+    'todo.created': async (event) => {
       log.info('todo created', { id: event.detail.id, userId: event.detail.userId });
     },
   },

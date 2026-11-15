@@ -144,7 +144,7 @@ function Storage() {
       }
     >
       {!active ? (
-        <Empty>No storage declared in platform.json.</Empty>
+        <Empty>No storage declared in plat.config.ts.</Empty>
       ) : (
         <Loaded q={objects}>
           {(o) => (

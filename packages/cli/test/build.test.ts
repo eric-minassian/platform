@@ -57,8 +57,8 @@ describe('buildApp', () => {
   it('rejects auth without a server', async () => {
     const root = copyFixture('basic-app');
     writeFileSync(
-      join(root, 'platform.json'),
-      JSON.stringify({ name: 'basic-app', auth: true, web: { static: 'public' } }),
+      join(root, 'plat.config.ts'),
+      "export default { name: 'basic-app', auth: true, web: { static: 'public' } };\n",
     );
     await expect(buildApp({ cwd: root, quiet: true })).rejects.toBeInstanceOf(CliError);
   });

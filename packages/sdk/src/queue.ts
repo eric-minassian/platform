@@ -1,6 +1,8 @@
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
 import { currentTrace } from './context.ts';
+import type { QueueBody, QueueName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface Queue<T> {
@@ -14,7 +16,7 @@ function queueUrl(name: string): string {
   if (!q) {
     const declared = Object.keys(queues);
     throw new Error(
-      `Unknown queue "${name}". Declared queues: ${declared.length ? declared.join(', ') : '(none)'} — add it under "queues" in platform.json.`,
+      `Unknown queue "${name}". Declared queues: ${declared.length ? declared.join(', ') : '(none)'} — add it under \`queues\` in ${APP_CONFIG_FILE}.`,
     );
   }
   return q.url;
@@ -24,7 +26,8 @@ function traceAttribute(trace: string) {
   return { trace: { DataType: 'String', StringValue: trace } };
 }
 
-export function queue<T = unknown>(name: string): Queue<T> {
+/** A queue declared under `queues` in `plat.config.ts`; its body type comes from `queue<T>()` there. */
+export function queue<K extends QueueName>(name: K): Queue<QueueBody<K>> {
   return {
     send: (body, opts) =>
       span('queue.send', name, async () => {

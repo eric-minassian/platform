@@ -13,7 +13,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 - **Zero setup per app.** Creating an app needs no DNS change, no
   certificate, no AWS credentials, no infrastructure code.
 - **Apps never own infrastructure.** An app repo contains code plus a small,
-  cloud-neutral `platform.json`. No CloudFormation, CDK or AWS SDK calls in
+  cloud-neutral `plat.config.ts`. No CloudFormation, CDK or AWS SDK calls in
   apps; the platform's control plane provisions everything with direct AWS API
   calls. Apps stay portable.
 - **Cheap at rest.** Everything scales to zero. No VPCs, NAT gateways, load
@@ -57,7 +57,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 | Component                                  | What it is                                                                                                                                                                                     |
 | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`                            | Contracts shared by everything: naming, `platform.json` schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                            |
+| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                                 |
 | `packages/sdk` (`@ericminassian/platform`) | What app code imports: `db`, `queue`, `events`, `storage`, `secrets`, `auth`, `metrics`, `log`, `app`. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
 | `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                            |
 | `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                             |
@@ -67,33 +67,54 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ## The app contract
 
-### `platform.json`
+### `plat.config.ts`
 
-```jsonc
-{
-  "name": "todo",
-  "web": {
-    "server": "src/server.ts",
-    "static": "web/dist",
-    "build": "pnpm --dir web build",
-    "dev": { "command": "pnpm --dir web dev", "port": 5173 },
-    "spa": true,
-    "serverRoutes": ["/api/"]
+```ts
+import { defineApp, event, queue } from '@ericminassian/platform/config';
+import type { EmailJob, TodoCreated } from './src/types.ts';
+
+const app = defineApp({
+  name: 'todo',
+  web: {
+    server: 'src/server.ts',
+    static: 'web/dist',
+    build: 'pnpm --dir web build',
+    dev: { command: 'pnpm --dir web dev', port: 5173 },
+    spa: true,
+    serverRoutes: ['/api/'],
   },
-  "auth": true, // or { "required": true }
-  "db": true, // one document DB per stage; collections are declared in code
-  "queues": { "emails": { "batchSize": 10 } },
-  "events": ["todo.created"], // event types the worker subscribes to
-  "crons": { "cleanup": "0 3 * * *" }, // 5-field UTC cron or rate(...)
-  "storage": ["uploads"],
-  "secrets": ["STRIPE_KEY"],
-  "env": { "FEATURE_X": "on" }
+  auth: true, // or { required: true }
+  db: true, // one document DB per stage; collections are declared in code
+  queues: { emails: queue<EmailJob>({ batchSize: 10 }) },
+  events: { 'todo.created': event<TodoCreated>() }, // event types the worker subscribes to
+  crons: { cleanup: '0 3 * * *' }, // 5-field UTC cron or rate(...)
+  storage: ['uploads'],
+  secrets: ['STRIPE_KEY'],
+  env: { FEATURE_X: 'on' },
+});
+export default app;
+
+declare module '@ericminassian/platform' {
+  interface Register {
+    app: typeof app;
+  }
 }
 ```
 
-The schema lives in `packages/core/src/manifest.ts` (JSON Schema:
-`packages/core/platform.schema.json`). Keep it small: every field is a promise
-the platform keeps on any cloud.
+- **Schema.** `AppConfig` (what authors write) and `ManifestSchema` (what the
+  CLI and API validate) live in `packages/core/src/manifest.ts`. Keep them
+  small: every field is a promise the platform keeps on any cloud.
+- **Evaluation.** `plat` finds the nearest `plat.config.ts`, bundles it with
+  esbuild (packages stay external), imports the result and validates the
+  default export's JSON form. That JSON is what `plat build` writes to
+  `manifest.json` and `plat deploy` sends, so the control plane never runs app
+  code.
+- **Typed code.** `Register` hands the literal config to the SDK
+  (`packages/sdk/src/register.ts`):
+  - `queue()`, `events.publish()`, `storage()` and `secrets.get()` accept only
+    declared names.
+  - Bodies and details must match `queue<T>()` / `event<T>()`.
+  - `defineWorker` must handle exactly the declared queues, events and crons.
 
 ### Code
 
@@ -102,7 +123,8 @@ the platform keeps on any cloud.
   listens on `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract.
 - **Worker**: `export default defineWorker({ queues, events, crons })`. One
   Lambda per stage handles all of them; the wrapper dispatches on event shape
-  and reports partial SQS batch failures.
+  and reports partial SQS batch failures. Handlers get the payload types
+  declared in `plat.config.ts`.
 - **Resources**: only through `@ericminassian/platform`. `db.collection()`
   maps typed collections onto the stage's single table (partition/sort keys,
   up to three pinned index slots, TTL), so adding a collection needs no
@@ -387,16 +409,17 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 ## Decision log
 
-| Decision                                                                             | Why                                                                                                                                                                                                        |
-| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane provisions with direct AWS SDK calls; apps ship code + `platform.json` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                               |
-| Same engine for the foundation                                                       | One mental model, no second IaC tool. Terraform's AWS provider may not support Web Functions yet.                                                                                                          |
-| Lambda Web Functions for HTTP                                                        | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here. |
-| One router distribution + KVS                                                        | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                  |
-| AWS Emulator for local dev (Eric's call)                                             | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                 |
-| Moving an app out is a runbook, not tooling (Eric's call)                            | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                           |
-| No MCP; CLI only                                                                     | Eric's call. Agents use `plat … --json`.                                                                                                                                                                   |
-| Members = GitHub usernames in config                                                 | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                  |
-| Shared Cognito pool for app users                                                    | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                     |
-| `<app>--<stage>` hosts                                                               | Stays one DNS label under the single wildcard certificate.                                                                                                                                                 |
-| us-east-1                                                                            | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                            |
+| Decision                                                                              | Why                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                     |
+| App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories. |
+| Same engine for the foundation                                                        | One mental model, no second IaC tool. Terraform's AWS provider may not support Web Functions yet.                                                                                                                                                                                                                                                                                |
+| Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                       |
+| One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                        |
+| AWS Emulator for local dev (Eric's call)                                              | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                                                                                                                                                                                       |
+| Moving an app out is a runbook, not tooling (Eric's call)                             | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                                                                                                                                                                                                 |
+| No MCP; CLI only                                                                      | Eric's call. Agents use `plat … --json`.                                                                                                                                                                                                                                                                                                                                         |
+| Members = GitHub usernames in config                                                  | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                                                                                                                                                                                        |
+| Shared Cognito pool for app users                                                     | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                                                                                                                                                                                           |
+| `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                       |
+| us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                  |

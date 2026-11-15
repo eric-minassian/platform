@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import { delimiter, join, resolve } from 'node:path';
 import type { ArtifactFile, ResolvedManifest } from '@ericminassian/platform-core';
 import { build as esbuild, type Plugin } from 'esbuild';
-import { cliVersion, loadProject } from './project.ts';
+import { cliVersion, loadProject, type Project } from './project.ts';
+import { buildFailureList } from './util/esbuild.ts';
 import { CliError, EXIT, step } from './util/output.ts';
 import { dirExists, zipDirectory } from './util/zip.ts';
 
@@ -12,6 +13,8 @@ export const SDK_WORKER = '@ericminassian/platform/worker';
 
 export interface BuildOptions {
   cwd: string;
+  /** Already-loaded project (skips evaluating plat.config.ts again). */
+  project?: Project;
   /** Default `<app>/.plat/build`. */
   outDir?: string;
   /** Skip `web.build` (e.g. `plat dev`, which runs the dev server instead). */
@@ -38,10 +41,10 @@ export interface BuildResult {
  *  - `server.zip`  → `index.mjs` (+ map): the app's fetch handler wrapped by the SDK server
  *  - `worker.zip`  → `index.mjs` (+ map): `export const handler` for the worker Lambda
  *  - `static.zip`  → the built frontend
- *  - `manifest.json` → `{ manifest, resolved, build }`
+ *  - `manifest.json` → `{ manifest, resolved, build }` (`manifest` is plat.config.ts evaluated to JSON)
  */
 export async function buildApp(opts: BuildOptions): Promise<BuildResult> {
-  const project = loadProject(opts.cwd);
+  const project = opts.project ?? (await loadProject(opts.cwd));
   const { root, manifest, raw } = project;
   const outDir = resolve(opts.outDir ?? join(root, '.plat', 'build'));
   const want = (part: 'server' | 'worker' | 'static') => !opts.only || opts.only.includes(part);
@@ -198,13 +201,7 @@ async function bundle(o: {
       absWorkingDir: o.root,
     });
   } catch (err) {
-    const errors = (
-      err as { errors?: Array<{ text: string; location?: { file: string; line: number } | null }> }
-    ).errors;
-    const detail = errors
-      ?.map((e) => (e.location ? `${e.location.file}:${e.location.line}: ${e.text}` : e.text))
-      .join('\n  - ');
-    throw new CliError(`bundling failed${detail ? `:\n  - ${detail}` : `: ${(err as Error).message}`}`);
+    throw new CliError(`bundling failed:${buildFailureList(err)}`);
   }
   return o.outDir;
 }

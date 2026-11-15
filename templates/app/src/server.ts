@@ -2,7 +2,7 @@ import { auth, db, events, metrics, app as platform, queue } from '@ericminassia
 import { Hono } from 'hono';
 import { validator } from 'hono/validator';
 import { z } from 'zod';
-import type { EmailJob, Todo, TodoCreated } from './types.ts';
+import type { Todo } from './types.ts';
 
 // One collection per entity. Partition by user so each user's todos are one query.
 // Sort keys are time-ordered ids, so `query` returns oldest first.
@@ -50,9 +50,9 @@ const api = new Hono()
       createdAt: new Date().toISOString(),
     };
     await todos.put(todo, { ifNotExists: true });
-    await events.publish<TodoCreated>('todo.created', { userId: user.id, id: todo.id, title: todo.title });
+    await events.publish('todo.created', { userId: user.id, id: todo.id, title: todo.title });
     if (user.email) {
-      await queue<EmailJob>('emails').send({ to: user.email, subject: 'New todo', body: todo.title });
+      await queue('emails').send({ to: user.email, subject: 'New todo', body: todo.title });
     }
     metrics.count('todos.created');
     return c.json({ todo }, 201);

@@ -6,9 +6,15 @@ a single file.
 ## Boundaries
 
 - **Apps never own infrastructure.** Anything an app needs is a
-  `platform.json` field (schema in `packages/core/src/manifest.ts`) plus an SDK
-  export, implemented by an engine driver. Don't add escape hatches that make
-  apps call AWS directly. `db.raw()` is the one intentional exception.
+  `plat.config.ts` field (`AppConfig` and `ManifestSchema` in
+  `packages/core/src/manifest.ts`) plus an SDK export, implemented by an engine
+  driver. Don't add escape hatches that make apps call AWS directly. `db.raw()`
+  is the one intentional exception.
+- **App config is evaluated only by the CLI.** `plat` imports `plat.config.ts`
+  and sends the JSON result; the control plane never runs app code and must
+  keep accepting manifests stored by earlier deployments. A new field touches
+  `AppConfig`, `ManifestSchema` (a type test keeps them in step) and, if it
+  names a resource, the SDK's `Register` types in `packages/sdk/src/register.ts`.
 - **`packages/core` is the contract.** Naming, bindings, telemetry lines,
   route records, the cron dialect and API DTOs all live there. They're used by
   the SDK (inside every deployed app), the engine, the CLI and the control

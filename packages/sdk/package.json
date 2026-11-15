@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/platform",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Runtime SDK for apps on the platform: db, queues, events, storage, secrets, auth, metrics.",
   "type": "module",
   "license": "MIT",
@@ -11,6 +11,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./config": "./src/config.ts",
     "./server": "./src/server.ts",
     "./worker": "./src/worker.ts",
     "./testing": "./src/testing.ts"
@@ -21,6 +22,10 @@
       ".": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
+      },
+      "./config": {
+        "types": "./dist/config.d.ts",
+        "default": "./dist/config.js"
       },
       "./server": {
         "types": "./dist/server.d.ts",
@@ -42,7 +47,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p test/types",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "prepack": "pnpm run build"
