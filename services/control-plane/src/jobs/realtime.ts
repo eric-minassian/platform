@@ -2,23 +2,17 @@
  * Realtime (AppSync Events): the daily job that keeps the public subscribe key
  * alive, and a stage's activity read from CloudWatch on demand.
  */
+import type { MetricDataQuery, MetricDataResult } from '@aws-sdk/client-cloudwatch';
 import {
-  GetMetricDataCommand,
-  type MetricDataQuery,
-  type MetricDataResult,
-} from '@aws-sdk/client-cloudwatch';
-import {
-  bucketStart,
   names,
-  RESOLUTION_MS,
   type RealtimePoint,
   type RealtimeStatsResponse,
   type ResolvedManifest,
-  telemetryKeys,
 } from '@ericminassian/platform-core';
 import type { EngineLogEntry } from '@ericminassian/platform-engine';
 import { Clock, Context, Effect, Layer, Option } from 'effect';
-import { Aws, tryAws } from '../aws.ts';
+import { Aws } from '../aws.ts';
+import { cloudWatchRange, denseSeries, readMetrics, sumQueries } from '../cloudwatch.ts';
 import { Settings } from '../config.ts';
 import { type DeployFailed, StageEngine } from '../deploy.ts';
 import type { TimeRange } from '../telemetry/query.ts';
@@ -86,31 +80,17 @@ export const REALTIME_METRICS: ReadonlyArray<readonly [keyof Omit<RealtimePoint,
   ['errors', 'SubscribeServerError'],
 ];
 
-/**
- * CloudWatch keeps 1-minute data for 15 days, so a range reaching further
- * back is read hourly.
- */
-export function cloudWatchRange(range: TimeRange, now: number): TimeRange {
-  return range.res === '1m' && range.from < now - 15 * 86_400_000 ? { ...range, res: '1h' } : range;
-}
-
 /** One `Sum` query per metric, ids `m<index into REALTIME_METRICS>`. */
 export function realtimeQueries(apiId: string, namespace: string, range: TimeRange): MetricDataQuery[] {
-  return REALTIME_METRICS.map(([, metric], i) => ({
-    Id: `m${i}`,
-    MetricStat: {
-      Metric: {
-        Namespace: 'AWS/AppSync',
-        MetricName: metric,
-        Dimensions: [
-          { Name: 'EventAPIId', Value: apiId },
-          { Name: 'ChannelNamespaceName', Value: namespace },
-        ],
-      },
-      Period: RESOLUTION_MS[range.res] / 1000,
-      Stat: 'Sum',
-    },
-  }));
+  return sumQueries(
+    'AWS/AppSync',
+    REALTIME_METRICS.map(([, metric]) => metric),
+    [
+      { Name: 'EventAPIId', Value: apiId },
+      { Name: 'ChannelNamespaceName', Value: namespace },
+    ],
+    range,
+  );
 }
 
 /** Dense series (one zero-filled point per bucket in range) and totals (pure). */
@@ -118,32 +98,11 @@ export function toRealtimeSeries(
   results: ReadonlyArray<MetricDataResult>,
   range: TimeRange,
 ): Pick<RealtimeStatsResponse, 'points' | 'totals'> {
-  type Counts = { -readonly [K in keyof RealtimePoint]: RealtimePoint[K] };
-  const step = RESOLUTION_MS[range.res];
-  const byBucket = new Map<number, Counts>();
-  const points: Counts[] = [];
-  const end = bucketStart(range.to, range.res);
-  for (let t = bucketStart(range.from, range.res); t <= end && points.length < 2000; t += step) {
-    const point = { ts: telemetryKeys.time(t), events: 0, publishes: 0, subscribes: 0, errors: 0 };
-    byBucket.set(t, point);
-    points.push(point);
-  }
-  for (const r of results) {
-    const series = REALTIME_METRICS[Number(r.Id?.slice(1))]?.[0];
-    if (!series) continue;
-    (r.Timestamps ?? []).forEach((when, i) => {
-      const point = byBucket.get(bucketStart(new Date(when).getTime(), range.res));
-      if (point) point[series] += r.Values?.[i] ?? 0;
-    });
-  }
-  const totals = { events: 0, publishes: 0, subscribes: 0, errors: 0 };
-  for (const p of points) {
-    totals.events += p.events;
-    totals.publishes += p.publishes;
-    totals.subscribes += p.subscribes;
-    totals.errors += p.errors;
-  }
-  return { points, totals };
+  return denseSeries(
+    results,
+    range,
+    REALTIME_METRICS.map(([series]) => series),
+  );
 }
 
 export class AppRealtime extends Context.Service<
@@ -182,27 +141,11 @@ export class AppRealtime extends Context.Service<
             ...toRealtimeSeries([], range),
           } satisfies RealtimeStatsResponse;
         }
-        const step = RESOLUTION_MS[range.res];
-        const queries = realtimeQueries(api.apiId, names.realtimeNamespace(app, stage), range);
-        // Usually one page: 7 metrics × at most 2,000 points stays under the 100,800 per call.
-        const results: MetricDataResult[] = [];
-        let NextToken: string | undefined;
-        do {
-          const res = yield* tryAws(() =>
-            aws.cloudwatch().send(
-              new GetMetricDataCommand({
-                MetricDataQueries: queries,
-                // Bucket-aligned, so CloudWatch's period boundaries match the series'.
-                StartTime: new Date(bucketStart(range.from, range.res)),
-                EndTime: new Date(bucketStart(range.to, range.res) + step),
-                ScanBy: 'TimestampAscending',
-                NextToken,
-              }),
-            ),
-          ).pipe(Effect.orDie);
-          results.push(...(res.MetricDataResults ?? []));
-          NextToken = res.NextToken;
-        } while (NextToken);
+        const results = yield* readMetrics(
+          aws,
+          realtimeQueries(api.apiId, names.realtimeNamespace(app, stage), range),
+          range,
+        ).pipe(Effect.orDie);
         return {
           app,
           stage,

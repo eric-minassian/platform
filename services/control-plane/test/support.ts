@@ -21,6 +21,7 @@ import { Aws } from '../src/aws.ts';
 import { type GithubAppSettings, Settings } from '../src/config.ts';
 import { DataBrowser } from '../src/data.ts';
 import { Dns } from '../src/dns.ts';
+import { AppEmail } from '../src/email.ts';
 import { GitHub } from '../src/github.ts';
 import { WorkerJobs } from '../src/jobs/call.ts';
 import { AppQueues } from '../src/jobs/queues.ts';
@@ -233,6 +234,7 @@ export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => 
       sns: missing('sns'),
       logs: missing('logs'),
       cloudwatch: missing('cloudwatch'),
+      sesv2: missing('sesv2'),
       ce: missing('ce'),
       ...clients,
     }),
@@ -249,6 +251,7 @@ export interface TestServices {
   readonly secrets?: Partial<AppSecrets['Service']>;
   readonly queues?: Partial<AppQueues['Service']>;
   readonly realtime?: Partial<AppRealtime['Service']>;
+  readonly email?: Partial<AppEmail['Service']>;
   readonly artifacts?: Partial<Artifacts['Service']>;
   /** What a synchronous worker job (`call`) answers. */
   readonly call?: WorkerJobs['Service']['call'];
@@ -281,6 +284,7 @@ export const testServices = (options: TestServices = {}) =>
     Layer.mock(AppSecrets, options.secrets ?? {}),
     Layer.mock(AppQueues, options.queues ?? {}),
     Layer.mock(AppRealtime, options.realtime ?? {}),
+    Layer.mock(AppEmail, options.email ?? {}),
     Layer.mock(Artifacts, options.artifacts ?? {}),
     Layer.mock(WorkerJobs, {
       invoke: (name, payload) =>

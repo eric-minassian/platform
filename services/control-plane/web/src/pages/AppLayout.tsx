@@ -39,6 +39,7 @@ const TABS = [
   ['traces', 'Traces'],
   ['errors', 'Errors'],
   ['jobs', 'Jobs'],
+  ['email', 'Email'],
   ['data', 'Data'],
   ['deployments', 'Deployments'],
   ['secrets', 'Secrets'],

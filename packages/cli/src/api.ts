@@ -16,6 +16,8 @@ import {
   type DataCollections,
   type DataPage,
   type DeploymentRecord,
+  type EmailSending,
+  type EmailStatsResponse,
   type ErrorGroup,
   type JobStats,
   type LogLine,
@@ -32,6 +34,7 @@ import {
   type SecretInfo,
   type StageRecord,
   type StoredObjectInfo,
+  type SuppressedResponse,
   type TraceResponse,
 } from './api-types.ts';
 import { isExpired, loadCredentials } from './credentials.ts';
@@ -314,6 +317,22 @@ export class ApiClient {
       body: {},
       query: { stage },
     });
+  }
+
+  // ------------------------------------------------------------- email
+  email(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
+    return this.request<EmailStatsResponse>('GET', `/v1/apps/${enc(app)}/email`, { query: q });
+  }
+  suppressed(app: string, q: { stage: string; next?: string }) {
+    return this.request<SuppressedResponse>('GET', `/v1/apps/${enc(app)}/email/suppressed`, { query: q });
+  }
+  unsuppress(app: string, address: string, q: { stage: string }) {
+    return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/email/suppressed/${enc(address)}`, {
+      query: q,
+    });
+  }
+  resumeEmail(app: string, q: { stage: string }) {
+    return this.request<EmailSending>('POST', `/v1/apps/${enc(app)}/email/resume`, { query: q });
   }
 }
 

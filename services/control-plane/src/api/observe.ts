@@ -1,8 +1,9 @@
-/** Observability endpoints: metrics, routes, jobs, queues, errors, uptime, cost, logs, traces. */
+/** Observability endpoints: metrics, routes, jobs, queues, realtime, email, errors, uptime, cost, logs, traces. */
 import type { JobStats } from '@ericminassian/platform-core';
 import { NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Cause, Clock, Effect, Option, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
+import { AppEmail } from '../email.ts';
 import { AppQueues } from '../jobs/queues.ts';
 import { AppRealtime } from '../jobs/realtime.ts';
 import { Logs } from '../logs.ts';
@@ -34,6 +35,7 @@ export const ObserveLive = HttpApiBuilder.group(
   'observe',
   Effect.fn(function* (handlers) {
     const access = yield* Access;
+    const email = yield* AppEmail;
     const logs = yield* Logs;
     const queues = yield* AppQueues;
     const realtime = yield* AppRealtime;
@@ -93,6 +95,13 @@ export const ObserveLive = HttpApiBuilder.group(
           const { app, stage } = yield* scope(params.app, query.stage);
           const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
           return yield* realtime.stats(app, stage, manifest?.realtime, yield* rangeOf(query));
+        }),
+
+      email: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
+          return yield* email.stats(app, stage, manifest?.email, yield* rangeOf(query));
         }),
 
       errors: ({ params, query }) =>

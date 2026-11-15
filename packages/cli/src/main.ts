@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { registerAccount } from './commands/account.ts';
 import { registerApps } from './commands/apps.ts';
+import { registerEmail } from './commands/email.ts';
 import { registerLifecycle } from './commands/lifecycle.ts';
 import { registerManage } from './commands/manage.ts';
 import { registerObserve } from './commands/observe.ts';
@@ -20,6 +21,7 @@ export function createProgram(): Command {
   registerAccount(program);
   registerObserve(program);
   registerManage(program);
+  registerEmail(program);
   return program;
 }
 

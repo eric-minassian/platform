@@ -116,7 +116,7 @@ export class NotFound extends Schema.TaggedError<NotFound, { readonly brand: uni
   static readonly of = (what: string) => new NotFound({ code: 'not_found', message: `${what} not found` });
 }
 
-/** 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`, `redrive_failed`. */
+/** 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`, `redrive_failed`, `paused_by_aws`. */
 export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: unique symbol }>()(
   'Conflict',
   errorFields,
@@ -496,7 +496,7 @@ export class ManageApi extends HttpApiGroup.make('manage')
       success: CronRunResponse.pipe(HttpApiSchema.status(202)),
       error: errors,
     }),
-    /** The stage's suppression list (its SES tenant's), oldest first; `next` pages on. */
+    /** The stage's suppression list (its SES tenant's), in SES's order; `next` pages on. */
     HttpApiEndpoint.get('suppressed', '/apps/:app/email/suppressed', {
       params: app,
       query: { ...stageQuery, next: Schema.optional(Schema.String) },

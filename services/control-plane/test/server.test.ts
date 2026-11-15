@@ -1,12 +1,13 @@
 import { assert, describe, it } from '@effect/vitest';
-import type { AppRecord, LogLine } from '@ericminassian/platform-core';
+import type { AppRecord, LogLine, ResolvedManifest } from '@ericminassian/platform-core';
+import { Conflict } from '@ericminassian/platform-core/platform-api';
 import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import { Effect, Ref, Stream } from 'effect';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach } from 'vitest';
 import { AwsError } from '../src/aws.ts';
 import { WorkerJobFailed } from '../src/jobs/call.ts';
-import type { StageItem } from '../src/store.ts';
+import type { DeploymentItem, StageItem } from '../src/store.ts';
 import { api, ciToken, githubApp, memoryStore, type TestServices, testServices } from './support.ts';
 
 // The API as Lambda runs it: the platform's server wrapper over `toFetchHandler`,
@@ -44,6 +45,29 @@ const prodStage = (over: Partial<StageItem> = {}): StageItem => ({
   route: { v: 1, app: 'shop', stage: 'prod', d: 'd1', o: 'internal.lambda-url.example' },
   up: true,
   ...over,
+});
+
+/** The deployment live on shop's prod, with `manifest` fields over an app that declares nothing. */
+const liveDeployment = (manifest: Partial<ResolvedManifest> = {}): DeploymentItem => ({
+  id: 'd1',
+  app: 'shop',
+  stage: 'prod',
+  status: 'succeeded',
+  actor: 'bob',
+  events: [],
+  createdAt: '2026-11-01T00:00:00.000Z',
+  manifest: {
+    name: 'shop',
+    auth: { enabled: false, required: false },
+    db: false,
+    queues: {},
+    events: [],
+    crons: {},
+    storage: [],
+    secrets: [],
+    env: {},
+    ...manifest,
+  },
 });
 
 const json = (res: Response) => Effect.promise(() => res.json());
@@ -581,6 +605,41 @@ describe('stages and deployments', () => {
     }),
   );
 
+  it.effect('refuses an email.dailyLimit above the platform’s limits.emailsPerDay', () =>
+    Effect.gen(function* () {
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop] }),
+        artifacts: { uploadForms: () => Effect.succeed({}) },
+      });
+      const bob = yield* signIn('bob');
+      const deploy = (email: unknown) =>
+        request('/v1/apps/shop/deployments', {
+          method: 'POST',
+          headers: bob,
+          json: { stage: 'prod', manifest: { name: 'shop', email } },
+        });
+
+      const over = yield* deploy({ dailyLimit: 2001 });
+      assert.strictEqual(over.status, 429);
+      assert.deepStrictEqual(yield* json(over), {
+        error: {
+          code: 'limit',
+          message:
+            "email.dailyLimit is 2001, above the platform's ceiling of 2000 recipients a day (limits.emailsPerDay in platform.config.ts)",
+        },
+      });
+      assert.strictEqual((yield* deploy({ dailyLimit: 2000 })).status, 201);
+      // `email: true` takes the default limit.
+      const created = yield* deploy(true);
+      assert.strictEqual(created.status, 201);
+      assert.deepStrictEqual(
+        ((yield* json(created)) as { deployment: { manifest: { email: unknown } } }).deployment.manifest
+          .email,
+        { dailyLimit: 200 },
+      );
+    }),
+  );
+
   it.effect('destroys stages: prod only when confirmed, 200 when nothing is left', () =>
     Effect.gen(function* () {
       const jobs = yield* Ref.make<ReadonlyArray<{ name: string; payload: unknown }>>([]);
@@ -614,7 +673,10 @@ describe('stages and deployments', () => {
   it.effect('lists stages without their routes', () =>
     Effect.gen(function* () {
       const { request, signIn } = yield* setup({
-        store: memoryStore({ apps: [shop], stages: [prodStage()] }),
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage({ emailPaused: true, emailChangedAt: '2026-11-02T00:00:00.000Z' })],
+        }),
       });
       const [stage] = (yield* json(
         yield* request('/v1/apps/shop/stages', { headers: yield* signIn('bob') }),
@@ -769,6 +831,49 @@ describe('observability', () => {
     }),
   );
 
+  it.effect('reads email for the live manifest’s tenant', () =>
+    Effect.gen(function* () {
+      const seen: Array<{ stage: string; email: unknown; res: string }> = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage()],
+          deployments: [liveDeployment({ email: { name: 'Shop', dailyLimit: 300 } })],
+        }),
+        email: {
+          stats: (app, stage, email, range) =>
+            Effect.sync(() => {
+              seen.push({ stage, email, res: range.res });
+              return {
+                app,
+                stage,
+                enabled: email !== undefined,
+                res: range.res,
+                totals: { sends: 4, deliveries: 3, bounces: 1, complaints: 0 },
+                points: [],
+              };
+            }),
+        },
+      });
+      const bob = yield* signIn('bob');
+      const res = yield* request('/v1/apps/shop/email?range=7d', { headers: bob });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(((yield* json(res)) as { totals: unknown }).totals, {
+        sends: 4,
+        deliveries: 3,
+        bounces: 1,
+        complaints: 0,
+      });
+      // A stage that was never deployed has no manifest to declare email.
+      const preview = yield* request('/v1/apps/shop/email?stage=pr-2', { headers: bob });
+      assert.strictEqual(((yield* json(preview)) as { enabled: boolean }).enabled, false);
+      assert.deepStrictEqual(seen, [
+        { stage: 'prod', email: { name: 'Shop', dailyLimit: 300 }, res: '1h' },
+        { stage: 'pr-2', email: undefined, res: '1h' },
+      ]);
+    }),
+  );
+
   it.effect('lists and triages error groups', () =>
     Effect.gen(function* () {
       const group = {
@@ -889,6 +994,101 @@ describe('manage', () => {
       const cron = yield* request('/v1/apps/shop/crons/nightly/run', { method: 'POST', headers: bob });
       assert.deepStrictEqual(yield* json(cron), {
         error: { code: 'not_found', message: 'cron nightly on prod not found' },
+      });
+    }),
+  );
+
+  it.effect('manages the suppression list and resumes sending on stages that send email', () =>
+    Effect.gen(function* () {
+      const calls: Array<[string, ...unknown[]]> = [];
+      const options = (manifest: Partial<ResolvedManifest>): TestServices => ({
+        store: memoryStore({ apps: [shop], stages: [prodStage()], deployments: [liveDeployment(manifest)] }),
+        email: {
+          suppressed: (_app, stage, next) =>
+            Effect.sync(() => {
+              calls.push(['suppressed', stage, next]);
+              return {
+                items: [{ address: 'a@x.com', reason: 'bounce' as const, since: '2026-11-14T00:00:00.000Z' }],
+                next: 'tok-2',
+              };
+            }),
+          unsuppress: (_app, stage, address) =>
+            Effect.sync(() => {
+              calls.push(['unsuppress', stage, address]);
+            }),
+          resume: (_app, stage) =>
+            stage === 'prod'
+              ? Effect.succeed({ status: 'enabled' as const })
+              : Effect.fail(new Conflict({ code: 'paused_by_aws', message: 'AWS paused sending' })),
+        },
+      });
+
+      const without = yield* setup(options({}));
+      const off = yield* without.request('/v1/apps/shop/email/suppressed', {
+        headers: yield* without.signIn('bob'),
+      });
+      assert.strictEqual(off.status, 404);
+      assert.deepStrictEqual(yield* json(off), {
+        error: {
+          code: 'not_found',
+          message: "shop/prod doesn't send email: its live deployment declares no `email` in plat.config.ts",
+        },
+      });
+
+      const { request, signIn } = yield* setup(options({ email: { dailyLimit: 200 } }));
+      const bob = yield* signIn('bob');
+      const page = yield* request('/v1/apps/shop/email/suppressed?next=tok-1', { headers: bob });
+      assert.deepStrictEqual(yield* json(page), {
+        items: [{ address: 'a@x.com', reason: 'bounce', since: '2026-11-14T00:00:00.000Z' }],
+        next: 'tok-2',
+      });
+      const removed = yield* request('/v1/apps/shop/email/suppressed/a%40x.com', {
+        method: 'DELETE',
+        headers: bob,
+      });
+      assert.strictEqual(removed.status, 204);
+      const invalid = yield* request('/v1/apps/shop/email/suppressed/not-an-address', {
+        method: 'DELETE',
+        headers: bob,
+      });
+      assert.deepStrictEqual(yield* json(invalid), {
+        error: { code: 'bad_request', message: '"not-an-address" is not an email address' },
+      });
+      const resumed = yield* request('/v1/apps/shop/email/resume', { method: 'POST', headers: bob });
+      assert.deepStrictEqual(yield* json(resumed), { status: 'enabled' });
+      assert.deepStrictEqual(calls, [
+        ['suppressed', 'prod', 'tok-1'],
+        ['unsuppress', 'prod', 'a@x.com'],
+      ]);
+
+      // Previews have no live deployment here, so they don't send email.
+      const preview = yield* request('/v1/apps/shop/email/resume?stage=pr-2', {
+        method: 'POST',
+        headers: bob,
+      });
+      assert.strictEqual(preview.status, 404);
+    }),
+  );
+
+  it.effect('answers 409 when only AWS can resume a stage’s email', () =>
+    Effect.gen(function* () {
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage()],
+          deployments: [liveDeployment({ email: { dailyLimit: 200 } })],
+        }),
+        email: {
+          resume: () => Effect.fail(new Conflict({ code: 'paused_by_aws', message: 'AWS paused sending' })),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/email/resume', {
+        method: 'POST',
+        headers: yield* signIn('bob'),
+      });
+      assert.strictEqual(res.status, 409);
+      assert.deepStrictEqual(yield* json(res), {
+        error: { code: 'paused_by_aws', message: 'AWS paused sending' },
       });
     }),
   );

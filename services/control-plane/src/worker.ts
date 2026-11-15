@@ -6,6 +6,7 @@ import { defineWorker } from '@ericminassian/platform';
 import { Effect, Layer, Schema } from 'effect';
 import { Artifacts } from './artifacts.ts';
 import { Deployer, StageEngine } from './deploy.ts';
+import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
 import { CostCollector } from './jobs/cost.ts';
@@ -26,7 +27,9 @@ const WorkerLive = Layer.mergeAll(
   TelemetryWriter.layer,
   Watchdog.layer,
 ).pipe(
-  Layer.provide(Layer.mergeAll(Artifacts.layer, GitHub.layer, StageEngine.layer, WorkerJobs.layer)),
+  Layer.provide(
+    Layer.mergeAll(AppEmail.layer, Artifacts.layer, GitHub.layer, StageEngine.layer, WorkerJobs.layer),
+  ),
   Layer.provideMerge(BaseLive),
 );
 

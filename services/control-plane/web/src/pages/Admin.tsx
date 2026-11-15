@@ -59,7 +59,8 @@ export function AdminPage() {
               <p className="pt-2 text-[11px] text-muted">
                 Invite someone by adding their GitHub username to <Mono>members</Mono> in{' '}
                 <Mono>platform.config.ts</Mono> and deploying the platform. Limits: {o.limits.appsPerMember}{' '}
-                apps per member, {o.limits.stagesPerApp} stages per app.
+                apps per member, {o.limits.stagesPerApp} stages per app, {o.limits.emailsPerDay} email
+                recipients a day per stage.
               </p>
             </Card>
             <p className="text-[12px] text-muted">

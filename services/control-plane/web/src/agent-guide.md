@@ -1,6 +1,6 @@
 # platform.ericminassian.com
 
-A private, invite-only PaaS. It runs TypeScript apps at `https://<app>.ericminassian.com` with sign-in, a document database, queues, events, crons, file storage, secrets, per-PR previews, and logs, traces, metrics and errors built in. App repos contain no infrastructure code and no AWS credentials.
+A private, invite-only PaaS. It runs TypeScript apps at `https://<app>.ericminassian.com` with sign-in, a document database, queues, events, crons, file storage, transactional email, secrets, per-PR previews, and logs, traces, metrics and errors built in. App repos contain no infrastructure code and no AWS credentials.
 
 ## For AI agents
 
@@ -63,6 +63,10 @@ plat deployments
 plat rollback [--to <deploymentId>]
 plat secrets set <NAME> [--shared] < value.txt
 plat cron run <name>
+plat email [--since 7d]
+plat email suppressed
+plat email unsuppress <address>
+plat email resume
 ```
 
 ## Rules
