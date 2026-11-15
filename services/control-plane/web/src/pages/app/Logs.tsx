@@ -83,16 +83,17 @@ const logPages = Atom.family(({ app, stage, range, q, stream }: LogsQuery) =>
 // The tail's server-sent events are `{ event, data }` pairs, as `PlatformApi` describes them.
 const decodeTailEvent = Schema.decodeUnknownOption(TailEvent);
 
+interface Tail {
+  /** The URL whose stream these lines came from. */
+  readonly url: string;
+  readonly lines: LogLine[];
+  readonly error: string | null;
+}
+
 function useLiveTail(url: string) {
-  const [lines, setLines] = useState<LogLine[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [tail, setTail] = useState<Tail>({ url, lines: [], error: null });
   // A new URL is a new tail: reset while rendering, so the old tail's lines never show against it.
-  const [tailing, setTailing] = useState(url);
-  if (tailing !== url) {
-    setTailing(url);
-    setLines([]);
-    setError(null);
-  }
+  if (tail.url !== url) setTail({ url, lines: [], error: null });
   useEffect(() => {
     const es = new EventSource(url, { withCredentials: true });
     // A dropped connection fires a plain `error` event without data, which doesn't decode.
@@ -100,14 +101,20 @@ function useLiveTail(url: string) {
       const decoded = decodeTailEvent({ event: e.type, data: (e as MessageEvent<unknown>).data });
       if (decoded._tag === 'None') return;
       const event = decoded.value;
-      if (event.event === 'line') setLines((prev) => [event.data, ...prev].slice(0, 1000));
-      else setError(event.data);
+      setTail((prev) => {
+        // The previous URL's source can still deliver an event after the reset above, until
+        // its cleanup closes it; it belongs to that tail, not this one.
+        if (prev.url !== url) return prev;
+        return event.event === 'line'
+          ? { ...prev, lines: [event.data, ...prev.lines].slice(0, 1000) }
+          : { ...prev, error: event.data };
+      });
     };
     es.addEventListener('line', onEvent);
     es.addEventListener('error', onEvent);
     return () => es.close();
   }, [url]);
-  return { lines, error };
+  return { lines: tail.lines, error: tail.error };
 }
 
 function Lines({

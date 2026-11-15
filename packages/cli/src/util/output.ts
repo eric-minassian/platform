@@ -85,12 +85,14 @@ export function reportError(err: unknown): number {
 export function table(rows: Array<Record<string, unknown>>, columns?: string[]): string {
   if (rows.length === 0) return pc.dim('(none)');
   const cols = columns ?? Object.keys(rows[0]!);
-  const cell = (v: unknown) =>
-    v === undefined || v === null
-      ? ''
-      : typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
-        ? String(v)
-        : JSON.stringify(v);
+  const cell = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    if (typeof v === 'object' && v !== null) return JSON.stringify(v);
+    // Not JSON.stringify for these: it throws on a bigint and drops a symbol.
+    if (typeof v === 'number' || typeof v === 'bigint' || typeof v === 'boolean' || typeof v === 'symbol')
+      return v.toString();
+    return '';
+  };
   const widths = cols.map((c) => Math.max(c.length, ...rows.map((r) => visibleLength(cell(r[c])))));
   const line = (vals: string[]) =>
     vals.map((v, i) => v + ' '.repeat(widths[i]! - visibleLength(v))).join('  ');
