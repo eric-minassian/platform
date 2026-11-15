@@ -2,8 +2,8 @@
 
 A personal, AI-first PaaS on a single AWS account. An agent (or a person) can
 take an idea to `https://<app>.ericminassian.com` with auth, a database,
-queues, events, cron, file storage, live updates to browsers, CI/CD, preview
-environments and built-in observability, with no setup per app. Idle apps cost
+queues, events, cron, file storage, live updates to browsers, email, CI/CD,
+preview environments and built-in observability, with no setup per app. Idle apps cost
 about nothing.
 
 Status: scaffold (November 2026). Decisions below were made with Eric; the
@@ -47,7 +47,8 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
      ┌──────────────────────────────────────┼─────────────────────────────────────┐  │
      │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  ├─┘
      │             group · worker Lambda (queues/events/crons) · Cognito client ·  │
-     │             channel namespace · IAM role (scoped, boundary) · log groups    │
+     │             channel namespace · SES tenant · IAM role (scoped, boundary) ·  ├──► SES (mail.platform…,
+     │             log groups                                                      │     a tenant per stage)
      └──────────────────────────────────────┬─────────────────────────────────────┘
                                             │ stdout JSON telemetry
                               CloudWatch Logs ──(account-level subscription)──► telemetry processor
@@ -58,15 +59,15 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ### Components
 
-| Component                                  | What it is                                                                                                                                                                                                                |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, and the control plane API (`PlatformApi`), all as Effect schemas. Isomorphic.                                     |
-| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
-| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                       |
-| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                        |
-| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                                           |
-| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, IAM) as one CDK stack, and the deploy that brings up the control plane on them.          |
-| `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                   |
+| Component                                  | What it is                                                                                                                                                                                                                            |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, and the control plane API (`PlatformApi`), all as Effect schemas. Isomorphic.                                                 |
+| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented.             |
+| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                                   |
+| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                                    |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                                                       |
+| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, the SES mail domain, IAM) as one CDK stack, and the deploy that brings up the control plane on them. |
+| `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                               |
 
 ## The app contract
 
@@ -98,6 +99,7 @@ const app = defineApp({
     subscribe: 'signed-in', // or 'public' (the default)
     channels: { 'user/*': channel<TodoChanged>() }, // browsers subscribe; server and worker publish
   },
+  email: { name: 'Todo', dailyLimit: 500 }, // or `true`; sends from todo@mail.platform.ericminassian.com
 });
 export default app;
 
@@ -148,6 +150,8 @@ declare module '@ericminassian/platform/config' {
 - **Realtime**: the server and worker publish with the `Realtime` service; the
   browser subscribes with `RealtimeClient` from `@ericminassian/platform/client`.
   See [Realtime](#realtime).
+- **Email**: the server and worker send with the `Email` service. See
+  [Email](#email).
 - **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
   `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
   against both it and DynamoDB in the emulator.
@@ -157,7 +161,8 @@ declare module '@ericminassian/platform/config' {
 The engine passes resource names to the runtime in one environment variable,
 `PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): table, queue URLs,
 bus, storage prefix, secrets paths, auth settings, realtime namespace and
-publish endpoint, worker name, public URL, and the stage key. The stage key is
+publish endpoint, email sender and tenant, worker name, public URL, and the
+stage key. The stage key is
 a random secret the engine creates once per stage in SSM. The SDK seals `db`
 query cursors and signs realtime subscribe tokens with keys derived from it, so
 cursors are opaque and neither can be forged.
@@ -169,22 +174,23 @@ app or stage names), so the engine can always rediscover what it owns from
 names plus `platform:app` / `platform:stage` tags. There is no state file to
 lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 
-| Resource     | Name                                                               |
-| ------------ | ------------------------------------------------------------------ |
-| Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com` |
-| Web Function | `todo--prod` (endpoints `live`, `live-b`)                          |
-| Worker       | `todo--prod--worker`                                               |
-| Table        | `todo--prod`                                                       |
-| Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                    |
-| Bus / rules  | `todo--prod` / `todo--prod--<event>`                               |
-| Schedules    | group `todo--prod`                                                 |
-| Channels     | namespace `todo--prod` in `platform-realtime` (hashed past 50)     |
-| Role         | `/platform/apps/todo--prod`                                        |
-| Logs         | `/platform/apps/todo/prod/{web,web.local,worker}`                  |
-| Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                  |
-| Stage key    | `/platform/apps/todo/prod/stage-key`                               |
-| Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`    |
-| Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`         |
+| Resource     | Name                                                                                                                                                                  |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com`                                                                                                    |
+| Web Function | `todo--prod` (endpoints `live`, `live-b`)                                                                                                                             |
+| Worker       | `todo--prod--worker`                                                                                                                                                  |
+| Table        | `todo--prod`                                                                                                                                                          |
+| Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                                                                                                                       |
+| Bus / rules  | `todo--prod` / `todo--prod--<event>`                                                                                                                                  |
+| Schedules    | group `todo--prod`                                                                                                                                                    |
+| Channels     | namespace `todo--prod` in `platform-realtime` (hashed past 50)                                                                                                        |
+| Email        | `todo@mail.platform.ericminassian.com` (previews `todo--pr-12@…`); SES tenant and configuration set `todo--prod`; usage rows `mail#todo#prod` in `platform-telemetry` |
+| Role         | `/platform/apps/todo--prod`                                                                                                                                           |
+| Logs         | `/platform/apps/todo/prod/{web,web.local,worker}`                                                                                                                     |
+| Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                                                                                                                     |
+| Stage key    | `/platform/apps/todo/prod/stage-key`                                                                                                                                  |
+| Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`                                                                                                       |
+| Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`                                                                                                            |
 
 ## Routing
 
@@ -273,6 +279,75 @@ AppSync ──AWS_LAMBDA──► platform-realtime-authorizer (verifies tokens 
   flip; removing `realtime` deletes it after the flip; destroy deletes it.
   Rolling back to a deployment without realtime only drops the route's `rt`.
 
+## Email
+
+Transactional mail (sign-up confirmations, notifications, digests) on Amazon
+SES: about $0.10 per 1,000 emails, $0 at rest.
+
+```
+server, worker  Email.send({ to, subject, text, html?, replyTo? })
+  deployed      1. reserved test domains (example.com, *.test, *.invalid…) are logged, never sent
+                2. daily limit: conditional ADD on mail#<app>#<stage> / <UTC day> in platform-telemetry
+                3. SESv2 SendEmail from "Todo" <todo@mail.platform…>, tenant + configuration set <app>--<stage>
+  plat dev/test 1–2 as above, then POST to the CLI's inbox → http://<app>.localhost:3000/__platform/mail
+SES             per-tenant suppression list, reputation pause, metrics
+control plane   reads them on demand: console Email page, `plat email`; the pinger alerts on a pause
+```
+
+- **One mail domain** (`mail.<zone>`, foundation stack): Easy DKIM, a custom
+  MAIL FROM (`bounce.mail.<zone>`, SPF) and DMARC (`p=quarantine`), all in
+  the delegated zone, so the root zone needs no change. Every app sends from
+  it: `todo@…` in prod, `todo--pr-12@…` in previews, with an optional display
+  name (`email.name`). Replies need `replyTo`: the domain takes no mail.
+- **A tenant per stage.** SES tenants keep a suppression list each (scope
+  `TENANT`: hard bounces and complaints), report per-tenant `Send`,
+  `Delivery`, `Bounce` and `Complaint` metrics, and carry the standard
+  reputation policy, which pauses only that tenant when its bounce or
+  complaint findings turn high-severity. One app's bad list can't stop the
+  others' mail, and a preview's test sends can't pause prod. The tenant's
+  configuration set has the same name.
+- **The stage role sends only as itself.** `ses:SendEmail` on the domain and
+  the stage's configuration set, with `ses:FromAddress`, `ses:TenantName` and
+  `ses:ApiVersion` pinned, so code that bypasses the SDK still sends from its
+  own address through its own tenant, and the tenant's pause still applies.
+- **Daily limit.** The SDK counts recipients per UTC day with one conditional
+  `UpdateItem` on a row in the platform's telemetry table, which the role may
+  update only under its own partition key (`dynamodb:LeadingKeys`). Apps
+  declare `email.dailyLimit` (default 200) up to the platform's
+  `limits.emailsPerDay`, checked when a deployment is created; previews and
+  local stages get at most 50. A send past it fails with `EmailNotSent`
+  (`daily-limit`), so a queue handler retries and then dead-letters. A failed
+  send gives its count back. The limit catches runaway code, not hostile
+  code; the tenant's reputation pause is the backstop that code can't
+  bypass.
+- **Failures** are typed: `EmailNotSent` with `daily-limit`, `paused` (the
+  tenant is paused: SES answers `MessageRejected: Sending disabled for
+  <tenant>`) or `rejected` (an invalid message, or one SES refuses). Anything
+  else is a defect.
+- **Reserved test domains** are skipped on deployed stages: they always
+  bounce, and bounces from test data count against the app's reputation.
+- **Local.** Under `plat dev` and `plat test` the engine creates the same
+  tenant in the emulator, but bindings say `mode: 'local'`: the SDK counts the
+  send against the emulator's telemetry table, then posts it to the CLI, whose
+  inbox page lists messages live and shows their HTML in a sandboxed frame.
+  The emulator can't send as a tenant or show what it sent.
+- **Control plane.** The Email page and `plat email` show the stage's sender,
+  whether SES lets it send (paused by the policy, by hand, or by AWS), today's
+  recipients against the limit, the tenant's CloudWatch metrics, and its
+  suppression list. An owner can remove an address from the list and resume a
+  pause that isn't AWS's (`REINSTATED`, which the policy honors while its
+  findings are still open). The 5-minute pinger alerts when a prod stage's
+  sending is paused or resumes.
+- **The user pool** sends its own mail (sign-up and reset codes) through SES
+  from `login@mail.<zone>` once the account has production access. Until
+  then Cognito's own sender (50 emails a day for the whole pool) stays: in
+  the SES sandbox, Cognito could only mail verified addresses.
+- **Lifecycle.** Deploy creates the configuration set and tenant and
+  associates both with the domain before any code that sends. Removing
+  `email` keeps them (the suppression list and any pause live there), as
+  removing `db` keeps the table; the role loses its grant. Destroy deletes
+  them. Rollback needs nothing.
+
 ## Deploy flow
 
 ```
@@ -281,7 +356,7 @@ app CI ── plat build ──► server.zip, worker.zip, static.zip, manifest.
                          ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
 control plane ─ worker job "deploy" ─ engine.deployStage():
    role → log groups → table → queues/DLQs → bus/rules → Cognito client → channel namespace
-   → worker Lambda → ESMs/rules targets/schedules → static files → Web Function revision
+   → SES tenant → worker Lambda → ESMs/rules targets/schedules → static files → Web Function revision
    → the endpoint the live route doesn't use → resource policy → KVS route (last step)
 CI polls, streams events, waits until its nearest edge serves the deployment,
 comments the URL on the PR.
@@ -332,7 +407,7 @@ comments the URL on the PR.
 4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
    Realtime runs on the emulator's Event API: the router answers the config
    and tunnels `/__platform/realtime` WebSockets to the emulator's realtime
-   port.
+   port. Email goes to the CLI's inbox at `/__platform/mail`.
 5. The worker runs as a local Node process with hot reload.
    - The engine still creates the real worker Lambda, queues, event source
      mappings and rules in the emulator, so provisioning is exercised.
@@ -359,6 +434,7 @@ Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
 | S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                       |
 | Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                    |
 | AppSync Events: Event APIs, namespaces, API keys, IAM publish, handlers, wildcards  | Lambda authorizer never invoked (any token passes): signed-in subscribe tokens go unchecked locally |
+| SESv2: identities, configuration sets, tenants and their associations               | `SendEmail` as a tenant is NotImplemented and sent mail can't be read back: the CLI's inbox         |
 |                                                                                     | In-memory only: re-provisioned on each start (seconds)                                              |
 
 As the emulator fills gaps (it releases several times a day), the wrapper
@@ -373,7 +449,7 @@ writing any instrumentation:
   - `req`: every request, with route pattern, status, latency, country and cold start
   - `err`: errors, with a fingerprint
   - `job`: every queue, event, cron or invoke run
-  - `span`: SDK calls (including `realtime.publish`) and outgoing `fetch`
+  - `span`: SDK calls (including `realtime.publish` and `email.send`) and outgoing `fetch`
   - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
   - All carry `trace`. Traces propagate through queue message attributes and
     event detail.
@@ -399,6 +475,9 @@ writing any instrumentation:
       from AppSync's per-namespace CloudWatch metrics. Deliveries and
       connections are only reported for the whole API, so they aren't shown
       per app.
+    - Email (stages that declare it): sending status, today's recipients
+      against the limit, SES's per-tenant sends, deliveries, bounces and
+      complaints, and the suppression list.
     - Data browser for collections and files.
     - Deployments with rollback; secrets; settings; cost.
 - **Uptime.** One pinger checks every prod app every 5 minutes.
@@ -431,7 +510,8 @@ writing any instrumentation:
     paths, and its own worker;
   - can't create log groups. The engine creates them, so logs still in
     flight when a stage is destroyed can't bring its groups back;
-  - publishes only to its own channel namespace. Browsers never publish.
+  - publishes only to its own channel namespace. Browsers never publish;
+  - sends email only from its own address, through its own SES tenant.
 - Web Functions use `IamAuth` endpoints, and their resource policy trusts only
   the router distribution (`aws:SourceArn`).
 - CI tokens are bound to a repo and a stage (prod only from main).
@@ -448,7 +528,8 @@ The root zone `ericminassian.com` stays in Eric's management account
   the existing scoped delegation role. That zone holds:
   - the console;
   - `edge.platform.ericminassian.com`, an alias to the distribution;
-  - `login.platform.ericminassian.com` for Cognito.
+  - `login.platform.ericminassian.com` for Cognito;
+  - `mail.platform.ericminassian.com`: SES's DKIM, MAIL FROM and DMARC records.
 - The root zone has one static `*` CNAME to `edge.platform.ericminassian.com`,
   plus the ACM validation record for the `*.ericminassian.com` certificate.
 - Explicit records and delegated siblings (orbit, forma, …) beat the wildcard.
@@ -457,17 +538,18 @@ The root zone `ericminassian.com` stays in Eric's management account
 
 ## Cost model
 
-| Item                                                | Monthly                                                                                 |
-| --------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Hosted zone (delegated)                             | $0.50                                                                                   |
-| CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                    |
-| Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                     |
-| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                            |
-| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle     |
-| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                                |
-| Cognito                                             | free ≤ 10k MAU                                                                          |
-| Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50) |
-| Alarms / dashboards / custom metrics                | none per app                                                                            |
+| Item                                                | Monthly                                                                                                                      |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Hosted zone (delegated)                             | $0.50                                                                                                                        |
+| CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                                                         |
+| Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                                                          |
+| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                                                                 |
+| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle                                          |
+| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                                                                     |
+| Cognito                                             | free ≤ 10k MAU                                                                                                               |
+| Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50)                                      |
+| Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
+| Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
 Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
 the account.
@@ -549,6 +631,20 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     Raise "Event APIs - Channel namespaces per API" before apps run into it.
   - 2,000 request tokens per second are shared by every Event API in the
     account and region.
+- **Email, verified 2026-11-15 on throwaway resources.**
+  - One domain identity can be associated with several tenants.
+  - A role pinned to a from address, a tenant and a configuration set could
+    send only with all three; another tenant, another address or no tenant
+    was AccessDenied.
+  - A paused tenant answers `MessageRejected: Sending disabled for <tenant>`.
+  - Tenant metrics carry both `TenantId` and `TenantName` dimensions.
+  - In the SES sandbox SES authorizes each recipient as an identity, so an
+    unverified recipient is AccessDenied on `identity/<address>`; the SDK
+    reports that as `rejected` with the reason.
+  - SES production access was requested the same day and denied within half
+    an hour (a day-old account). Until AWS grants it, apps can only mail
+    verified addresses and the user pool keeps Cognito's sender. See
+    `docs/SETUP.md` step 11.
 - **Custom domains** (non-`ericminassian.com`) need their own certificate.
   The plan is a second, multi-tenant (SaaS Manager) distribution reusing the
   same function and KVS.
@@ -573,4 +669,8 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                                                                    |
 | Realtime on AppSync Events, same-origin through the router                            | Managed WebSocket pub/sub at $0 at rest, with no connection table or fan-out to run. API Gateway WebSocket APIs cost ~5× as much for always-on users and need a connection table and one PostToConnection per subscriber; SSE from Web Functions bills held memory and needs a backplane; IoT Core fits auth and naming poorly. Routing `/__platform/realtime` through the existing router avoids DNS, certificates and CORS. |
 | Browsers subscribe with platform tokens, never publish                                | The session cookie is HttpOnly and AppSync can't see it; exposing Cognito tokens to page JavaScript would let XSS steal sessions. AppSync can't rate-limit a client, so browser publishing could run up the fan-out bill. Channels under `user/<id>` are private to that user; finer access rules belong in the app's API.                                                                                                    |
+| Email on SES with a tenant per stage                                                  | Tenants give each stage its own suppression list, metrics and reputation pause, so one app can't spoil mail for the rest, with nothing for the platform to process: no bounce notifications, no suppression table. The issue's first plan (SNS notifications into a control-plane suppression list) predates tenant-level suppression lists (June 2026).                                                                      |
+| The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                    |
+| One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                   |
+| The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                     |
 | us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |
