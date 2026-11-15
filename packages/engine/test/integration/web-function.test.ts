@@ -59,12 +59,12 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       // AWS creates a function together with its first revision and endpoint.
       const created = await ensureWebFunction(ctx, {
         name: fnName,
-        initial: { revision: await revision(0), endpointName: names.webEndpoint() },
+        initial: { revision: await revision(0), endpointName: names.webEndpoints()[0] },
       });
       expect(created.arn).toContain(':web-function/');
       const again = await ensureWebFunction(ctx, {
         name: fnName,
-        initial: { revision: await revision(0), endpointName: names.webEndpoint() },
+        initial: { revision: await revision(0), endpointName: names.webEndpoints()[0] },
       });
       expect(again).toEqual({ arn: created.arn });
 

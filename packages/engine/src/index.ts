@@ -103,9 +103,9 @@ export interface RollbackStageInput {
   app: string;
   stage: string;
   platform: PlatformRuntimeConfig;
-  /** Route record of the deployment to go back to (its static prefix + endpoint). */
+  /** Route record of the deployment to go back to. The engine picks the endpoint (`o`) itself. */
   route: RouteRecord;
-  /** Web Function revision to route 100% of traffic to. */
+  /** That deployment's Web Function revision. */
   revisionId?: string;
 }
 
@@ -122,7 +122,8 @@ export interface Engine {
   readonly target: 'aws' | 'emulator';
   accountId(): Promise<string>;
   deployStage(input: DeployStageInput): Promise<DeployStageResult>;
-  rollbackStage(input: RollbackStageInput): Promise<void>;
+  /** Returns the route record it wrote. */
+  rollbackStage(input: RollbackStageInput): Promise<RouteRecord>;
   destroyStage(input: DestroyStageInput): Promise<void>;
   /** Everything the engine owns for a stage (found by name + tags). */
   listStageResources(app: string, stage: string): Promise<ResourceRef[]>;

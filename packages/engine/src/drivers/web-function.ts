@@ -29,8 +29,13 @@ import {
 /**
  * Lambda Web Functions (launched 2026-10): a function holds immutable
  * revisions; an endpoint routes traffic to up to two revisions by weight.
- * The engine always routes 100% to the newest revision and keeps the
- * previous one around for instant rollback.
+ *
+ * The engine gives each stage two endpoints and pins each to one revision
+ * (100%). A route record names an endpoint, so the route flip switches
+ * static files and server together at each edge: edges still on the old
+ * route keep reaching the old revision through the other endpoint until
+ * they pick up the new one. That also makes rollback to the previous
+ * deployment a route write only.
  */
 
 export interface RevisionSpec {
@@ -244,31 +249,85 @@ export async function getEndpoint(ctx: EngineContext, functionName: string, endp
   );
 }
 
-/** Route 100% of an existing endpoint to `revisionId` (rollback). */
-export async function setEndpointRevision(
-  ctx: EngineContext,
-  spec: { functionName: string; endpointName: string; revisionId: string },
-): Promise<void> {
-  await ensureEndpoint(ctx, spec);
+const pinnedTo = (
+  e: { revisionWeights?: Array<{ revisionId?: string; weight?: number }> },
+  revisionId: string,
+) =>
+  e.revisionWeights?.length === 1 &&
+  e.revisionWeights[0]?.revisionId === revisionId &&
+  e.revisionWeights[0]?.weight === 100;
+
+export interface RevisionEndpoint {
+  domainName: string;
+  /** Every revision an endpoint routes to afterwards (keep these when pruning). */
+  pinned: string[];
 }
 
 /**
- * Allow only the platform's CloudFront distribution to invoke the endpoint
+ * An endpoint that routes 100% to `revisionId`, never changing the one the
+ * live route uses (`liveDomain`): edges that haven't picked up a new route
+ * keep reaching the revision they had. Reuses an endpoint already pinned to
+ * the revision (a function's first revision, or a rollback to the previous
+ * deployment), else repoints the other endpoint. Then lets the router invoke
+ * every endpoint.
+ */
+export async function endpointForRevision(
+  ctx: EngineContext,
+  spec: {
+    functionName: string;
+    functionArn: string;
+    endpointNames: readonly [string, string];
+    revisionId: string;
+    liveDomain?: string;
+    distributionArn?: string;
+  },
+): Promise<RevisionEndpoint> {
+  const { functionName, revisionId } = spec;
+  const read = () =>
+    Promise.all(
+      spec.endpointNames.map(async (name) => ({ name, e: await getEndpoint(ctx, functionName, name) })),
+    );
+  const before = await read();
+  const reuse = before.find((c) => c.e && pinnedTo(c.e, revisionId))?.name;
+  const live = before.find((c) => c.e?.domainName && c.e.domainName === spec.liveDomain)?.name;
+  const endpointName = reuse ?? spec.endpointNames.find((n) => n !== live)!;
+  const endpoint = await ensureEndpoint(ctx, { functionName, endpointName, revisionId });
+  if (!reuse) {
+    ctx.log('info', `endpoint ${endpointName} → revision ${revisionId}`, `web-function ${functionName}`);
+  }
+
+  const after = (await read()).flatMap((c) => (c.e ? [c.e] : []));
+  if (spec.distributionArn) {
+    await ensureRouterAccess(ctx, {
+      functionArn: spec.functionArn,
+      endpointArns: after.map((e) => e.endpointArn!),
+      distributionArn: spec.distributionArn,
+    });
+  }
+  return {
+    domainName: endpoint.domainName,
+    pinned: after.flatMap((e) => (e.revisionWeights ?? []).map((w) => w.revisionId!)),
+  };
+}
+
+/**
+ * Allow only the platform's CloudFront distribution to invoke the endpoints
  * (OAC signs origin requests). A function has one resource policy, so this
  * is read-modify-write guarded by the policy revision id.
  */
 export async function ensureRouterAccess(
   ctx: EngineContext,
-  spec: { functionArn: string; endpointArn: string; distributionArn: string },
+  spec: { functionArn: string; endpointArns: string[]; distributionArn: string },
 ): Promise<void> {
   const lw = ctx.clients.lambdaWeb;
   const sid = 'AllowPlatformRouter';
+  const arns = [...spec.endpointArns].sort();
   const statement = {
     Sid: sid,
     Effect: 'Allow',
     Principal: { Service: 'cloudfront.amazonaws.com' },
     Action: 'lambda:InvokeWebFunctionEndpoint',
-    Resource: spec.endpointArn,
+    Resource: arns.length === 1 ? arns[0] : arns,
     Condition: { StringEquals: { 'aws:SourceArn': spec.distributionArn } },
   };
   await retry(

@@ -158,7 +158,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Resource     | Name                                                               |
 | ------------ | ------------------------------------------------------------------ |
 | Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com` |
-| Web Function | `todo--prod` (endpoint `live`)                                     |
+| Web Function | `todo--prod` (endpoints `live`, `live-b`)                          |
 | Worker       | `todo--prod--worker`                                               |
 | Table        | `todo--prod`                                                       |
 | Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                    |
@@ -208,8 +208,8 @@ app CI ── plat build ──► server.zip, worker.zip, static.zip, manifest.
                          ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
 control plane ─ worker job "deploy" ─ engine.deployStage():
    role → log groups → table → queues/DLQs → bus/rules → Cognito client → worker Lambda
-   → ESMs/rules targets/schedules → static files → Web Function revision → endpoint weights
-   → resource policy → KVS route (last step)
+   → ESMs/rules targets/schedules → static files → Web Function revision → the endpoint
+   the live route doesn't use → resource policy → KVS route (last step)
 CI polls, streams events, waits until its nearest edge serves the deployment,
 comments the URL on the PR.
 ```
@@ -219,8 +219,15 @@ comments the URL on the PR.
 - `prod` deploys only from `refs/heads/main`; `pr-N` only from that PR. A
   merged PR's `closed` run carries the base branch as its ref, so it may
   destroy previews but never deploy one.
-- A failure before the route flip leaves the live version untouched. Rollback
-  routes traffic to the previous Web Function revision and static prefix.
+- A failure before the route flip leaves the live version untouched.
+- Each stage's Web Function has two endpoints, each pinned to one revision.
+  A deploy puts the new revision on the endpoint the live route doesn't use,
+  and the route names its endpoint, so one route write switches static files
+  and server together at each edge. Edges still on the old route keep getting
+  the old version of both until they pick up the new one.
+- Rollback writes the earlier deployment's route. Its revision is usually
+  still pinned to an endpoint (always for the previous deployment); if not,
+  the endpoint the live route doesn't use is pointed at it first.
 - A deploy never deletes the static files the previous route points at:
   edges that haven't picked up the new route still serve them. Rollback
   refuses a deployment whose files or revision were cleaned up since.
@@ -417,14 +424,21 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
   - `updateRequestOrigin` switches from the default S3 origin to a Web
     Function with OAC, and POST bodies arrive unsigned.
   - The `x-platform-host` cache key keeps two hosts' responses apart.
-  - KVS route changes reach the edge in roughly 5–15 s. The deployer waits
+  - KVS route changes reach the edge in roughly 5–15 s. Later checks the
+    same day, from a client outside AWS, took 30–55 s per change, so waits
+    allow 3 minutes. The deployer waits
     for `/__platform/health` to report the new revision before calling a
     deployment live. Edges elsewhere can still serve the previous version for
-    a few seconds after that, so `plat deploy` then waits until the edge
-    nearest the runner serves the new revision and the built `index.html`.
+    a few seconds after that, so `plat deploy` and `plat rollback` then wait
+    until the edge nearest the machine running them serves it too.
   - Measured on the template app: first deploy ~25 s, redeploy ~14 s,
     rollback ~8 s at the edge. A Web Function cold start took ~0.4 s, peaking
     at 182 MB.
+- **Two endpoints per stage (verified 2026-11-15 on a throwaway stage: three
+  deploys, two rollbacks).** Sampling the API and `index.html` back to back
+  during each switch never showed the new server with the old static files.
+  Creating the second endpoint took ~3 s; rollback to the previous deployment
+  was a 2.5 s route write.
 - **KVS writes from a Web Function.**
   - `PutKey` (SigV4A-signed) failed with "Authentication failed" when called
     from the API's Web Function. The same call works from the worker (an Event

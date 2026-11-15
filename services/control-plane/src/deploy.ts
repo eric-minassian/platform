@@ -1,8 +1,8 @@
 /**
  * The deployer: runs one deployment through the engine and records progress.
  * Runs in the worker (`invoke.deploy`) so it gets the 15-minute timeout; the
- * API only queues it. Rollback is fast (route + revision swap), so the API
- * calls `rollbackStage` inline.
+ * API only queues it. Rollback is fast (usually a route write), so the API
+ * has the worker run `rollbackStage` synchronously.
  */
 import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { log } from '@ericminassian/platform';
@@ -17,7 +17,7 @@ import {
 import { createEngine, type DeployStageInput, type S3Location } from '@ericminassian/platform-engine';
 import { aws } from './aws.ts';
 import { getRuntimeConfig, logRetentionDays } from './config.ts';
-import { waitForEdge } from './edge.ts';
+import { EDGE_TIMEOUT_MS, waitForEdge } from './edge.ts';
 import { appendDeploymentEvents, getDeployment, getStage, updateDeployment, updateStage } from './store.ts';
 
 const now = () => new Date().toISOString();
@@ -154,7 +154,7 @@ export async function runDeployment(id: string): Promise<void> {
           ? { level: 'info', msg: 'edge is serving this deployment' }
           : {
               level: 'warn',
-              msg: 'the edge was not serving this deployment after 90s; it should catch up shortly',
+              msg: `the edge was not serving this deployment after ${EDGE_TIMEOUT_MS / 1000}s; it should catch up shortly`,
             },
       );
     }
@@ -213,7 +213,7 @@ export async function rollback(
 
   const platform = await getRuntimeConfig();
   const engine = createEngine({ region: platform.region });
-  await engine.rollbackStage({
+  const route = await engine.rollbackStage({
     app,
     stage,
     platform,
@@ -226,7 +226,7 @@ export async function rollback(
     previousDeployment: current.currentDeployment,
     currentRevision: target.revisionId,
     previousRevision: current.currentRevision,
-    route: target.route,
+    route,
     previousRoute: current.route,
     ...(target.url ? { url: target.url } : {}),
   });

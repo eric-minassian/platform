@@ -14,6 +14,9 @@ import { CliError, EXIT, info, step } from './util/output.ts';
 
 export const INDEX_PATH = '/index.html';
 
+/** Route changes have taken 5–55 s to reach a given edge (docs/DESIGN.md, "Risks"). */
+export const EDGE_TIMEOUT_MS = 180_000;
+
 /** What this machine can request to tell the new deployment from the previous one. */
 export interface EdgeChecks {
   /** The server reports the deployment id as `revision` at `/__platform/health`. */
@@ -95,7 +98,7 @@ export async function waitForEdge(
 ): Promise<EdgeWaitResult> {
   const doFetch = opts.fetch ?? fetch;
   const start = performance.now();
-  const deadline = start + (opts.timeoutMs ?? 60_000);
+  const deadline = start + (opts.timeoutMs ?? EDGE_TIMEOUT_MS);
   const get = (path: string) =>
     doFetch(new URL(path, url), {
       headers: { 'cache-control': 'no-cache' },
