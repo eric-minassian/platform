@@ -269,6 +269,10 @@ importers:
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
+    devDependencies:
+      effect:
+        specifier: ^4.1.4
+        version: 4.1.4
 
   packages/core:
     dependencies:
