@@ -10,7 +10,7 @@ import {
   ListUserPoolsCommand,
   UpdateUserPoolClientCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { AUTH_SCOPES } from '@eric-minassian/platform-core';
+import { AUTH_SCOPES } from '@ericminassian/platform-core';
 import { type EngineContext, errorName, ignoreNotFound, isNotImplemented, retry } from '../util.ts';
 
 /** Shared user pool for app end users: email sign-in, self sign-up, Essentials tier (managed login). */

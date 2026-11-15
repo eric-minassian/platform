@@ -1,4 +1,4 @@
-import type { AppSummary } from '@eric-minassian/platform-core';
+import type { AppSummary } from '@ericminassian/platform-core';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router';
 import { api } from '../api.ts';

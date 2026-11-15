@@ -9,7 +9,7 @@ import {
   StartLiveTailCommand,
   StartQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { type LogLine, type LogsResponse, names, type TelemetryEvent } from '@eric-minassian/platform-core';
+import { type LogLine, type LogsResponse, names, type TelemetryEvent } from '@ericminassian/platform-core';
 import { aws } from './aws.ts';
 import { getRuntimeConfig } from './config.ts';
 import { parseLogMessage } from './telemetry/aggregate.ts';

@@ -1,8 +1,8 @@
 /** Observability endpoints: metrics, routes, jobs, queues, errors, uptime, cost, logs, traces. */
 
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { JobStats, TraceResponse } from '@eric-minassian/platform-core';
-import { telemetryKeys } from '@eric-minassian/platform-core';
+import type { JobStats, TraceResponse } from '@ericminassian/platform-core';
+import { telemetryKeys } from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AuthEnv } from '../auth.ts';

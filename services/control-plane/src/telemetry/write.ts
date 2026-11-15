@@ -4,7 +4,7 @@
  */
 import { PublishCommand } from '@aws-sdk/client-sns';
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import { log } from '@eric-minassian/platform';
+import { log } from '@ericminassian/platform';
 import { aws } from '../aws.ts';
 import { consoleUrl, getGithubApp, getRuntimeConfig } from '../config.ts';
 import { openIssue } from '../github.ts';

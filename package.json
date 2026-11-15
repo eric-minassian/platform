@@ -14,13 +14,13 @@
     "format": "biome check --write .",
     "build": "pnpm -r build",
     "plat": "node packages/cli/src/bin.ts",
-    "platform:deploy": "pnpm --filter @eric-minassian/platform-foundation deploy:platform"
+    "platform:deploy": "pnpm --filter @ericminassian/platform-foundation deploy:platform"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.6.7",
     "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0",
-    "@eric-minassian/platform-core": "workspace:*"
+    "@ericminassian/platform-core": "workspace:*"
   }
 }

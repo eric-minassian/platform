@@ -24,7 +24,7 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { BINDINGS_ENV, type Bindings, encodeBindings } from '@eric-minassian/platform-core';
+import { BINDINGS_ENV, type Bindings, encodeBindings } from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setBindings } from '../../src/bindings.ts';

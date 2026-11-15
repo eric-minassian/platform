@@ -1,4 +1,4 @@
-import { auth, db, events, metrics, app as platform, queue } from '@eric-minassian/platform';
+import { auth, db, events, metrics, app as platform, queue } from '@ericminassian/platform';
 import { Hono } from 'hono';
 import { validator } from 'hono/validator';
 import { z } from 'zod';

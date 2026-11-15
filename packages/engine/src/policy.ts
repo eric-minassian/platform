@@ -4,7 +4,7 @@ import {
   type PlatformRuntimeConfig,
   platformNames,
   type ResolvedManifest,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { type PolicyDocument, type PolicyStatement, policy } from './util.ts';
 
 export interface StagePolicyInput {

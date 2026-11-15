@@ -21,7 +21,7 @@ import {
   SetQueueAttributesCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
-import { names, type ResolvedManifest } from '@eric-minassian/platform-core';
+import { names, type ResolvedManifest } from '@ericminassian/platform-core';
 import { SDK_WORKER } from '../build.ts';
 import { resolveFromApp } from '../project.ts';
 import { freePort, waitForPort } from '../util/net.ts';

@@ -1,5 +1,5 @@
 /** Data browser, storage, secrets, and job controls (run cron, redrive DLQ). */
-import { ENV_NAME_PATTERN } from '@eric-minassian/platform-core';
+import { ENV_NAME_PATTERN } from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import type { AuthEnv } from '../auth.ts';
 import { listCollections, listItems, listStorage, storageDownloadUrl } from '../data.ts';

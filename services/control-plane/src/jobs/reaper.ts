@@ -1,7 +1,7 @@
 /** Daily: destroys preview stages nobody has deployed to for `previewTtlDays`. */
-import { log } from '@eric-minassian/platform';
-import { invokeJob } from '@eric-minassian/platform/worker';
-import { isPreviewStage } from '@eric-minassian/platform-core';
+import { log } from '@ericminassian/platform';
+import { invokeJob } from '@ericminassian/platform/worker';
+import { isPreviewStage } from '@ericminassian/platform-core';
 import { config } from '../config.ts';
 import { listAllStages, type StageItem, updateStage } from '../store.ts';
 

@@ -1,12 +1,12 @@
 /**
  * Test helpers for apps and the SDK itself.
  *
- *   import { useTestBindings, captureTelemetry } from '@eric-minassian/platform/testing';
+ *   import { useTestBindings, captureTelemetry } from '@ericminassian/platform/testing';
  *
  * For tests against real (emulated) resources use `plat test`, which starts
  * the AWS Emulator, provisions the app and sets PLATFORM_BINDINGS for vitest.
  */
-import type { Bindings, TelemetryEvent } from '@eric-minassian/platform-core';
+import type { Bindings, TelemetryEvent } from '@ericminassian/platform-core';
 import { setBindings } from './bindings.ts';
 import { resetClients, type SendClient, setClient } from './clients.ts';
 import { clearSecretsCache } from './secrets.ts';

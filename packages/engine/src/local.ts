@@ -1,4 +1,4 @@
-import { type PlatformRuntimeConfig, platformNames } from '@eric-minassian/platform-core';
+import { type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
 import { ensureUserPool } from './drivers/cognito.ts';
 import { ensureTable } from './drivers/dynamodb.ts';
 import { ensureBucket } from './drivers/s3.ts';

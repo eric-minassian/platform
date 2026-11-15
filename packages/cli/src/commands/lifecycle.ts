@@ -1,5 +1,5 @@
 import { relative } from 'node:path';
-import { PLATFORM_DEFAULTS } from '@eric-minassian/platform-core';
+import { PLATFORM_DEFAULTS } from '@ericminassian/platform-core';
 import { type Command, Option } from 'commander';
 import pc from 'picocolors';
 import { initApp } from '../init.ts';

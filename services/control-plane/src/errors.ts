@@ -1,4 +1,4 @@
-import type { ApiErrorBody } from '@eric-minassian/platform-core';
+import type { ApiErrorBody } from '@ericminassian/platform-core';
 
 /** Thrown anywhere in a request; rendered as `ApiErrorBody` by the server's error handler. */
 export class ApiError extends Error {

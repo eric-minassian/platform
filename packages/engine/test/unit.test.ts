@@ -1,4 +1,4 @@
-import { type PlatformRuntimeConfig, parseManifest } from '@eric-minassian/platform-core';
+import { type PlatformRuntimeConfig, parseManifest } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { fixTimestamps } from '../src/compat.ts';
 import { deepMerge, routerCachePolicy } from '../src/drivers/cloudfront.ts';

@@ -1,5 +1,5 @@
-import { log, metrics } from '@eric-minassian/platform';
-import { defineWorker, type PlatformEvent, type QueueMessage } from '@eric-minassian/platform/worker';
+import { log, metrics } from '@ericminassian/platform';
+import { defineWorker, type PlatformEvent, type QueueMessage } from '@ericminassian/platform/worker';
 import type { EmailJob, TodoCreated } from './types.ts';
 
 // Every key here must match platform.json: `queues`, `events` and `crons`.

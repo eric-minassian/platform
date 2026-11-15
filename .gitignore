@@ -6,3 +6,5 @@ coverage/
 .env
 .env.local
 .DS_Store
+# copied from templates/app by the CLI build (scripts/copy-template.ts)
+packages/cli/template/

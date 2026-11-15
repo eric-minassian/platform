@@ -1,7 +1,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
-import { findEmulatorBinary } from '@eric-minassian/platform-engine';
+import { findEmulatorBinary } from '@ericminassian/platform-engine';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnWebServer } from '../src/dev/index.ts';
 import { emulatorClientConfig, type LocalStage, startLocalStage } from '../src/dev/local-stage.ts';

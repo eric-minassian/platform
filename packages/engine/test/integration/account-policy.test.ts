@@ -1,4 +1,4 @@
-import { TELEMETRY_FILTER_PATTERN } from '@eric-minassian/platform-core';
+import { TELEMETRY_FILTER_PATTERN } from '@ericminassian/platform-core';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureRole } from '../../src/drivers/iam.ts';

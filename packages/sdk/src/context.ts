@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { newSpanId, newTraceId, type PlatformUser } from '@eric-minassian/platform-core';
+import { newSpanId, newTraceId, type PlatformUser } from '@ericminassian/platform-core';
 
 /** Per-request / per-job context carried through async calls. */
 export interface RequestContext {

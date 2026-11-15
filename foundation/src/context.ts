@@ -1,5 +1,5 @@
-import type { PlatformConfig, PlatformRuntimeConfig } from '@eric-minassian/platform-core';
-import type { Engine, EngineContext } from '@eric-minassian/platform-engine';
+import type { PlatformConfig, PlatformRuntimeConfig } from '@ericminassian/platform-core';
+import type { Engine, EngineContext } from '@ericminassian/platform-engine';
 
 /** Values produced by earlier steps and consumed by later ones. */
 export interface FoundationState {

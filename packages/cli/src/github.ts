@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, readFileSync } from 'node:fs';
-import { PROD_STAGE, previewStage, validateStageName } from '@eric-minassian/platform-core';
+import { PROD_STAGE, previewStage, validateStageName } from '@ericminassian/platform-core';
 import { CliError, EXIT } from './util/output.ts';
 
 /** GitHub Actions environment, read from `process.env` (injectable for tests). */

@@ -1,5 +1,5 @@
 {
-  "name": "@eric-minassian/platform",
+  "name": "@ericminassian/platform",
   "version": "0.1.0",
   "description": "Runtime SDK for apps on the platform: db, queues, events, storage, secrets, auth, metrics.",
   "type": "module",
@@ -44,7 +44,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "prepack": "pnpm run build"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
@@ -56,11 +57,11 @@
     "@aws-sdk/client-ssm": "^3.1169.0",
     "@aws-sdk/lib-dynamodb": "^3.1169.0",
     "@aws-sdk/s3-request-presigner": "^3.1169.0",
-    "@eric-minassian/platform-core": "workspace:*",
+    "@ericminassian/platform-core": "workspace:*",
     "jose": "^6.2.17"
   },
   "devDependencies": {
-    "@eric-minassian/platform-engine": "workspace:*",
+    "@ericminassian/platform-engine": "workspace:*",
     "@types/aws-lambda": "^8.10.164",
     "hono": "^4.13.18"
   }

@@ -6,7 +6,7 @@
  */
 import { GetCostAndUsageCommand, type ResultByTime } from '@aws-sdk/client-cost-explorer';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { TAGS } from '@eric-minassian/platform-core';
+import { TAGS } from '@ericminassian/platform-core';
 import { aws } from '../aws.ts';
 import { getRuntimeConfig } from '../config.ts';
 import { costKey } from '../telemetry/query.ts';

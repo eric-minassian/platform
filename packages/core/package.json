@@ -1,5 +1,5 @@
 {
-  "name": "@eric-minassian/platform-core",
+  "name": "@ericminassian/platform-core",
   "version": "0.1.0",
   "description": "Shared contracts for the platform: naming, manifest schema, bindings, telemetry, routing.",
   "type": "module",
@@ -34,10 +34,11 @@
     "platform.schema.json"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && cp src/router/decide.js src/router/decide.d.ts dist/router/",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/router && cp src/router/decide.js src/router/decide.d.ts dist/router/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "schema": "node scripts/schema.ts"
+    "schema": "node scripts/schema.ts",
+    "prepack": "pnpm run build"
   },
   "dependencies": {
     "zod": "^4.6.7"

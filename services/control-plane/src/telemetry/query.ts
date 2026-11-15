@@ -18,7 +18,7 @@ import {
   type RouteStats,
   telemetryKeys,
   type UptimePoint,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { aws } from '../aws.ts';
 import { getRuntimeConfig } from '../config.ts';
 

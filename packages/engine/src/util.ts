@@ -1,4 +1,4 @@
-import { TAGS } from '@eric-minassian/platform-core';
+import { TAGS } from '@ericminassian/platform-core';
 import type { AwsClients } from './clients.ts';
 
 export type EngineLog = (level: 'info' | 'warn' | 'error', msg: string, resource?: string) => void;

@@ -1,4 +1,4 @@
-import { type AppRecord, definePlatformConfig, type PlatformConfig } from '@eric-minassian/platform-core';
+import { type AppRecord, definePlatformConfig, type PlatformConfig } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import {
   actorOf,

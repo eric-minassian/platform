@@ -5,7 +5,7 @@ import {
   PROD_STAGE,
   stageHost,
   validateAppName,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import type { AuthEnv } from '../auth.ts';
 import { requireMember } from '../auth.ts';

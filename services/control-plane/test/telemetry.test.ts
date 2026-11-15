@@ -1,4 +1,4 @@
-import type { TelemetryEvent } from '@eric-minassian/platform-core';
+import type { TelemetryEvent } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { aggregate, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
 import {

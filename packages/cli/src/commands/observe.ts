@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { LogLine, TelemetryEvent } from '@eric-minassian/platform-core';
+import type { LogLine, TelemetryEvent } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { formatEvent } from '../dev/pretty.ts';

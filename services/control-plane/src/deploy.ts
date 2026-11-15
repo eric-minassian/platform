@@ -5,15 +5,15 @@
  * calls `rollbackStage` inline.
  */
 import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
-import { log } from '@eric-minassian/platform';
+import { log } from '@ericminassian/platform';
 import {
   type ArtifactFile,
   type DeploymentEventEntry,
   names,
   type PlatformRuntimeConfig,
   parseManifest,
-} from '@eric-minassian/platform-core';
-import { createEngine, type DeployStageInput, type S3Location } from '@eric-minassian/platform-engine';
+} from '@ericminassian/platform-core';
+import { createEngine, type DeployStageInput, type S3Location } from '@ericminassian/platform-engine';
 import { aws } from './aws.ts';
 import { getRuntimeConfig, logRetentionDays } from './config.ts';
 import { waitForEdge } from './edge.ts';

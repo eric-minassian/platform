@@ -1,4 +1,4 @@
-import { BINDINGS_ENV, type Bindings, decodeBindings } from '@eric-minassian/platform-core';
+import { BINDINGS_ENV, type Bindings, decodeBindings } from '@ericminassian/platform-core';
 
 let cached: Bindings | undefined;
 

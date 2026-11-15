@@ -10,7 +10,7 @@ import {
   type PlatformConfig,
   PROD_STAGE,
   validateStageName,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 
 export interface MemberPrincipal {
   kind: 'member';

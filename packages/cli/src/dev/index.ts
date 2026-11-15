@@ -1,8 +1,8 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import type { Server } from 'node:http';
 import { resolve } from 'node:path';
-import { LOCAL_STAGE, type ResolvedManifest } from '@eric-minassian/platform-core';
-import { EMULATOR_INSTALL_HINT } from '@eric-minassian/platform-engine';
+import { LOCAL_STAGE, type ResolvedManifest } from '@ericminassian/platform-core';
+import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import pc from 'picocolors';
 import { SDK_SERVER, withLocalBin } from '../build.ts';
 import { loadProject, resolveFromApp } from '../project.ts';

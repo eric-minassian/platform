@@ -8,7 +8,7 @@
 import { GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { type DataPage, names } from '@eric-minassian/platform-core';
+import { type DataPage, names } from '@ericminassian/platform-core';
 import { aws } from './aws.ts';
 import { getRuntimeConfig } from './config.ts';
 

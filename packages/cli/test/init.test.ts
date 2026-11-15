@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseManifest } from '@eric-minassian/platform-core';
+import { parseManifest } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { initApp, replaceAppName, rewritePackageJson, TEMPLATE_APP_NAME, templateDir } from '../src/init.ts';
 import { cliVersion } from '../src/project.ts';
@@ -17,8 +17,8 @@ describe('plat init', () => {
 
     const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
     expect(pkg.name).toBe('my-notes');
-    expect(pkg.dependencies['@eric-minassian/platform']).toBe(`^${cliVersion()}`);
-    expect(pkg.devDependencies['@eric-minassian/plat']).toBe(`^${cliVersion()}`);
+    expect(pkg.dependencies['@ericminassian/platform']).toBe(`^${cliVersion()}`);
+    expect(pkg.devDependencies['@ericminassian/plat']).toBe(`^${cliVersion()}`);
     expect(pkg.packageManager).toMatch(/^pnpm@/);
     expect(JSON.stringify(pkg)).not.toContain('workspace:');
 

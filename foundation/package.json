@@ -1,5 +1,5 @@
 {
-  "name": "@eric-minassian/platform-foundation",
+  "name": "@ericminassian/platform-foundation",
   "version": "0.1.0",
   "private": true,
   "description": "The platform's own shared resources, applied by the engine (router, buckets, tables, Cognito, IAM).",
@@ -11,10 +11,10 @@
     "plan": "node src/deploy.ts --plan"
   },
   "dependencies": {
-    "@eric-minassian/platform-core": "workspace:*",
-    "@eric-minassian/platform-engine": "workspace:*",
-    "@eric-minassian/plat": "workspace:*",
-    "@eric-minassian/platform-control-plane": "workspace:*",
+    "@ericminassian/platform-core": "workspace:*",
+    "@ericminassian/platform-engine": "workspace:*",
+    "@ericminassian/plat": "workspace:*",
+    "@ericminassian/platform-control-plane": "workspace:*",
     "@aws-sdk/lib-dynamodb": "^3.1169.0"
   }
 }

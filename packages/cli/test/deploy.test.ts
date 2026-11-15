@@ -1,4 +1,4 @@
-import type { DeploymentRecord } from '@eric-minassian/platform-core';
+import type { DeploymentRecord } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 import { ApiClient, ApiError } from '../src/api.ts';
 import { presignedPostForm, waitForDeployment } from '../src/deploy.ts';

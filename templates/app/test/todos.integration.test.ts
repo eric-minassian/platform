@@ -1,5 +1,5 @@
-import { db } from '@eric-minassian/platform';
-import { createPlatformFetch } from '@eric-minassian/platform/server';
+import { db } from '@ericminassian/platform';
+import { createPlatformFetch } from '@ericminassian/platform/server';
 import { describe, expect, it } from 'vitest';
 import app from '../src/server.ts';
 import type { Todo } from '../src/types.ts';

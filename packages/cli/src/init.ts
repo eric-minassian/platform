@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
-import { validateAppName } from '@eric-minassian/platform-core';
+import { validateAppName } from '@ericminassian/platform-core';
 import { cliPackageRoot, cliVersion } from './project.ts';
 import { CliError, EXIT } from './util/output.ts';
 

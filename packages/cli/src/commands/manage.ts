@@ -1,4 +1,4 @@
-import { ENV_NAME_PATTERN, PROD_STAGE } from '@eric-minassian/platform-core';
+import { ENV_NAME_PATTERN, PROD_STAGE } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { CliError, EXIT, result, table } from '../util/output.ts';

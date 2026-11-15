@@ -1,4 +1,4 @@
-import type { LogLine } from '@eric-minassian/platform-core';
+import type { LogLine } from '@ericminassian/platform-core';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';

@@ -3,7 +3,7 @@
  * layout lives in records.ts, which the foundation also uses.
  */
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { AppRecord, DeploymentEventEntry, DeploymentRecord } from '@eric-minassian/platform-core';
+import type { AppRecord, DeploymentEventEntry, DeploymentRecord } from '@ericminassian/platform-core';
 import { aws } from './aws.ts';
 import { getRuntimeConfig } from './config.ts';
 import {

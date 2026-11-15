@@ -2,7 +2,7 @@
 import { GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { InvokeCommand } from '@aws-sdk/client-lambda';
 import { GetQueueAttributesCommand, StartMessageMoveTaskCommand } from '@aws-sdk/client-sqs';
-import { names, type QueueStats } from '@eric-minassian/platform-core';
+import { names, type QueueStats } from '@ericminassian/platform-core';
 import { aws } from '../aws.ts';
 import { getRuntimeConfig } from '../config.ts';
 

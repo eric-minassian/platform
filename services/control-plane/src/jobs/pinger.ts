@@ -5,7 +5,7 @@
  */
 import { PublishCommand } from '@aws-sdk/client-sns';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { HEALTH_PATH, PROD_STAGE, telemetryKeys } from '@eric-minassian/platform-core';
+import { HEALTH_PATH, PROD_STAGE, telemetryKeys } from '@ericminassian/platform-core';
 import { aws } from '../aws.ts';
 import { consoleUrl, getRuntimeConfig } from '../config.ts';
 import { listAllStages, type StageItem, updateStage } from '../store.ts';

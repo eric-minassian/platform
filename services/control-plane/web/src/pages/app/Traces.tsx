@@ -1,4 +1,4 @@
-import type { TelemetryEvent } from '@eric-minassian/platform-core';
+import type { TelemetryEvent } from '@ericminassian/platform-core';
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';

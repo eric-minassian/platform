@@ -2,8 +2,8 @@
  * Control plane worker: the deployer, stage destroyer, scheduled jobs, and the
  * telemetry processor (target of the account-level log subscription).
  */
-import { log } from '@eric-minassian/platform';
-import { defineWorker } from '@eric-minassian/platform/worker';
+import { log } from '@ericminassian/platform';
+import { defineWorker } from '@ericminassian/platform/worker';
 import { rollback, runDeployment, runDestroy } from './deploy.ts';
 import { runCostCollector } from './jobs/cost.ts';
 import { runPinger } from './jobs/pinger.ts';

@@ -4,7 +4,7 @@
  * public URL actually serves it, so `plat deploy` (and CI) never hand back a
  * URL that still shows the previous version or a 404.
  */
-import { HEALTH_PATH } from '@eric-minassian/platform-core';
+import { HEALTH_PATH } from '@ericminassian/platform-core';
 
 export async function waitForEdge(
   url: string,

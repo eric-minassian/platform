@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { EMULATOR_INSTALL_HINT } from '@eric-minassian/platform-engine';
+import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import { withLocalBin } from '../build.ts';
 import { loadProject } from '../project.ts';
 import { CliError, step, success } from '../util/output.ts';

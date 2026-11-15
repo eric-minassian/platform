@@ -1,5 +1,5 @@
 /**
- * @eric-minassian/platform-engine — provisions and deploys platform stages
+ * @ericminassian/platform-engine — provisions and deploys platform stages
  * with direct AWS SDK calls. No CloudFormation, no state file: resources have
  * deterministic names (`names` in core) and `platform:*` tags, so the engine
  * can always rediscover what it owns. Every driver is idempotent ("ensure").
@@ -19,7 +19,7 @@ import type {
   PlatformRuntimeConfig,
   ResolvedManifest,
   RouteRecord,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { createClients } from './clients.ts';
 import { putObject } from './drivers/s3.ts';
 import { ensureLocal } from './local.ts';

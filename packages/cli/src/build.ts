@@ -1,14 +1,14 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
-import type { ArtifactFile, ResolvedManifest } from '@eric-minassian/platform-core';
+import type { ArtifactFile, ResolvedManifest } from '@ericminassian/platform-core';
 import { build as esbuild, type Plugin } from 'esbuild';
 import { cliVersion, loadProject } from './project.ts';
 import { CliError, EXIT, step } from './util/output.ts';
 import { dirExists, zipDirectory } from './util/zip.ts';
 
-export const SDK_SERVER = '@eric-minassian/platform/server';
-export const SDK_WORKER = '@eric-minassian/platform/worker';
+export const SDK_SERVER = '@ericminassian/platform/server';
+export const SDK_WORKER = '@ericminassian/platform/worker';
 
 export interface BuildOptions {
   cwd: string;

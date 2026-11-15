@@ -1,4 +1,4 @@
-import type { ErrorGroup } from '@eric-minassian/platform-core';
+import type { ErrorGroup } from '@ericminassian/platform-core';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useSearchParams } from 'react-router';
 import { api } from '../../api.ts';

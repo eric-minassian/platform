@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import type { AuthBindings, PlatformUser } from '@eric-minassian/platform-core';
+import type { AuthBindings, PlatformUser } from '@ericminassian/platform-core';
 import { createRemoteJWKSet, type JWTPayload, errors as joseErrors, jwtVerify } from 'jose';
 import { client } from '../clients.ts';
 

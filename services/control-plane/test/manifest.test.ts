@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { parseManifest, validateAppName } from '@eric-minassian/platform-core';
+import { parseManifest, validateAppName } from '@ericminassian/platform-core';
 import { describe, expect, it } from 'vitest';
 
 const raw = JSON.parse(readFileSync(new URL('../platform.json', import.meta.url), 'utf8')) as {

@@ -1,4 +1,4 @@
-import { startEmulator } from '@eric-minassian/platform-engine';
+import { startEmulator } from '@ericminassian/platform-engine';
 
 /**
  * Starts one AWS Emulator for the run and exports its connection into

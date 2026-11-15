@@ -1,5 +1,5 @@
-import type { AppRecord, ResolvedManifest } from '@eric-minassian/platform-core';
-import { PROD_STAGE, validateStageName } from '@eric-minassian/platform-core';
+import type { AppRecord, ResolvedManifest } from '@ericminassian/platform-core';
+import { PROD_STAGE, validateStageName } from '@ericminassian/platform-core';
 import type { Context } from 'hono';
 import type { AuthEnv } from '../auth.ts';
 import { canAccessApp, checkStageAccess, type MemberPrincipal } from '../authz.ts';

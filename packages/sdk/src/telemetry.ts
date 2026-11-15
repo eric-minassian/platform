@@ -5,7 +5,7 @@ import {
   newSpanId,
   type TelemetryEvent,
   type TelemetryKind,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { tryBindings } from './bindings.ts';
 import { currentContext } from './context.ts';
 

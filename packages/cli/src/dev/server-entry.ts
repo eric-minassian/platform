@@ -5,7 +5,7 @@
 import { pathToFileURL } from 'node:url';
 
 const entry = process.env.PLATFORM_ENTRY;
-const sdkServer = process.env.PLATFORM_SDK_SERVER ?? '@eric-minassian/platform/server';
+const sdkServer = process.env.PLATFORM_SDK_SERVER ?? '@ericminassian/platform/server';
 if (!entry) {
   console.error('PLATFORM_ENTRY is not set (this file is started by `plat dev`)');
   process.exit(1);
@@ -17,5 +17,5 @@ if (!mod.default) {
   process.exit(1);
 }
 const sdkUrl = sdkServer.startsWith('/') ? pathToFileURL(sdkServer).href : sdkServer;
-const { startServer } = (await import(sdkUrl)) as typeof import('@eric-minassian/platform/server');
+const { startServer } = (await import(sdkUrl)) as typeof import('@ericminassian/platform/server');
 await startServer(mod.default as Parameters<typeof startServer>[0]);

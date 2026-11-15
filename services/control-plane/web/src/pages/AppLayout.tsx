@@ -1,4 +1,4 @@
-import type { AppSummary } from '@eric-minassian/platform-core';
+import type { AppSummary } from '@ericminassian/platform-core';
 import { useQuery } from '@tanstack/react-query';
 import { NavLink, Outlet, useOutletContext, useParams, useSearchParams } from 'react-router';
 import { api, type Scope } from '../api.ts';

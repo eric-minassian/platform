@@ -10,7 +10,7 @@ import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 
 const entry = process.env.PLATFORM_WORKER_ENTRY;
-const sdkWorker = process.env.PLATFORM_SDK_WORKER ?? '@eric-minassian/platform/worker';
+const sdkWorker = process.env.PLATFORM_SDK_WORKER ?? '@ericminassian/platform/worker';
 const port = Number(process.env.PLATFORM_WORKER_PORT);
 const timeoutMs = Number(process.env.PLATFORM_WORKER_TIMEOUT_MS ?? 60_000);
 const functionName = process.env.PLATFORM_WORKER_FUNCTION ?? 'local-worker';
@@ -27,7 +27,7 @@ if (!mod.default) {
   process.exit(1);
 }
 const sdkUrl = sdkWorker.startsWith('/') ? pathToFileURL(sdkWorker).href : sdkWorker;
-const { createWorkerHandler } = (await import(sdkUrl)) as typeof import('@eric-minassian/platform/worker');
+const { createWorkerHandler } = (await import(sdkUrl)) as typeof import('@ericminassian/platform/worker');
 const handler = createWorkerHandler(mod.default as Parameters<typeof createWorkerHandler>[0]);
 
 createServer((req, res) => {
