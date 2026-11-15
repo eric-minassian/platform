@@ -1,5 +1,5 @@
 /**
- * @eric-minassian/platform — the only thing app code imports. Cloud-neutral
+ * @ericminassian/platform — the only thing app code imports. Cloud-neutral
  * interfaces backed by AWS (DynamoDB, SQS, EventBridge, S3, SSM, Cognito)
  * through bindings the engine injects. Under `plat dev` the same code talks to
  * the AWS Emulator, so there is exactly one implementation.
@@ -7,7 +7,7 @@
  * CONTRACT: these exports are documented in templates/app/AGENTS.md and used
  * by every app. Keep signatures stable.
  */
-export type { PlatformUser } from '@eric-minassian/platform-core';
+export type { PlatformUser } from '@ericminassian/platform-core';
 export { type AppInfo, app } from './app.ts';
 export { type Auth, auth } from './auth/index.ts';
 export { setRoute } from './context.ts';

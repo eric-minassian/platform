@@ -161,12 +161,17 @@ the container and set `PLAT_EMULATOR_ENDPOINT` + `PLAT_EMULATOR_HOME`.
 
 ## 10. npm packages
 
-The four public packages are `@eric-minassian/platform-core`,
-`@eric-minassian/platform`, `@eric-minassian/platform-engine` and
-`@eric-minassian/plat`. npm trusted publishing can only be configured on a
-package that already exists, so:
+The four public packages are `@ericminassian/platform-core`,
+`@ericminassian/platform`, `@ericminassian/platform-engine` and
+`@ericminassian/plat`. The scope is the npm username (`ericminassian`, no
+hyphen), so there is no npm organization to create. Each package builds
+itself on pack (`prepack`), since `publishConfig` points at `dist/`.
 
-1. Publish once by hand: `npm login`, then `pnpm -r --filter './packages/*' publish --access public`.
+npm trusted publishing can only be configured on a package that already
+exists, so:
+
+1. Publish once by hand from an up-to-date `main`: `npm login`, then
+   `pnpm -r --filter './packages/*' publish --access public`.
 2. On npmjs.com, add a trusted publisher to each package: GitHub Actions,
    repository `eric-minassian/platform`, workflow `release.yml`.
 3. Later releases go through the `release` workflow with no tokens.

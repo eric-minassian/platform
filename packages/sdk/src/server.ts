@@ -2,7 +2,7 @@
  * Web Function entry wrapper. `plat build` generates:
  *
  *   import handler from '<app>/src/server.ts';
- *   import { startServer } from '@eric-minassian/platform/server';
+ *   import { startServer } from '@ericminassian/platform/server';
  *   startServer(handler);
  *
  * and bundles it to `index.mjs`. startServer listens on
@@ -19,7 +19,7 @@ import {
   HOST_HEADER,
   PLATFORM_PATH_PREFIX,
   TRACE_HEADER,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
 import { currentContext, newContext, parseTraceparent, runWithContext } from './context.ts';

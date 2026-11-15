@@ -7,7 +7,7 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 ## Golden rules
 
 1. **No infrastructure code and no AWS SDK in this repo.** Declare what you need in `platform.json`; use it
-   through `@eric-minassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
+   through `@ericminassian/platform`. No CDK, CloudFormation, Terraform or `@aws-sdk/*` imports.
 2. **Every name in `platform.json` must match code.** Each queue, event and cron needs a handler in
    `src/worker.ts`, and every handler needs a `platform.json` entry.
 3. **Never commit secrets.** Use `plat secrets set NAME` for deployed stages and `.env.local` (git-ignored)
@@ -31,11 +31,11 @@ Requests for `/api/*` and `/__platform/*` go to the server; files go to `web/dis
 serves `index.html`, which is how client-side routing works. Change the server prefixes with
 `web.serverRoutes` (default `["/api/"]`).
 
-## SDK reference (`@eric-minassian/platform`)
+## SDK reference (`@ericminassian/platform`)
 
 ```ts
-import { app, auth, db, events, log, metrics, queue, secrets, storage } from '@eric-minassian/platform';
-import { defineWorker, invokeJob } from '@eric-minassian/platform/worker';
+import { app, auth, db, events, log, metrics, queue, secrets, storage } from '@ericminassian/platform';
+import { defineWorker, invokeJob } from '@ericminassian/platform/worker';
 ```
 
 | Export                      | Example                                                                                                     |

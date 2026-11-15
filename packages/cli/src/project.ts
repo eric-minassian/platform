@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ManifestError, parseManifest, type ResolvedManifest } from '@eric-minassian/platform-core';
+import { ManifestError, parseManifest, type ResolvedManifest } from '@ericminassian/platform-core';
 import { CliError, EXIT } from './util/output.ts';
 
 export const MANIFEST_FILE = 'platform.json';

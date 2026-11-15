@@ -4,7 +4,7 @@ import {
   GetKeyCommand,
   PutKeyCommand,
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
-import { encodeRouteRecord, type RouteRecord } from '@eric-minassian/platform-core';
+import { encodeRouteRecord, type RouteRecord } from '@ericminassian/platform-core';
 import { type EngineContext, errorName, ignoreNotFound, retry } from '../util.ts';
 
 /**

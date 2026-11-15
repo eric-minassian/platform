@@ -7,7 +7,7 @@ import type {
   DeploymentStatus,
   ManifestInput,
   PresignedPost,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import pc from 'picocolors';
 import type { ApiClient } from './api.ts';
 import { buildApp } from './build.ts';

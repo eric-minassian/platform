@@ -169,7 +169,7 @@ importers:
       '@biomejs/biome':
         specifier: ^2.6.7
         version: 2.6.7
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:packages/core
       '@types/node':
@@ -187,16 +187,16 @@ importers:
       '@aws-sdk/lib-dynamodb':
         specifier: ^3.1169.0
         version: 3.1169.0(@aws-sdk/client-dynamodb@3.1169.0)
-      '@eric-minassian/plat':
+      '@ericminassian/plat':
         specifier: workspace:*
         version: link:../packages/cli
-      '@eric-minassian/platform-control-plane':
+      '@ericminassian/platform-control-plane':
         specifier: workspace:*
         version: link:../services/control-plane
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../packages/core
-      '@eric-minassian/platform-engine':
+      '@ericminassian/platform-engine':
         specifier: workspace:*
         version: link:../packages/engine
 
@@ -223,13 +223,13 @@ importers:
       '@aws-sdk/client-ssm':
         specifier: ^3.1169.0
         version: 3.1169.0
-      '@eric-minassian/platform':
+      '@ericminassian/platform':
         specifier: workspace:*
         version: link:../sdk
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../core
-      '@eric-minassian/platform-engine':
+      '@ericminassian/platform-engine':
         specifier: workspace:*
         version: link:../engine
       commander:
@@ -316,7 +316,7 @@ importers:
       '@aws-sdk/signature-v4a':
         specifier: ^3.1138.0
         version: 3.1138.0
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../core
       '@smithy/node-http-handler':
@@ -355,14 +355,14 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1169.0
         version: 3.1169.0
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../core
       jose:
         specifier: ^6.2.17
         version: 6.2.17
     devDependencies:
-      '@eric-minassian/platform-engine':
+      '@ericminassian/platform-engine':
         specifier: workspace:*
         version: link:../engine
       '@types/aws-lambda':
@@ -422,13 +422,13 @@ importers:
       '@aws/durable-execution-sdk-js':
         specifier: ^3.0.0
         version: 3.0.0
-      '@eric-minassian/platform':
+      '@ericminassian/platform':
         specifier: workspace:*
         version: link:../../packages/sdk
-      '@eric-minassian/platform-core':
+      '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@eric-minassian/platform-engine':
+      '@ericminassian/platform-engine':
         specifier: workspace:*
         version: link:../../packages/engine
       '@hono/node-server':
@@ -444,7 +444,7 @@ importers:
         specifier: ^6.2.17
         version: 6.2.17
     devDependencies:
-      '@eric-minassian/plat':
+      '@ericminassian/plat':
         specifier: workspace:*
         version: link:../../packages/cli
       '@tailwindcss/vite':
@@ -486,7 +486,7 @@ importers:
 
   templates/app:
     dependencies:
-      '@eric-minassian/platform':
+      '@ericminassian/platform':
         specifier: workspace:*
         version: link:../../packages/sdk
       hono:
@@ -496,7 +496,7 @@ importers:
         specifier: ^4.6.7
         version: 4.6.7
     devDependencies:
-      '@eric-minassian/plat':
+      '@ericminassian/plat':
         specifier: workspace:*
         version: link:../../packages/cli
       '@types/node':

@@ -21,7 +21,7 @@ import {
   stageHost,
   toSchedulerExpression,
   validateStageName,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { deleteUserPoolClient, ensureUserPoolClient } from './drivers/cognito.ts';
 import { deleteTable, describeTable, ensureTable, stageTableSpec } from './drivers/dynamodb.ts';
 import { deleteEventBus, deleteRule, ensureEventBus, ensureRule, listRules } from './drivers/events.ts';

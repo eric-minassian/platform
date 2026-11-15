@@ -7,7 +7,7 @@
  * "Authentication failed" while the same call from the worker succeeds.
  */
 import { InvokeCommand } from '@aws-sdk/client-lambda';
-import { decodeBindings } from '@eric-minassian/platform-core';
+import { decodeBindings } from '@ericminassian/platform-core';
 import { aws } from '../aws.ts';
 
 export async function callWorker<T>(name: string, payload: unknown): Promise<T> {

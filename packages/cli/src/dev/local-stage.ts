@@ -9,7 +9,7 @@ import {
   newDeploymentId,
   type PlatformRuntimeConfig,
   type ResolvedManifest,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import {
   createEngine,
   type DeployStageResult,
@@ -20,7 +20,7 @@ import {
   ensureLocalPlatform,
   type S3Location,
   startEmulator,
-} from '@eric-minassian/platform-engine';
+} from '@ericminassian/platform-engine';
 import { bundleWorker, zipBundle } from '../build.ts';
 import { CliError } from '../util/output.ts';
 

@@ -1,5 +1,5 @@
 /** Re-exports of the core API DTOs plus the few shapes core doesn't define. */
-export * from '@eric-minassian/platform-core';
+export * from '@ericminassian/platform-core';
 
 export interface StoredObjectInfo {
   key: string;

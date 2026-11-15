@@ -7,8 +7,8 @@
  * gave up. A job can't outlive the worker's 15-minute limit, so anything still
  * `queued`/`running` well past that is dead.
  */
-import { log } from '@eric-minassian/platform';
-import type { DeploymentRecord } from '@eric-minassian/platform-core';
+import { log } from '@ericminassian/platform';
+import type { DeploymentRecord } from '@ericminassian/platform-core';
 import {
   type DeploymentItem,
   listAllStages,

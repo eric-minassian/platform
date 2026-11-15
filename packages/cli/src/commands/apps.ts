@@ -1,4 +1,4 @@
-import { validateAppName } from '@eric-minassian/platform-core';
+import { validateAppName } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { CliError, EXIT, result, table } from '../util/output.ts';

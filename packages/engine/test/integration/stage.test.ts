@@ -8,7 +8,7 @@ import {
   newDeploymentId,
   type PlatformRuntimeConfig,
   parseManifest,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {

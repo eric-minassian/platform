@@ -1,5 +1,5 @@
 import { GetParameterCommand, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
-import { type PlatformRuntimeConfig, platformNames } from '@eric-minassian/platform-core';
+import { type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
 import platformConfig from '../../../platform.config.ts';
 import { aws } from './aws.ts';
 

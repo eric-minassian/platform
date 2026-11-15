@@ -1,5 +1,5 @@
 /**
- * @eric-minassian/plat — programmatic API of the CLI. The foundation deploy
+ * @ericminassian/plat — programmatic API of the CLI. The foundation deploy
  * and tests import `buildApp`; everything else is for the `plat` binary.
  */
 export { ApiClient, ApiError, apiBaseUrl } from './api.ts';

@@ -5,7 +5,7 @@ import {
   type AuthBindings,
   type Bindings,
   type PlatformUser,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { getBindings } from '../bindings.ts';
 import { currentContext } from '../context.ts';
 import { log } from '../telemetry.ts';

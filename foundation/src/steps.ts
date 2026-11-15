@@ -8,7 +8,7 @@ import {
   type StageItem,
   stageItem,
   stageKey,
-} from '@eric-minassian/platform-control-plane/records';
+} from '@ericminassian/platform-control-plane/records';
 import {
   type ArtifactFile,
   names,
@@ -18,8 +18,8 @@ import {
   platformNames,
   type ResolvedManifest,
   TELEMETRY_FILTER_PATTERN,
-} from '@eric-minassian/platform-core';
-import { buildRouterFunctionCode } from '@eric-minassian/platform-core/cloudfront-function';
+} from '@ericminassian/platform-core';
+import { buildRouterFunctionCode } from '@ericminassian/platform-core/cloudfront-function';
 import {
   ALL_VIEWER_EXCEPT_HOST_HEADER,
   cloudFrontAlias,
@@ -50,7 +50,7 @@ import {
   routerCachePolicy,
   upsertRecords,
   waitCertificateIssued,
-} from '@eric-minassian/platform-engine';
+} from '@ericminassian/platform-engine';
 import { BlockedError, type FoundationContext, type Step } from './context.ts';
 
 const DISTRIBUTION_COMMENT = 'platform-edge';
@@ -481,7 +481,7 @@ export const STEPS: Step[] = [
       `build ${CONTROL_PLANE_DIR} and deploy it as app "${CONTROL_PLANE_APP}" (stage prod) → https://${c.consoleHost}`,
     async run(f) {
       const runtime = need(f.state.runtime, 'runtime config');
-      const spec = '@eric-minassian/plat';
+      const spec = '@ericminassian/plat';
       const cli = (await import(spec)) as {
         buildApp(opts: {
           cwd: string;

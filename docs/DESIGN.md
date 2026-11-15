@@ -55,15 +55,15 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ### Components
 
-| Component                                   | What it is                                                                                                                                                                                     |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`                             | Contracts shared by everything: naming, `platform.json` schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                            |
-| `packages/sdk` (`@eric-minassian/platform`) | What app code imports: `db`, `queue`, `events`, `storage`, `secrets`, `auth`, `metrics`, `log`, `app`. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
-| `packages/engine`                           | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                            |
-| `packages/cli` (`@eric-minassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                             |
-| `services/control-plane`                    | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                |
-| `foundation/`                               | The platform's shared resources (router, buckets, tables, Cognito, IAM, DNS), applied by the same engine.                                                                                      |
-| `templates/app`                             | What `plat init` copies: a Hono API + React SPA with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                         |
+| Component                                  | What it is                                                                                                                                                                                     |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`                            | Contracts shared by everything: naming, `platform.json` schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                            |
+| `packages/sdk` (`@ericminassian/platform`) | What app code imports: `db`, `queue`, `events`, `storage`, `secrets`, `auth`, `metrics`, `log`, `app`. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
+| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                            |
+| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                             |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                |
+| `foundation/`                              | The platform's shared resources (router, buckets, tables, Cognito, IAM, DNS), applied by the same engine.                                                                                      |
+| `templates/app`                            | What `plat init` copies: a Hono API + React SPA with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                         |
 
 ## The app contract
 
@@ -103,7 +103,7 @@ the platform keeps on any cloud.
 - **Worker**: `export default defineWorker({ queues, events, crons })`. One
   Lambda per stage handles all of them; the wrapper dispatches on event shape
   and reports partial SQS batch failures.
-- **Resources**: only through `@eric-minassian/platform`. `db.collection()`
+- **Resources**: only through `@ericminassian/platform`. `db.collection()`
   maps typed collections onto the stage's single table (partition/sort keys,
   up to three pinned index slots, TTL), so adding a collection needs no
   deploy-time provisioning.
@@ -344,9 +344,9 @@ rules.
 ```
 platform.config.ts       domain, region, members, reserved names, limits
 packages/core            contracts (naming, manifest, bindings, telemetry, router, API types)
-packages/sdk             runtime SDK + server/worker wrappers (@eric-minassian/platform)
+packages/sdk             runtime SDK + server/worker wrappers (@ericminassian/platform)
 packages/engine          AWS SDK drivers + AWS Emulator wrapper
-packages/cli             plat CLI (@eric-minassian/plat)
+packages/cli             plat CLI (@ericminassian/plat)
 services/control-plane   API, console, deployer, telemetry, pinger, cost, reaper
 foundation               shared platform resources (applied by the engine)
 templates/app            app template + AGENTS.md/CLAUDE.md

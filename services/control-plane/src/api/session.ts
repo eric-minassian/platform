@@ -3,7 +3,7 @@
  * and the console's GitHub OAuth round trip under `/auth/github/*`.
  */
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import type { CliLoginRequest, CliLoginResponse, MeResponse } from '@eric-minassian/platform-core';
+import type { CliLoginRequest, CliLoginResponse, MeResponse } from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import {

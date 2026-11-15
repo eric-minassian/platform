@@ -11,7 +11,7 @@
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
  */
-import type { AppRecord, DeploymentRecord, RouteRecord, StageRecord } from '@eric-minassian/platform-core';
+import type { AppRecord, DeploymentRecord, RouteRecord, StageRecord } from '@ericminassian/platform-core';
 
 /** Stage record plus what rollback needs. */
 export interface StageItem extends StageRecord {

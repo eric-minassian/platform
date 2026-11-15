@@ -12,7 +12,7 @@ import {
   type Resolution,
   type TelemetryEvent,
   telemetryKeys,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 
 /** Whole-stage HTTP series get minute resolution; per-route/job/metric series start at hourly. */
 const STAGE_RES: readonly Resolution[] = ['1m', '1h', '1d'];

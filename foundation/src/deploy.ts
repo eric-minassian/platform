@@ -18,7 +18,7 @@ import {
   errorName,
   isNotImplemented,
   startEmulator,
-} from '@eric-minassian/platform-engine';
+} from '@ericminassian/platform-engine';
 import config from '../../platform.config.ts';
 import { BlockedError, type FoundationContext } from './context.ts';
 import { STEPS } from './steps.ts';

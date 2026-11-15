@@ -1,6 +1,6 @@
 import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
-import { invokeJob } from '@eric-minassian/platform/worker';
+import { invokeJob } from '@ericminassian/platform/worker';
 import {
   type ArtifactFile,
   type CreateDeploymentRequest,
@@ -14,7 +14,7 @@ import {
   parseManifest,
   publicUrl,
   stageHost,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 import { Hono } from 'hono';
 import type { AuthEnv } from '../auth.ts';
 import { actorOf } from '../authz.ts';

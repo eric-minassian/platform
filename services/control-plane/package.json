@@ -1,5 +1,5 @@
 {
-  "name": "@eric-minassian/platform-control-plane",
+  "name": "@ericminassian/platform-control-plane",
   "version": "0.1.0",
   "private": true,
   "description": "The platform's control plane: API, console, deployer and telemetry, deployed as a platform app.",
@@ -33,16 +33,16 @@
     "@aws-sdk/s3-presigned-post": "^3.1169.0",
     "@aws-sdk/s3-request-presigner": "^3.1169.0",
     "@aws/durable-execution-sdk-js": "^3.0.0",
-    "@eric-minassian/platform": "workspace:*",
-    "@eric-minassian/platform-core": "workspace:*",
-    "@eric-minassian/platform-engine": "workspace:*",
+    "@ericminassian/platform": "workspace:*",
+    "@ericminassian/platform-core": "workspace:*",
+    "@ericminassian/platform-engine": "workspace:*",
     "@hono/node-server": "^2.1.8",
     "fflate": "^0.8.3",
     "hono": "^4.13.18",
     "jose": "^6.2.17"
   },
   "devDependencies": {
-    "@eric-minassian/plat": "workspace:*",
+    "@ericminassian/plat": "workspace:*",
     "@tailwindcss/vite": "^4.3.5",
     "@tanstack/react-query": "^5.107.1",
     "@types/aws-lambda": "^8.10.164",

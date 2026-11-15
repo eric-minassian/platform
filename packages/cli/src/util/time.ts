@@ -1,4 +1,4 @@
-import type { Resolution } from '@eric-minassian/platform-core';
+import type { Resolution } from '@ericminassian/platform-core';
 import { CliError, EXIT } from './output.ts';
 
 const UNITS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };

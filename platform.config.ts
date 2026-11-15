@@ -1,4 +1,4 @@
-import { definePlatformConfig } from '@eric-minassian/platform-core';
+import { definePlatformConfig } from '@ericminassian/platform-core';
 
 /**
  * The platform's own settings. Inviting someone = add them to `members` in a

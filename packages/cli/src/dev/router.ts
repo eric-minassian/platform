@@ -8,7 +8,7 @@ import {
 } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { extname, join, normalize, sep } from 'node:path';
-import { decide, HOST_HEADER, type RouteRecord } from '@eric-minassian/platform-core';
+import { decide, HOST_HEADER, type RouteRecord } from '@ericminassian/platform-core';
 
 /**
  * `plat dev`'s stand-in for the CloudFront router: the same `decide()` the

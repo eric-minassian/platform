@@ -1,4 +1,4 @@
-import { isTelemetryEvent, type TelemetryEvent } from '@eric-minassian/platform-core';
+import { isTelemetryEvent, type TelemetryEvent } from '@ericminassian/platform-core';
 import pc from 'picocolors';
 
 /**

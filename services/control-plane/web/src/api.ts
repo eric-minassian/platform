@@ -16,7 +16,7 @@ import type {
   StageRecord,
   TraceResponse,
   UptimePoint,
-} from '@eric-minassian/platform-core';
+} from '@ericminassian/platform-core';
 
 export class ApiRequestError extends Error {
   readonly status: number;

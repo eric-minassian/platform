@@ -5,7 +5,7 @@
  * removing someone from `platform.config.ts` revokes access on the next deploy.
  */
 
-import { PLATFORM_DEFAULTS } from '@eric-minassian/platform-core';
+import { PLATFORM_DEFAULTS } from '@ericminassian/platform-core';
 import type { Context, MiddlewareHandler } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { createRemoteJWKSet, decodeJwt, jwtVerify, SignJWT } from 'jose';

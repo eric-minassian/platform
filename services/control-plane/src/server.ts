@@ -3,7 +3,7 @@
  * console SPA itself is static (web/dist) and served by the router; the
  * platform runtime wrapper (`startServer`) adds health, telemetry and traces.
  */
-import { log } from '@eric-minassian/platform';
+import { log } from '@ericminassian/platform';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { admin } from './api/admin.ts';

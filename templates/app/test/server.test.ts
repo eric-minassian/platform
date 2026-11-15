@@ -7,7 +7,7 @@ const store = new Map<string, Record<string, unknown>>();
 const published: Array<{ type: string; detail: unknown }> = [];
 const sent: unknown[] = [];
 
-vi.mock('@eric-minassian/platform', () => {
+vi.mock('@ericminassian/platform', () => {
   const userFrom = (req: Request) => {
     const id = req.headers.get('x-test-user');
     return id ? { id, email: `${id}@example.com`, groups: [] } : null;

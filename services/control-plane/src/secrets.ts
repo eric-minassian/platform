@@ -4,7 +4,7 @@
  * (the SDK prefers the stage value). Values are write-only through the API.
  */
 import { DeleteParameterCommand, GetParametersByPathCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
-import { ENV_NAME_PATTERN, names, type SecretInfo, TAGS } from '@eric-minassian/platform-core';
+import { ENV_NAME_PATTERN, names, type SecretInfo, TAGS } from '@ericminassian/platform-core';
 import { aws } from './aws.ts';
 
 export function secretPath(app: string, name: string, stage?: string): string {
