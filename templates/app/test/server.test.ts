@@ -1,5 +1,5 @@
 import { assert, describe, it } from '@effect/vitest';
-import { Platform, toFetchHandler, type User } from '@ericminassian/platform/effect';
+import { Platform, toFetchHandler, type User } from '@ericminassian/platform';
 import {
   captureTelemetry,
   createPlatformFetch,

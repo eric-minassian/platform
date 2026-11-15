@@ -1,6 +1,6 @@
+import type { SecretName } from '../register.ts';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
-import type { SecretName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface Secrets {

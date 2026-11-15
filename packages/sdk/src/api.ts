@@ -1,5 +1,5 @@
 /**
- * The browser-safe half of the Effect SDK (`@ericminassian/platform/effect/api`).
+ * The browser-safe half of the SDK (`@ericminassian/platform/api`).
  * An app's `HttpApi` definition imports it, and so does the web client generated
  * from that definition, so nothing here may reach Node or AWS code.
  *

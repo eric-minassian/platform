@@ -3,7 +3,7 @@
  * sign-in (`/auth/*`). The console SPA itself is static (web/dist) and served
  * by the router; the platform's server wrapper adds health, telemetry and traces.
  */
-import { toFetchHandler } from '@ericminassian/platform/effect';
+import { toFetchHandler } from '@ericminassian/platform';
 import { Layer } from 'effect';
 import { HttpLive } from './api/http.ts';
 import { Artifacts } from './artifacts.ts';

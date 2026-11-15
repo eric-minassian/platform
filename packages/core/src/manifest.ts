@@ -127,7 +127,7 @@ type Payload<T> = { readonly [payloadType]?: T };
 export type PayloadOf<D> = D extends Payload<infer T> ? (unknown extends T ? unknown : T) : unknown;
 
 export interface WebConfig {
-  /** Entry module whose default export is a fetch handler (`{ fetch }`, a function, or a Hono app). */
+  /** Entry module whose default export is `toFetchHandler(...)` from `@ericminassian/platform`. */
   server?: string;
   /** Directory of built static assets, served from the edge. */
   static?: string;

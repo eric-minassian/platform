@@ -1,8 +1,8 @@
 import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
+import type { QueueBody, QueueName } from '../register.ts';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
 import { currentTrace } from './context.ts';
-import type { QueueBody, QueueName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface Queue<T> {

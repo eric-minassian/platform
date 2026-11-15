@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/platform-engine",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Idempotent AWS SDK drivers that provision and deploy platform stages (no CloudFormation).",
   "type": "module",
   "license": "MIT",

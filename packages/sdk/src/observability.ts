@@ -1,7 +1,7 @@
 import { format } from 'node:util';
 import { Cause, ErrorReporter, Layer, Logger, type LogLevel, References } from 'effect';
-import { currentContext, recordError } from '../context.ts';
-import { emit, emitError } from '../telemetry.ts';
+import { currentContext, recordError } from './runtime/context.ts';
+import { emit, emitError } from './runtime/telemetry.ts';
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
 

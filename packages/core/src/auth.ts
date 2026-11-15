@@ -45,8 +45,8 @@ export function logoutPath(redirect = '/'): string {
 }
 
 /**
- * Body of every platform 401 (the `auth.required` gate, `auth.requireUser`
- * and the Effect SDK's `Unauthorized` error), so clients decode one shape.
+ * Body of every platform 401 (the `auth.required` gate and the SDK's
+ * `Unauthorized` error), so clients decode one shape.
  */
 export const UNAUTHORIZED_BODY = {
   _tag: 'Unauthorized',

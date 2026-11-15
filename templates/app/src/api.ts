@@ -4,7 +4,7 @@
  * (`web/src/client.ts`), so both sides always agree on paths, payloads and
  * errors. The web app imports this file: keep it free of server-only imports.
  */
-import { Authentication, User } from '@ericminassian/platform/effect/api';
+import { Authentication, User } from '@ericminassian/platform/api';
 import { Schema } from 'effect';
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from 'effect/http-api';
 import { NewTodo, Todo, TodoId, TodoNotFound, TodoPatch } from './domain.ts';

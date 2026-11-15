@@ -8,6 +8,7 @@ import {
   CurrentUser,
   Db,
   defineWorker,
+  Jobs,
   Platform,
   Queues,
   Secrets,
@@ -15,7 +16,7 @@ import {
   toFetchHandler,
   Unauthorized,
   type User,
-} from '../src/effect/index.ts';
+} from '../src/index.ts';
 import {
   captureTelemetry,
   createPlatformFetch,
@@ -242,6 +243,8 @@ describe('Platform.layerMemory', () => {
       const memory = yield* Platform.Memory;
       yield* (yield* Queues).send('emails', { to: 'a' }, { delay: '1 minute' });
       expect(yield* memory.sent).toEqual([{ queue: 'emails', body: { to: 'a' }, delaySeconds: 60 }]);
+      yield* (yield* Jobs).invoke('reindex', { id: 1 });
+      expect(yield* memory.invoked).toEqual([{ name: 'reindex', payload: { id: 1 } }]);
 
       const secrets = yield* Secrets;
       expect(Option.map(yield* secrets.getOptional('KEY'), Redacted.value)).toEqual(Option.some('v'));

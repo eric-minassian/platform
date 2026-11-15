@@ -5,7 +5,7 @@
  */
 import { DateTime, Effect, Exit, Option, Schema } from 'effect';
 import { expect } from 'vitest';
-import { Db } from '../src/effect/index.ts';
+import { Db } from '../src/index.ts';
 
 const Note = Schema.Struct({
   ownerId: Schema.String,

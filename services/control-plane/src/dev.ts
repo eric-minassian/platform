@@ -7,7 +7,7 @@
  *   PLATFORM_SESSION_KEY     ≥ 32 chars (skips SSM)
  *   PLATFORM_DEV_USER        GitHub username to act as (skips sign-in; dev only)
  */
-import { toFetchHandler } from '@ericminassian/platform/effect';
+import { toFetchHandler } from '@ericminassian/platform';
 import { startServer } from '@ericminassian/platform/server';
 import { BINDINGS_ENV, type Bindings, names } from '@ericminassian/platform-core';
 import { Layer, Option } from 'effect';

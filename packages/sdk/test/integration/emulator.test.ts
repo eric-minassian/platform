@@ -26,12 +26,22 @@ import {
 } from '@aws-sdk/client-sqs';
 import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { BINDINGS_ENV, type Bindings, encodeBindings } from '@ericminassian/platform-core';
-import { Effect } from 'effect';
-import { Hono } from 'hono';
+import { Effect, Layer, Option, Redacted } from 'effect';
+import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/http-api';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { setBindings } from '../../src/bindings.ts';
-import { Db } from '../../src/effect/index.ts';
-import { auth, db, events, InvalidCursorError, queue, secrets, storage } from '../../src/index.ts';
+import {
+  Authentication,
+  CurrentUser,
+  Db,
+  Events,
+  Platform,
+  Queues,
+  Secrets,
+  Storage,
+  toFetchHandler,
+  User,
+} from '../../src/index.ts';
+import { setBindings } from '../../src/runtime/bindings.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
 import { dbContract } from '../effect-db-contract.ts';
 
@@ -202,72 +212,16 @@ beforeAll(async () => {
 
 afterAll(() => resetPlatform());
 
-interface Note extends Record<string, unknown> {
-  ownerId: string;
-  noteId: string;
-  title: string;
-  tag?: string;
-  createdAt: string;
-}
-
-const notes = () =>
-  db.collection<Note>('notes', {
-    partition: 'ownerId',
-    sort: 'noteId',
-    indexes: { byTag: { slot: 1, partition: 'tag', sort: 'createdAt' } },
-  });
+/** Runs `effect` on the real platform services, through this stage's bindings. */
+const run = <A, E>(effect: Effect.Effect<A, E, Platform.Services>) =>
+  Effect.runPromise(effect.pipe(Effect.provide(Platform.layer)));
 
 describe('against the AWS Emulator', () => {
-  it('db: put/get/query/index/update/delete', async () => {
-    await notes().put({ ownerId: 'u1', noteId: 'n1', title: 'one', tag: 'work', createdAt: '2026-01-01' });
-    await notes().put({ ownerId: 'u1', noteId: 'n2', title: 'two', tag: 'home', createdAt: '2026-01-02' });
-    await notes().put({ ownerId: 'u1', noteId: 'n3', title: 'three', tag: 'work', createdAt: '2026-01-03' });
-    await notes().put({ ownerId: 'u2', noteId: 'n1', title: 'other user', createdAt: '2026-01-01' });
-
-    expect(await notes().get({ ownerId: 'u1', noteId: 'n2' })).toEqual({
-      ownerId: 'u1',
-      noteId: 'n2',
-      title: 'two',
-      tag: 'home',
-      createdAt: '2026-01-02',
-    });
-    const all = await notes().query({ ownerId: 'u1' });
-    expect(all.items.map((n) => n.noteId)).toEqual(['n1', 'n2', 'n3']);
-
-    const page1 = await notes().query({ ownerId: 'u1' }, { limit: 2, reverse: true });
-    expect(page1.items.map((n) => n.noteId)).toEqual(['n3', 'n2']);
-    const page2 = await notes().query({ ownerId: 'u1' }, { limit: 2, reverse: true, cursor: page1.cursor });
-    expect(page2.items.map((n) => n.noteId)).toEqual(['n1']);
-    await expect(notes().query({ ownerId: 'u2' }, { cursor: page1.cursor })).rejects.toBeInstanceOf(
-      InvalidCursorError,
-    );
-    const rawKey = Buffer.from(JSON.stringify({ pk: 'notes#u2', sk: 'n1' })).toString('base64url');
-    await expect(notes().query({ ownerId: 'u1' }, { cursor: rawKey })).rejects.toBeInstanceOf(
-      InvalidCursorError,
-    );
-    expect((await notes().queryAll({ ownerId: 'u1' })).map((n) => n.noteId)).toEqual(['n1', 'n2', 'n3']);
-
-    const work = await notes().query({ tag: 'work' }, { index: 'byTag', gte: '2026-01-02' });
-    expect(work.items.map((n) => n.noteId)).toEqual(['n3']);
-
-    const updated = await notes().update({ ownerId: 'u1', noteId: 'n3' }, { tag: 'home', title: 'moved' });
-    expect(updated).toMatchObject({ title: 'moved', tag: 'home' });
-    const home = await notes().query({ tag: 'home' }, { index: 'byTag' });
-    expect(home.items.map((n) => n.noteId).sort()).toEqual(['n2', 'n3']);
-
-    await expect(
-      notes().put({ ownerId: 'u1', noteId: 'n1', title: 'dup', createdAt: 'x' }, { ifNotExists: true }),
-    ).rejects.toThrow();
-    await expect(notes().update({ ownerId: 'u9', noteId: 'nx' }, { title: 'nope' })).rejects.toThrow();
-    await notes().delete({ ownerId: 'u1', noteId: 'n1' });
-    expect(await notes().get({ ownerId: 'u1', noteId: 'n1' })).toBeUndefined();
-  });
-
-  it('db (Effect): behaves like the in-memory store', () =>
+  it('db: behaves like the in-memory store', () =>
     Effect.runPromise(dbContract('notes-effect').pipe(Effect.provide(Db.layer))));
 
   it('queue: send carries the body and trace', async () => {
-    await queue('emails').send({ to: 'eric@example.com' });
+    await run(Effect.flatMap(Queues, (queues) => queues.send('emails', { to: 'eric@example.com' })));
     const sqs = new SQSClient(cfg);
     const out = await sqs.send(
       new ReceiveMessageCommand({
@@ -282,7 +236,7 @@ describe('against the AWS Emulator', () => {
   });
 
   it('events: publish reaches a subscribed rule target', async () => {
-    await events.publish('order.created', { orderId: 42 });
+    await run(Effect.flatMap(Events, (events) => events.publish('order.created', { orderId: 42 })));
     const sqs = new SQSClient(cfg);
     let body: { 'detail-type': string; source: string; detail: { data: unknown; trace: string } } | undefined;
     for (let i = 0; i < 10 && !body; i++) {
@@ -298,37 +252,56 @@ describe('against the AWS Emulator', () => {
     });
   });
 
-  it('storage: put/get/list and presigned upload/download URLs', async () => {
-    const s = storage('uploads');
-    await s.put('docs/hello.txt', 'hello world', { contentType: 'text/plain' });
-    expect(await s.getText('docs/hello.txt')).toBe('hello world');
-    expect(await s.get('docs/missing.txt')).toBeUndefined();
-    expect((await s.list('docs/')).objects.map((o) => o.key)).toEqual(['docs/hello.txt']);
+  it('storage: put/get/list and presigned upload/download URLs', () =>
+    run(
+      Effect.gen(function* () {
+        const s = (yield* Storage).store('uploads');
+        yield* s.put('docs/hello.txt', 'hello world', { contentType: 'text/plain' });
+        expect(yield* s.getText('docs/hello.txt')).toEqual(Option.some('hello world'));
+        expect(yield* s.get('docs/missing.txt')).toEqual(Option.none());
+        expect((yield* s.list('docs/')).objects.map((o) => o.key)).toEqual(['docs/hello.txt']);
 
-    const put = await fetch(await s.uploadUrl('direct.bin', { contentType: 'application/octet-stream' }), {
-      method: 'PUT',
-      headers: { 'content-type': 'application/octet-stream' },
-      body: new Uint8Array([1, 2, 3]),
-    });
-    expect(put.status).toBe(200);
-    expect(await s.get('direct.bin')).toEqual(new Uint8Array([1, 2, 3]));
-    const dl = await fetch(await s.downloadUrl('docs/hello.txt'));
-    expect(await dl.text()).toBe('hello world');
-    await s.delete('direct.bin');
-    expect(await s.get('direct.bin')).toBeUndefined();
-  });
+        const uploadUrl = yield* s.uploadUrl('direct.bin', { contentType: 'application/octet-stream' });
+        const put = yield* Effect.promise(() =>
+          fetch(uploadUrl, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/octet-stream' },
+            body: new Uint8Array([1, 2, 3]),
+          }),
+        );
+        expect(put.status).toBe(200);
+        expect(yield* s.get('direct.bin')).toEqual(Option.some(new Uint8Array([1, 2, 3])));
+        const downloadUrl = yield* s.downloadUrl('docs/hello.txt');
+        expect(yield* Effect.promise(() => fetch(downloadUrl).then((r) => r.text()))).toBe('hello world');
+        yield* s.delete('direct.bin');
+        expect(yield* s.get('direct.bin')).toEqual(Option.none());
+      }),
+    ));
 
-  it('secrets: stage value wins, shared is the fallback', async () => {
-    expect(await secrets.get('STAGE_ONLY')).toBe('stage-value');
-    expect(await secrets.get('SHARED')).toBe('shared-value');
-    expect(await secrets.getOptional('MISSING')).toBeUndefined();
-  });
+  it('secrets: stage value wins, shared is the fallback', () =>
+    run(
+      Effect.gen(function* () {
+        const secrets = yield* Secrets;
+        expect(Redacted.value(yield* secrets.get('STAGE_ONLY'))).toBe('stage-value');
+        expect(Redacted.value(yield* secrets.get('SHARED'))).toBe('shared-value');
+        expect(yield* secrets.getOptional('MISSING')).toEqual(Option.none());
+      }),
+    ));
 
   it('auth (local mode): sign in through the form, then resolve the user', async () => {
     const tel = captureTelemetry();
-    const h = new Hono();
-    h.get('/api/whoami', async (c) => c.json(await auth.requireUser(c.req.raw)));
-    const f = createPlatformFetch(h);
+    // An app's API behind `Authentication`, served as a deployed app serves it.
+    const Api = HttpApi.make('it').add(
+      HttpApiGroup.make('me', { topLevel: true })
+        .add(HttpApiEndpoint.get('whoami', '/api/whoami', { success: User }))
+        .middleware(Authentication),
+    );
+    const Handlers = HttpApiBuilder.group(Api, 'me', (handlers) =>
+      handlers.handle('whoami', () => CurrentUser),
+    );
+    const f = createPlatformFetch(
+      toFetchHandler(HttpApiBuilder.layer(Api).pipe(Layer.provide(Handlers), Layer.provide(Platform.layer))),
+    );
     const origin = bindings.url;
 
     const form = await f(new Request(`${origin}/__platform/auth/login?redirect=/api/whoami`));

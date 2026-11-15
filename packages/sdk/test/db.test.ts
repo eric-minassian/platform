@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { newContext, runWithContext } from '../src/context.ts';
-import { InvalidCursorError } from '../src/cursor.ts';
-import { createKeyMapper, db, setExpression, stripInternal } from '../src/db.ts';
+import { newContext, runWithContext } from '../src/runtime/context.ts';
+import { InvalidCursorError } from '../src/runtime/cursor.ts';
+import { createKeyMapper, db, setExpression, stripInternal } from '../src/runtime/db.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 interface Todo extends Record<string, unknown> {
