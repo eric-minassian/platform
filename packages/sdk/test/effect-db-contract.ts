@@ -226,3 +226,177 @@ export const transactContract = (name: string) =>
     expect(yield* notes.queryAll({ ownerId: 'u3' })).toHaveLength(100);
     yield* db.transact([]);
   });
+
+const Usage = Schema.Struct({
+  clientId: Schema.String,
+  minute: Schema.Finite,
+  strokes: Schema.Finite,
+  points: Schema.optionalKey(Schema.Finite),
+  expiresAt: Schema.Finite,
+  plan: Schema.optionalKey(Schema.String),
+});
+
+const Task = Schema.Struct({
+  listId: Schema.String,
+  taskId: Schema.String,
+  status: Schema.Literals(['open', 'done']),
+  assignee: Schema.optionalKey(Schema.String),
+  version: Schema.Finite,
+  dueAt: Schema.DateTimeUtcFromString,
+});
+
+const Tally = Schema.Struct({
+  id: Schema.String,
+  n: Schema.NullOr(Schema.Finite),
+  stock: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  rating: Schema.optionalKey(Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: 5 }))),
+  flag: Schema.optionalKey(Schema.Literals([0, 1])),
+  digits: Schema.optionalKey(Schema.FiniteFromString),
+});
+
+/** How many increments run at once in the concurrency check. */
+export const CONCURRENT_INCREMENTS = 64;
+
+/** Atomic increments and conditional updates, on collections named `<prefix>-usage` and `<prefix>-tasks`. */
+export const countersContract = (prefix: string) =>
+  Effect.gen(function* () {
+    const db = yield* Db;
+    const usage = db.collection(`${prefix}-usage`, {
+      schema: Usage,
+      partition: 'clientId',
+      sort: 'minute',
+      ttl: 'expiresAt',
+      indexes: { byPlan: { slot: 1, partition: 'plan', sort: 'clientId' } },
+    });
+    const key = { clientId: 'c1', minute: 1 };
+
+    // A missing document is created from the key, the amounts and `create`.
+    expect(yield* usage.increment(key, { strokes: 1, points: 3 }, { create: { expiresAt: 120 } })).toEqual({
+      ...key,
+      strokes: 1,
+      points: 3,
+      expiresAt: 120,
+    });
+    // On an existing one, `create` only fills what's missing; amounts add, and subtract when negative.
+    const again = yield* usage.increment(
+      key,
+      { strokes: 2, points: -1 },
+      { create: { expiresAt: 999, plan: 'pro' } },
+    );
+    expect(again).toEqual({ ...key, strokes: 3, points: 2, expiresAt: 120, plan: 'pro' });
+    expect(yield* usage.get(key)).toEqual(Option.some(again));
+    // A field `create` filled moves the document into the index built from it.
+    expect((yield* usage.query({ plan: 'pro' }, { index: 'byPlan' })).items).toEqual([again]);
+
+    // Numbers add in decimal, as DynamoDB adds them.
+    const decimal = { clientId: 'c1', minute: 2 };
+    yield* usage.increment(decimal, { points: 0.1 }, { create: { expiresAt: 180, strokes: 0 } });
+    expect(
+      (yield* usage.increment(decimal, { points: 0.2 }, { create: { expiresAt: 180, strokes: 0 } })).points,
+    ).toBe(0.3);
+
+    // With `ifExists`, a missing document stays missing.
+    const nowhere = { clientId: 'c2', minute: 1 };
+    const missing = yield* Effect.flip(usage.increment(nowhere, { strokes: 1 }, { ifExists: true }));
+    expect(missing._tag).toBe('DocumentNotFound');
+    expect(yield* usage.get(nowhere)).toEqual(Option.none());
+    expect((yield* usage.increment(key, { strokes: 1 }, { ifExists: true })).strokes).toBe(4);
+
+    // Increments that can't create a document that decodes, or that would count a key
+    // field, are defects and write nothing.
+    const noExpiry = yield* Effect.exit(usage.increment(nowhere, { strokes: 1 } as never));
+    expect(Exit.hasDies(noExpiry)).toBe(true);
+    const onKey = yield* Effect.exit(
+      usage.increment(key, { minute: 1 } as never, { create: { expiresAt: 1 } } as never),
+    );
+    expect(Exit.hasDies(onKey)).toBe(true);
+    expect(yield* usage.get(nowhere)).toEqual(Option.none());
+    expect(Option.map(yield* usage.get(key), (u) => u.minute)).toEqual(Option.some(1));
+
+    // Concurrent increments all count: each sees its own total, and none is lost.
+    const burst = { clientId: 'c3', minute: 1 };
+    const totals = yield* Effect.forEach(
+      Array.from({ length: CONCURRENT_INCREMENTS }),
+      () => usage.increment(burst, { strokes: 1, points: 2 }, { create: { expiresAt: 240 } }),
+      { concurrency: 'unbounded' },
+    );
+    expect(totals.map((u) => u.strokes).toSorted((a, b) => a - b)).toEqual(
+      Array.from({ length: CONCURRENT_INCREMENTS }, (_, i) => i + 1),
+    );
+    expect(yield* usage.get(burst)).toEqual(
+      Option.some({
+        ...burst,
+        strokes: CONCURRENT_INCREMENTS,
+        points: 2 * CONCURRENT_INCREMENTS,
+        expiresAt: 240,
+      }),
+    );
+
+    const tasks = db.collection(`${prefix}-tasks`, { schema: Task, partition: 'listId', sort: 'taskId' });
+    const t1 = { listId: 'l1', taskId: 't1' };
+    yield* tasks.put({ ...t1, status: 'open', version: 1, dueAt: at(5) });
+
+    // `if` holds: the update goes through.
+    const done = yield* tasks.update(
+      t1,
+      { status: 'done', version: 2 },
+      { if: { status: 'open', version: 1 } },
+    );
+    expect(done).toMatchObject({ status: 'done', version: 2 });
+    // It doesn't (here, a stale version): ConditionFailed, and nothing changes.
+    const stale = yield* Effect.flip(tasks.update(t1, { status: 'open' }, { if: { version: 1 } }));
+    expect(stale._tag).toBe('ConditionFailed');
+    expect(yield* tasks.get(t1)).toEqual(Option.some(done));
+    // Every condition must hold.
+    const partly = yield* Effect.flip(
+      tasks.update(t1, { version: 3 }, { if: { status: 'done', version: 7 } }),
+    );
+    expect(partly._tag).toBe('ConditionFailed');
+
+    // `undefined` means the field is absent: claim a task only while it's unassigned.
+    const claimed = yield* tasks.update(t1, { assignee: 'u1' }, { if: { assignee: undefined } });
+    expect(claimed.assignee).toBe('u1');
+    const taken = yield* Effect.flip(tasks.update(t1, { assignee: 'u2' }, { if: { assignee: undefined } }));
+    expect(taken._tag).toBe('ConditionFailed');
+    // Values are encoded with the field's schema before they're compared.
+    expect((yield* tasks.update(t1, { version: 3 }, { if: { dueAt: at(5), assignee: 'u1' } })).version).toBe(
+      3,
+    );
+    const otherDay = yield* Effect.flip(tasks.update(t1, { version: 4 }, { if: { dueAt: at(6) } }));
+    expect(otherDay._tag).toBe('ConditionFailed');
+
+    // A missing document is DocumentNotFound, with or without `if`.
+    const gone = yield* Effect.flip(
+      tasks.update({ listId: 'l1', taskId: 'tx' }, { version: 1 }, { if: { version: 0 } }),
+    );
+    expect(gone._tag).toBe('DocumentNotFound');
+
+    // A counter only takes amounts every total of its schema allows, since
+    // DynamoDB computes the total: anything else is a defect and writes nothing.
+    const tallies = db.collection(`${prefix}-tallies`, { schema: Tally, partition: 'id' });
+    const t = { id: 't1' };
+    yield* tallies.put({ ...t, n: null });
+    expect((yield* tallies.increment(t, { stock: 2 }, { ifExists: true })).stock).toBe(2);
+    for (const amounts of [
+      { stock: -1 },
+      { stock: 0.5 },
+      { rating: 1 },
+      { flag: 1 },
+      { digits: 1 },
+    ] as const) {
+      const refused = yield* Effect.exit(tallies.increment(t, amounts, { ifExists: true }));
+      expect(Exit.hasDies(refused), JSON.stringify(amounts)).toBe(true);
+    }
+    // `create` can give a nullable field null, and `if: { n: undefined }` matches a stored null.
+    const fresh = { id: 't2' };
+    expect(yield* tallies.increment(fresh, { stock: 1 }, { create: { n: null } })).toEqual({
+      ...fresh,
+      n: null,
+      stock: 1,
+    });
+    expect((yield* tallies.update(fresh, { stock: 3 }, { if: { n: undefined } })).stock).toBe(3);
+    // A stored null isn't a missing counter: DynamoDB can't add to it.
+    const onNull = yield* Effect.exit(tallies.increment(t, { n: 1 }, { ifExists: true }));
+    expect(Exit.hasDies(onNull)).toBe(true);
+    expect(yield* tallies.get(t)).toEqual(Option.some({ ...t, n: null, stock: 2 }));
+  });

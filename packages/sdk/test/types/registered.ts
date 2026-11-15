@@ -2,7 +2,9 @@
 // expected error below is a mistake the registered config must catch.
 import {
   type ChannelEvent,
+  type ConditionFailed,
   Db,
+  type DocumentNotFound,
   defineWorker,
   Events,
   Platform,
@@ -154,4 +156,78 @@ export const consistentReads = Effect.gen(function* () {
     notes.query({ noteId: 'n' }, { index, consistent: true }),
   ];
   return byNoteOrKey('byNote');
+});
+
+const Usage = Schema.Struct({
+  clientId: Schema.String,
+  minute: Schema.Finite,
+  strokes: Schema.Finite,
+  points: Schema.optionalKey(Schema.Finite),
+  expiresAt: Schema.Finite,
+  label: Schema.optionalKey(Schema.String),
+});
+const Post = Schema.Struct({ id: Schema.String, title: Schema.String, likes: Schema.Finite });
+const Hits = Schema.Struct({
+  page: Schema.String,
+  hits: Schema.Finite,
+  uniques: Schema.optionalKey(Schema.Finite),
+});
+
+export const counters = Effect.gen(function* () {
+  const db = yield* Db;
+  const perMinute = db.collection('usage', {
+    schema: Usage,
+    partition: 'clientId',
+    sort: 'minute',
+    ttl: 'expiresAt',
+  });
+  const posts = db.collection('posts', { schema: Post, partition: 'id' });
+  const hits = db.collection('hits', { schema: Hits, partition: 'page' });
+  const key = { clientId: 'c', minute: 1 };
+
+  const created: Effect.Effect<typeof Usage.Type> = perMinute.increment(
+    key,
+    { strokes: 1, points: 3 },
+    { create: { expiresAt: 120, label: 'x' } },
+  );
+  // Every required field is the key or a counter, so `create` is optional.
+  yield* hits.increment({ page: '/' }, { hits: 1 });
+  yield* hits.increment({ page: '/' }, { hits: 1 }, { create: { uniques: 0 } });
+  // @ts-expect-error `create` must give `expiresAt`, which the key and amounts don't
+  yield* perMinute.increment(key, { strokes: 1 });
+  // @ts-expect-error `create` must give `strokes` when only `points` is incremented
+  yield* perMinute.increment(key, { points: 1 }, { create: { expiresAt: 120 } });
+  yield* perMinute.increment(key, { points: 1 }, { create: { expiresAt: 120, strokes: 0 } });
+  // @ts-expect-error `label` isn't a number
+  yield* perMinute.increment(key, { strokes: 1, label: 1 }, { create: { expiresAt: 120 } });
+  // @ts-expect-error key fields can't be counters
+  yield* perMinute.increment(key, { minute: 1 }, { create: { expiresAt: 120, strokes: 0 } });
+  // @ts-expect-error an incremented field can't also be in `create`
+  yield* perMinute.increment(key, { strokes: 1 }, { create: { expiresAt: 120, strokes: 5 } });
+
+  const liked: Effect.Effect<typeof Post.Type, DocumentNotFound> = posts.increment(
+    { id: 'p' },
+    { likes: 1 },
+    { ifExists: true },
+  );
+  // @ts-expect-error `ifExists` can fail with DocumentNotFound
+  const unchecked: Effect.Effect<unknown> = posts.increment({ id: 'p' }, { likes: 1 }, { ifExists: true });
+  // @ts-expect-error a post can't be created from its key and likes alone
+  yield* posts.increment({ id: 'p' }, { likes: 1 });
+
+  const plain: Effect.Effect<unknown, DocumentNotFound> = posts.update({ id: 'p' }, { title: 't' });
+  const guarded: Effect.Effect<unknown, DocumentNotFound | ConditionFailed> = posts.update(
+    { id: 'p' },
+    { title: 't' },
+    { if: { likes: 0 } },
+  );
+  // @ts-expect-error a conditional update can fail with ConditionFailed
+  const unguarded: Effect.Effect<unknown, DocumentNotFound> = posts.update(
+    { id: 'p' },
+    {},
+    { if: { likes: 0 } },
+  );
+  // @ts-expect-error conditions name the document's fields, with their types
+  yield* posts.update({ id: 'p' }, {}, { if: { likes: 'zero' } });
+  return [created, liked, unchecked, plain, guarded, unguarded];
 });

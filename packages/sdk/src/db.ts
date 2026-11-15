@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, type Option, Predicate, Schema, SchemaAST } from 'effect';
+import { Context, Data, Effect, Equal, Layer, type Option, Predicate, Schema, SchemaAST } from 'effect';
 import { InvalidCursor } from './api.ts';
 import { InvalidCursorError } from './runtime/cursor.ts';
 import {
@@ -24,7 +24,7 @@ export class DocumentExists extends Schema.TaggedError<DocumentExists, { readonl
   },
 ) {}
 
-/** `update` found no document with that key. */
+/** `update` or `increment` found no document with that key. */
 export class DocumentNotFound extends Schema.TaggedError<
   DocumentNotFound,
   { readonly brand: unique symbol }
@@ -40,6 +40,14 @@ export class TransactionCanceled extends Schema.TaggedError<
   /** Positions, in the writes given to `transact`, of those whose condition failed. */
   failed: Schema.Array(Schema.Int),
 }) {}
+
+/** The document didn't hold the values `update`'s `if` asked for, so nothing was written. */
+export class ConditionFailed extends Schema.TaggedError<ConditionFailed, { readonly brand: unique symbol }>()(
+  'ConditionFailed',
+  {
+    collection: Schema.String,
+  },
+) {}
 
 /**
  * A struct schema for a collection's documents. Writes are encoded with it and
@@ -76,6 +84,27 @@ export interface Page<T> {
    */
   readonly cursor?: string | undefined;
 }
+
+/** Fields of `T`, outside the key, that hold numbers. */
+type NumberField<T, Key extends keyof T> = {
+  [F in Exclude<keyof T, Key>]-?: NonNullable<T[F]> extends number ? F : never;
+}[Exclude<keyof T, Key>];
+
+/** What `increment` adds to each counter. */
+export type Increments<T, Key extends keyof T> = { readonly [F in NumberField<T, Key>]?: number };
+
+type RequiredField<T> = { [F in keyof T]-?: Pick<T, F> extends Required<Pick<T, F>> ? F : never }[keyof T];
+
+/** Required fields that neither the key nor the amounts give a document `increment` creates. */
+type Uncovered<T, Key extends keyof T, A> = Exclude<RequiredField<T>, Key | keyof A>;
+
+type CreateFields<T, Key extends keyof T, A> = Pick<T, Uncovered<T, Key, A>> &
+  Partial<Omit<T, Key | keyof A>>;
+
+/** `create` is required exactly when the key and the amounts leave a required field unset. */
+type IncrementCreate<T, Key extends keyof T, A> = [Uncovered<T, Key, A>] extends [never]
+  ? [options?: { readonly create?: CreateFields<T, Key, A> }]
+  : [options: { readonly create: CreateFields<T, Key, A> }];
 
 /**
  * One write of a `Db.transact`, from a collection's `tx`. Nothing is written
@@ -118,8 +147,39 @@ export interface Collection<T, Key extends keyof T> {
   put(document: T): Effect.Effect<T>;
   /** Create, failing if a document with the same key exists. */
   insert(document: T): Effect.Effect<T, DocumentExists>;
-  /** Change some fields; `undefined` removes an optional field. Key fields can't change. */
+  /**
+   * Change some fields; `undefined` removes an optional field. Key fields can't
+   * change. With `if`, only while the document holds those values (`undefined`:
+   * the field is absent or null), checked in the same atomic write; otherwise it
+   * fails with `ConditionFailed` and changes nothing.
+   */
   update(key: Pick<T, Key>, patch: Partial<Omit<T, Key>>): Effect.Effect<T, DocumentNotFound>;
+  update(
+    key: Pick<T, Key>,
+    patch: Partial<Omit<T, Key>>,
+    options: { readonly if: Partial<Omit<T, Key>> },
+  ): Effect.Effect<T, DocumentNotFound | ConditionFailed>;
+  /**
+   * Adds to number fields in one atomic write (a negative amount subtracts) and
+   * returns the document after it. Concurrent increments all count, unlike a
+   * `get` followed by a `put`.
+   *
+   * A missing document is created from the key, the amounts (a counter starts
+   * at 0) and `create`, which must give every other required field; on an
+   * existing document, `create` only fills the fields it lacks. With
+   * `{ ifExists: true }`, a missing document fails with `DocumentNotFound`
+   * instead. Key, index and `ttl` fields can't be counters.
+   */
+  increment(
+    key: Pick<T, Key>,
+    amounts: Increments<T, Key>,
+    options: { readonly ifExists: true },
+  ): Effect.Effect<T, DocumentNotFound>;
+  increment<A extends Increments<T, Key>>(
+    key: Pick<T, Key>,
+    amounts: A & { readonly [F in Exclude<keyof A, NumberField<T, Key>>]: never },
+    ...options: IncrementCreate<T, Key, A>
+  ): Effect.Effect<T>;
   delete(key: Pick<T, Key>): Effect.Effect<void>;
   /**
    * Create or replace many documents, in batches of 25. Not atomic: a defect
@@ -178,7 +238,8 @@ export class Db extends Context.Service<
 
 type Doc = Record<string, unknown>;
 
-class ConditionFailed extends Data.TaggedError('ConditionFailed') {}
+/** A write's condition didn't hold; `found` says whether the document exists. */
+class CheckFailed extends Data.TaggedError('CheckFailed')<{ readonly found: boolean }> {}
 
 /** A transaction's writes whose condition failed, by position. */
 class ConditionsFailed extends Data.TaggedError('ConditionsFailed')<{
@@ -199,8 +260,11 @@ interface StoreWrite {
 /** Raw, schema-less storage of one collection's encoded documents. */
 interface Store<W extends StoreWrite> {
   get(key: Doc, options: GetOptions): Effect.Effect<Doc | undefined>;
-  put(item: Doc, ifNotExists: boolean): Effect.Effect<void, ConditionFailed>;
-  update(key: Doc, patch: Doc): Effect.Effect<Doc, ConditionFailed>;
+  put(item: Doc, ifNotExists: boolean): Effect.Effect<void, CheckFailed>;
+  /** Fails when the document is missing or lacks `condition`'s values (`null`: absent or null). */
+  update(key: Doc, patch: Doc, condition?: Doc): Effect.Effect<Doc, CheckFailed>;
+  /** Creates a missing document from `key` and `create`; without `create`, fails instead. */
+  increment(key: Doc, amounts: Record<string, number>, create?: Doc): Effect.Effect<Doc, CheckFailed>;
   delete(key: Doc): Effect.Effect<void>;
   putMany(items: ReadonlyArray<Doc>): Effect.Effect<void>;
   deleteMany(keys: ReadonlyArray<Doc>): Effect.Effect<void>;
@@ -224,16 +288,17 @@ interface Backend<W extends StoreWrite> {
   transact(writes: ReadonlyArray<W>): Effect.Effect<void, ConditionsFailed>;
 }
 
-const isConditionFailed = (e: unknown): boolean =>
+const isConditionFailed = (e: unknown): e is { readonly Item?: unknown } =>
   (e as { name?: unknown } | null)?.name === 'ConditionalCheckFailedException';
 
 /** Runs a DynamoDB call: a failed condition or a cursor that won't open are typed, anything else a defect. */
-const dynamo = <A>(call: () => Promise<A>): Effect.Effect<A, ConditionFailed | BadCursor> =>
+const dynamo = <A>(call: () => Promise<A>): Effect.Effect<A, CheckFailed | BadCursor> =>
   Effect.tryPromise({
     try: call,
     catch: (cause) =>
       isConditionFailed(cause)
-        ? new ConditionFailed()
+        ? // `Item` is only there when the write asked for it and the document exists.
+          new CheckFailed({ found: cause.Item !== undefined })
         : cause instanceof InvalidCursorError
           ? new BadCursor({ message: cause.message })
           : new DynamoFailure({ cause }),
@@ -258,13 +323,16 @@ const dynamoBackend: Backend<TransactItem> = {
           Effect.catchTag('BadCursor', Effect.die),
           Effect.asVoid,
         ),
-      update: (key, patch) =>
-        dynamo(() => c.update(key, patch)).pipe(Effect.catchTag('BadCursor', Effect.die)),
+      update: (key, patch, condition) =>
+        dynamo(() => c.update(key, patch, condition && { if: condition })).pipe(
+          Effect.catchTag('BadCursor', Effect.die),
+        ),
+      increment: (key, amounts, create) =>
+        dynamo(() => c.increment(key, amounts, create)).pipe(Effect.catchTag('BadCursor', Effect.die)),
       delete: (key) => Effect.orDie(dynamo(() => c.delete(key))),
       putMany: (items) => Effect.orDie(dynamo(() => c.putMany(items))),
       deleteMany: (keys) => Effect.orDie(dynamo(() => c.deleteMany(keys))),
-      query: (values, q) =>
-        dynamo(() => c.query(values, q)).pipe(Effect.catchTag('ConditionFailed', Effect.die)),
+      query: (values, q) => dynamo(() => c.query(values, q)).pipe(Effect.catchTag('CheckFailed', Effect.die)),
       queryAll: (values, q) => Effect.orDie(dynamo(() => c.queryAll(values, q))),
       tx: {
         put: (item, ifNotExists) => c.transactItem.put(item, { ifNotExists }),
@@ -324,18 +392,45 @@ function memoryBackend(): Backend<MemoryWrite> {
       put: (item, ifNotExists) =>
         Effect.suspend(() => {
           const k = at(item);
-          if (ifNotExists && table.has(k)) return Effect.fail(new ConditionFailed());
+          if (ifNotExists && table.has(k)) return Effect.fail(new CheckFailed({ found: true }));
           table.set(k, m.toItem(item));
           return Effect.void;
         }),
 
-      update: (key, patch) =>
+      update: (key, patch, condition) =>
         Effect.suspend(() => {
           m.assertKeyUnchanged(key, patch);
           const k = at(key);
           const existing = stripInternal(table.get(k));
-          if (!existing) return Effect.fail(new ConditionFailed());
+          if (!existing) return Effect.fail(new CheckFailed({ found: false }));
+          if (condition && !meets(existing, condition)) return Effect.fail(new CheckFailed({ found: true }));
           const next = patched(existing, patch);
+          table.set(k, m.toItem(next));
+          return Effect.succeed(next);
+        }),
+
+      // The same steps as the UpdateItem in db.ts: set the key, fill what's
+      // missing from `create`, then ADD. Index and TTL attributes follow from
+      // `toItem`, as the DynamoDB store brings them in line after its write.
+      increment: (key, amounts, create) =>
+        Effect.suspend(() => {
+          m.checkIncrement(key, amounts, create);
+          const k = at(key);
+          const existing = stripInternal(table.get(k));
+          if (!existing && !create) return Effect.fail(new CheckFailed({ found: false }));
+          const next: Doc = { ...existing };
+          for (const f of m.keyFields) next[f] = key[f];
+          for (const [f, v] of Object.entries(create ?? {}))
+            if (next[f] === undefined && v !== undefined) next[f] = v;
+          for (const [f, by] of Object.entries(amounts)) {
+            // Only a missing counter starts at 0; DynamoDB can't ADD to a stored null.
+            const now = next[f] === undefined ? 0 : next[f];
+            if (typeof now !== 'number' || !Number.isFinite(now))
+              return Effect.die(
+                new Error(`${what}: cannot increment "${f}": it holds ${JSON.stringify(now)}`),
+              );
+            next[f] = addDecimal(now, by);
+          }
           table.set(k, m.toItem(next));
           return Effect.succeed(next);
         }),
@@ -448,6 +543,68 @@ function memoryBackend(): Backend<MemoryWrite> {
         return Effect.void;
       }),
   };
+}
+
+/**
+ * Why adding `by` to a field with this schema could store a value the schema
+ * rejects, or `undefined` when every total stays valid. DynamoDB computes the
+ * total, so it can't be checked before the write: a counter's checks must hold
+ * for any total, starting from a valid one or from 0 when the field is missing.
+ */
+function counterProblem(field: { readonly ast: SchemaAST.AST }, by: number): string | undefined {
+  const checks: SchemaAST.Check<unknown>[] = [];
+  // The stored (encoded) value must be a number for ADD, and the decoded one
+  // must pass its checks; `null`/`undefined` alternatives can't be added to.
+  const number = (ast: SchemaAST.AST): boolean => {
+    checks.push(...(ast.checks ?? []));
+    if (SchemaAST.isNumber(ast)) return true;
+    if (!SchemaAST.isUnion(ast)) return false;
+    const rest = ast.types.filter((t) => t._tag !== 'Null' && t._tag !== 'Undefined');
+    return rest.length === 1 && number(rest[0]!);
+  };
+  if (!number(field.ast) || !number(SchemaAST.toEncoded(field.ast))) return "it isn't a number field";
+  for (const check of checks) {
+    const { id, payload } = (check.annotations?.representation ?? {}) as {
+      id?: string;
+      payload?: Record<string, number>;
+    };
+    const p = payload ?? {};
+    const safe =
+      check._tag === 'Filter' &&
+      (id === 'effect/schema/isFinite' ||
+        (id === 'effect/schema/isInt' && Number.isSafeInteger(by)) ||
+        (id === 'effect/schema/isGreaterThanOrEqualTo' && by >= 0 && by >= p.minimum!) ||
+        (id === 'effect/schema/isGreaterThan' && by >= 0 && by > p.exclusiveMinimum!) ||
+        (id === 'effect/schema/isLessThanOrEqualTo' && by <= 0 && by <= p.maximum!) ||
+        (id === 'effect/schema/isLessThan' && by <= 0 && by < p.exclusiveMaximum!));
+    if (!safe)
+      return `the total might not be ${check.annotations?.expected ?? 'valid'}. A counter's checks must hold for every total (finite, integer, a minimum with amounts >= 0, a maximum with amounts <= 0); check other limits on the total increment returns`;
+  }
+  return undefined;
+}
+
+/** Whether `doc` holds `condition`'s values, compared as DynamoDB's `=` compares; `null`: absent or null. */
+function meets(doc: Doc, condition: Doc): boolean {
+  return Object.entries(condition).every(([f, v]) =>
+    v === null ? doc[f] === undefined || doc[f] === null : Equal.equals(doc[f], v),
+  );
+}
+
+/**
+ * `a + b` the way DynamoDB adds numbers, in decimal: 0.1 + 0.2 is 0.3. Each
+ * operand is the decimal its shortest form spells, which is what DynamoDB
+ * receives for a JavaScript number.
+ */
+function addDecimal(a: number, b: number): number {
+  const parse = (n: number) => {
+    const [, sign, int, frac = '', exp = '0'] = /^(-?)(\d+)(?:\.(\d+))?(?:e([+-]\d+))?$/.exec(String(n))!;
+    return { units: BigInt(`${sign}${int}${frac}`), scale: frac.length - Number(exp) };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  const scale = Math.max(x.scale, y.scale);
+  const units = x.units * 10n ** BigInt(scale - x.scale) + y.units * 10n ** BigInt(scale - y.scale);
+  return Number(`${units}e${-scale}`);
 }
 
 /** The start key in a cursor `query` issued for `scope`, or undefined. */
@@ -569,25 +726,93 @@ function makeCollection<
   const decode = (item: unknown) => Effect.orDie(Schema.decodeUnknownEffect(schema)(item));
   const decodeAll = (items: ReadonlyArray<Doc>) => Effect.forEach(items, decode);
 
-  /** Encodes changed fields with their own schemas; `undefined` removes a field, if it's optional. */
-  const encodePatch = (patch: Doc) =>
-    Effect.gen(function* () {
-      const set: { [field: string]: Schema.Struct.Fields[string] } = {};
-      const out: Doc = {};
-      for (const [field, value] of Object.entries(patch)) {
-        const fieldSchema = schema.fields[field];
-        if (!fieldSchema) return yield* Effect.die(new Error(`collection "${name}" has no field "${field}"`));
-        if (value === undefined || value === null) {
-          if (!SchemaAST.isOptional(fieldSchema.ast))
-            return yield* Effect.die(new Error(`collection "${name}": "${field}" is required`));
-          out[field] = null;
-        } else set[field] = fieldSchema;
-      }
-      const values = Object.fromEntries(Object.entries(patch).filter(([f]) => f in set));
+  const fieldSchema = (field: string) => {
+    const s = schema.fields[field];
+    if (!s) throw new Error(`collection "${name}" has no field "${field}"`);
+    return s;
+  };
+  const isAbsent = (value: unknown) => value === undefined || value === null;
+
+  /** Encodes each value with its field's own schema. */
+  const encodeValues = (values: Doc) =>
+    Effect.suspend(() => {
+      const fields = Object.fromEntries(Object.keys(values).map((field) => [field, fieldSchema(field)]));
       // Each field schema comes from `schema`, which encodes without services.
-      const changed = Schema.Struct(set) as unknown as Schema.Codec<Doc, Doc>;
-      const encoded = yield* Effect.orDie(Schema.encodeUnknownEffect(changed)(values));
-      return { ...out, ...encoded };
+      const struct = Schema.Struct(fields) as unknown as Schema.Codec<Doc, Doc>;
+      return Effect.orDie(Schema.encodeUnknownEffect(struct)(values));
+    });
+
+  /** Like `encodeValues`, but absent (`undefined`/`null`) values become `null`. */
+  const encodeFields = (values: Doc) =>
+    Effect.suspend(() => {
+      const absent: Doc = {};
+      const present: Doc = {};
+      for (const [field, value] of Object.entries(values)) {
+        fieldSchema(field);
+        if (isAbsent(value)) absent[field] = null;
+        else present[field] = value;
+      }
+      return Effect.map(encodeValues(present), (encoded) => ({ ...absent, ...encoded }));
+    });
+
+  /** Encodes changed fields; `undefined` removes a field, if it's optional. */
+  const encodePatch = (patch: Doc) =>
+    Effect.suspend(() => {
+      for (const [field, value] of Object.entries(patch))
+        if (isAbsent(value) && !SchemaAST.isOptional(fieldSchema(field).ast))
+          throw new Error(`collection "${name}": "${field}" is required`);
+      return encodeFields(patch);
+    });
+
+  const update = (key: Doc, patch: Doc, conditional?: { readonly if: Doc }) =>
+    Effect.all([encodePatch(patch), conditional ? encodeFields(conditional.if) : Effect.undefined]).pipe(
+      Effect.flatMap(([encoded, condition]) => raw.update(key, encoded, condition)),
+      Effect.mapError((e) =>
+        e.found ? new ConditionFailed({ collection: name }) : new DocumentNotFound({ collection: name }),
+      ),
+      Effect.flatMap(decode),
+    );
+
+  const increment = (
+    key: Doc,
+    amounts: Record<string, number>,
+    mode: { readonly ifExists?: boolean; readonly create?: Doc } = {},
+  ) =>
+    Effect.gen(function* () {
+      for (const [field, by] of Object.entries(amounts)) {
+        // A non-finite amount is refused with the store's own checks.
+        const problem = Number.isFinite(by) ? counterProblem(fieldSchema(field), by) : undefined;
+        if (problem)
+          throw new Error(`collection "${name}": cannot increment "${field}" by ${by}: ${problem}`);
+      }
+      const encodedKey = yield* encodeFields(key);
+      let create: Doc | undefined;
+      if (!mode.ifExists) {
+        // Only `undefined` leaves a field out: `null` is a value, for a field whose schema takes it.
+        create = yield* encodeValues(
+          Object.fromEntries(Object.entries(mode.create ?? {}).filter(([, v]) => v !== undefined)),
+        );
+        // Checked whether or not the document exists, so the call that would
+        // create a document that doesn't decode never makes it this far.
+        const covered = new Set([
+          ...Object.keys(encodedKey),
+          ...Object.keys(amounts),
+          ...Object.keys(create),
+        ]);
+        const uncovered = Object.entries(schema.fields)
+          .filter(([field, s]) => !SchemaAST.isOptional(s.ast) && !covered.has(field))
+          .map(([field]) => `"${field}"`);
+        if (uncovered.length)
+          return yield* Effect.die(
+            new Error(
+              `collection "${name}": increment creates the document when it's missing, so \`create\` needs ${uncovered.join(', ')} (or pass \`ifExists: true\`)`,
+            ),
+          );
+      }
+      const item = yield* raw
+        .increment(encodedKey, amounts, create)
+        .pipe(Effect.mapError(() => new DocumentNotFound({ collection: name })));
+      return yield* decode(item);
     });
 
   const query = (partition: Partial<T>, q: QueryOptions = {}): Effect.Effect<Page<T>, InvalidCursor> =>
@@ -615,12 +840,10 @@ function makeCollection<
         Effect.mapError(() => new DocumentExists({ collection: name })),
         Effect.as(document),
       ),
-    update: (key, patch) =>
-      encodePatch(patch as Doc).pipe(
-        Effect.flatMap((encoded) => raw.update(key as Doc, encoded)),
-        Effect.mapError(() => new DocumentNotFound({ collection: name })),
-        Effect.flatMap(decode),
-      ),
+    // Without `if`, `update` can't fail with ConditionFailed, nor `increment`
+    // with DocumentNotFound without `ifExists`; the overloads say so.
+    update: update as unknown as Collection<T, P | K>['update'],
+    increment: increment as unknown as Collection<T, P | K>['increment'],
     delete: (key) => raw.delete(key),
     putMany: (documents) =>
       Effect.forEach(documents, encode).pipe(Effect.flatMap((items) => raw.putMany(items))),

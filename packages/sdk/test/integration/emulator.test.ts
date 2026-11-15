@@ -8,6 +8,7 @@ import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
+  GetItemCommand,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb';
 import {
@@ -43,7 +44,7 @@ import {
 } from '../../src/index.ts';
 import { setBindings } from '../../src/runtime/bindings.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
-import { batchContract, dbContract, transactContract } from '../effect-db-contract.ts';
+import { batchContract, countersContract, dbContract, transactContract } from '../effect-db-contract.ts';
 
 const region = process.env.AWS_REGION ?? 'us-east-1';
 const endpoint = process.env.AWS_ENDPOINT_URL;
@@ -225,6 +226,21 @@ describe('against the AWS Emulator', () => {
 
   it('db: transact applies all writes or, when one condition fails, none', () =>
     Effect.runPromise(transactContract('notes-tx').pipe(Effect.provide(Db.layer))));
+
+  it('db: increments and conditional updates behave like the in-memory store', async () => {
+    await Effect.runPromise(countersContract('ctr').pipe(Effect.provide(Db.layer)));
+    // What only the stored item shows: the TTL DynamoDB expires it by, and the
+    // index attributes `create` determined, written by the increment itself.
+    const ddb = new DynamoDBClient(cfg);
+    const item = async (pk: string, sk: string) =>
+      (await ddb.send(new GetItemCommand({ TableName: base, Key: { pk: { S: pk }, sk: { S: sk } } }))).Item;
+    expect((await item('ctr-usage#c3', '1'))?._ttl).toEqual({ N: '240' });
+    expect(await item('ctr-usage#c1', '1')).toMatchObject({
+      _ttl: { N: '120' },
+      gsi1pk: { S: 'ctr-usage#byPlan#pro' },
+      gsi1sk: { S: 'c1' },
+    });
+  });
 
   it('queue: send carries the body and trace', async () => {
     await run(Effect.flatMap(Queues, (queues) => queues.send('emails', { to: 'eric@example.com' })));
