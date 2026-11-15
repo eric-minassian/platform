@@ -34,7 +34,12 @@ export interface PlatformConfig {
   reservedAppNames: string[];
   /** Preview stages untouched for this long are destroyed by the reaper. */
   previewTtlDays: number;
-  limits: { appsPerMember: number; stagesPerApp: number };
+  limits: {
+    appsPerMember: number;
+    stagesPerApp: number;
+    /** Highest `email.dailyLimit` an app may declare (recipients per UTC day). */
+    emailsPerDay: number;
+  };
   telemetry: { logRetentionDays: { prod: number; other: number } };
 }
 

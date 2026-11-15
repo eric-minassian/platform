@@ -32,6 +32,8 @@ import {
   DataCollections,
   DataPage,
   DeploymentRecord,
+  EmailSending,
+  EmailStatsResponse,
   ErrorGroup,
   ErrorStatus,
   JobsResponse,
@@ -51,6 +53,7 @@ import {
   StageDestroying,
   StageRecord,
   StorageResponse,
+  SuppressedResponse,
   TraceResponse,
   UpdateAppRequest,
   UpdateErrorRequest,
@@ -363,6 +366,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       success: RealtimeStatsResponse,
       error: errors,
     }),
+    /** The stage's sender, SES sending status, today's usage, and SES counts for its tenant. */
+    HttpApiEndpoint.get('email', '/apps/:app/email', {
+      params: app,
+      query: rangeQuery,
+      success: EmailStatsResponse,
+      error: errors,
+    }),
     HttpApiEndpoint.get('errors', '/apps/:app/errors', {
       params: app,
       query: { ...stageQuery, status: Schema.optional(ErrorStatus) },
@@ -484,6 +494,27 @@ export class ManageApi extends HttpApiGroup.make('manage')
       params: { ...app, name: Schema.String },
       query: stageQuery,
       success: CronRunResponse.pipe(HttpApiSchema.status(202)),
+      error: errors,
+    }),
+    /** The stage's suppression list (its SES tenant's), oldest first; `next` pages on. */
+    HttpApiEndpoint.get('suppressed', '/apps/:app/email/suppressed', {
+      params: app,
+      query: { ...stageQuery, next: Schema.optional(Schema.String) },
+      success: SuppressedResponse,
+      error: errors,
+    }),
+    /** Lets SES send to `address` from this stage again. */
+    HttpApiEndpoint.delete('unsuppress', '/apps/:app/email/suppressed/:address', {
+      params: { ...app, address: Schema.String },
+      query: stageQuery,
+      success: HttpApiSchema.NoContent,
+      error: errors,
+    }),
+    /** Resumes sending after a pause by the reputation policy or by hand (not one by AWS). */
+    HttpApiEndpoint.post('resumeEmail', '/apps/:app/email/resume', {
+      params: app,
+      query: stageQuery,
+      success: EmailSending,
       error: errors,
     }),
     HttpApiEndpoint.post('redrive', '/apps/:app/queues/:name/redrive', {

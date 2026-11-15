@@ -26,6 +26,7 @@ export interface Bindings {
   secrets: { path: string; sharedPath: string; names: readonly string[] };
   auth?: AuthBindings;
   realtime?: RealtimeBindings;
+  email?: EmailBindings;
   /** Worker function name, for direct `invoke` jobs. */
   worker?: string;
   /**
@@ -58,6 +59,21 @@ export interface RealtimeBindings {
   subscribe: 'public' | 'signed-in';
   /** Declared channel patterns (`board`, `boards/*`): the SDK publishes only to these. */
   channels: readonly string[];
+}
+
+export interface EmailBindings {
+  /** `ses` when deployed; `local` under `plat dev` / `plat test`, where the CLI captures mail and nothing is sent. */
+  mode: 'ses' | 'local';
+  /** The stage's address, e.g. `todo@mail.platform.ericminassian.com`. */
+  from: string;
+  /** Display name (`email.name`). */
+  name?: string;
+  /** SES tenant and configuration set (both `names.emailTenant`). */
+  tenant: string;
+  /** Recipients per UTC day. */
+  dailyLimit: number;
+  /** Table holding the stage's usage rows (the platform's telemetry table; `telemetryKeys.email`). */
+  usageTable: string;
 }
 
 export function encodeBindings(b: Bindings): string {

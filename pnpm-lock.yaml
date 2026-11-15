@@ -324,6 +324,9 @@ importers:
       '@aws-sdk/client-scheduler':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/client-sesv2':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-sqs':
         specifier: ^3.1169.0
         version: 3.1169.0
@@ -361,6 +364,9 @@ importers:
         specifier: ^3.1169.0
         version: 3.1169.0
       '@aws-sdk/client-s3':
+        specifier: ^3.1169.0
+        version: 3.1169.0
+      '@aws-sdk/client-sesv2':
         specifier: ^3.1169.0
         version: 3.1169.0
       '@aws-sdk/client-sqs':
@@ -431,6 +437,9 @@ importers:
         specifier: ^3.1169.0
         version: 3.1169.0
       '@aws-sdk/client-scheduler':
+        specifier: ^3.1169.0
+        version: 3.1169.0
+      '@aws-sdk/client-sesv2':
         specifier: ^3.1169.0
         version: 3.1169.0
       '@aws-sdk/client-sns':
@@ -663,6 +672,10 @@ packages:
 
   '@aws-sdk/client-scheduler@3.1169.0':
     resolution: {integrity: sha512-CHoPOyN8eIjYIrV7If+XhXZV4XIAaFMypcyQ2ffATy5rn3bs4c1d7YkBt3n91pWhSSEUPL56rDgaNCe2kEtdRw==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-sesv2@3.1169.0':
+    resolution: {integrity: sha512-tSJymaewFqxbewnzqsEZK9EK9WvRvWDMW1NTyIzfyQxNCRczlkX/9BaCy/PUw9HV2Ca8y+BH+yFxC+R5+oMEbg==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-sns@3.1169.0':
@@ -2487,6 +2500,18 @@ snapshots:
     dependencies:
       '@aws-sdk/core': 3.981.0
       '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@aws-sdk/client-sesv2@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/signature-v4-multi-region': 3.996.52
       '@aws-sdk/types': 3.975.1
       '@smithy/core': 3.40.0
       '@smithy/fetch-http-handler': 5.8.1

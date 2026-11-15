@@ -40,6 +40,14 @@ export interface PlatformRuntimeConfig {
   telemetryFunctionArn?: string;
   /** The AppSync Event API stages' channel namespaces live in (absent on platforms that predate it). */
   realtime?: RealtimeRuntimeConfig;
+  /** The SES domain every stage sends from (absent on platforms that predate email). */
+  email?: EmailRuntimeConfig;
+}
+
+export interface EmailRuntimeConfig {
+  /** Verified domain identity: `mail.<zone>` (`mail.localhost` in the emulator). */
+  domain: string;
+  identityArn: string;
 }
 
 export interface RealtimeRuntimeConfig {

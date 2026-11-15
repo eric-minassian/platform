@@ -1,5 +1,6 @@
 import { Effect, Schema } from 'effect';
 import { validateCron } from './cron.ts';
+import { EMAIL_DEFAULT_DAILY_LIMIT, EMAIL_NAME_MESSAGE, EMAIL_NAME_PATTERN } from './email.ts';
 import { APP_NAME_PATTERN, ENV_NAME_PATTERN, EVENT_TYPE_PATTERN, RESOURCE_KEY_PATTERN } from './naming.ts';
 import { CHANNEL_DECLARATION_PATTERN, CHANNEL_MESSAGE, realtimeIssues } from './realtime.ts';
 
@@ -90,6 +91,17 @@ const AuthSchema = Schema.Union([
 
 const RealtimeSubscribeSchema = Schema.Literals(['public', 'signed-in']);
 
+const EmailSchema = Schema.Union([
+  Schema.Boolean,
+  Schema.Struct({
+    name: Schema.optional(
+      Schema.String.check(Schema.isPattern(EMAIL_NAME_PATTERN, { message: EMAIL_NAME_MESSAGE })),
+    ),
+    // The platform's ceiling (`limits.emailsPerDay`) is checked when a deployment is created.
+    dailyLimit: Schema.optional(intBetween(1, 1_000_000)),
+  }),
+]);
+
 const RealtimeSchema = Schema.Struct({
   subscribe: RealtimeSubscribeSchema.pipe(orElse('public')),
   channels: recordOf(CHANNEL_DECLARATION_PATTERN, Schema.Struct({}), CHANNEL_MESSAGE),
@@ -117,6 +129,7 @@ export const ManifestSchema = Schema.Struct({
   secrets: Schema.Array(envName).pipe(orElse([])),
   env: recordOf(ENV_NAME_PATTERN, Schema.String).pipe(orElse({})),
   realtime: Schema.optional(RealtimeSchema),
+  email: EmailSchema.pipe(orElse(false)),
 }).check(
   Schema.makeFilter((m) => {
     if (!m.realtime) return undefined;
@@ -219,6 +232,20 @@ export interface RealtimeConfig {
   channels: { readonly [pattern: string]: ChannelConfig };
 }
 
+/**
+ * Transactional email, sent from `<app>@mail.<platform zone>` (previews from
+ * `<app>--<stage>@…`). Replies need `replyTo`: the sending address takes no mail.
+ */
+export interface EmailConfig {
+  /** Display name recipients see, e.g. `Todo` → `"Todo" <todo@mail…>`. */
+  name?: string;
+  /**
+   * Recipients per UTC day (default 200), up to the platform's
+   * `limits.emailsPerDay`. Previews and `plat dev` get at most 50.
+   */
+  dailyLimit?: number;
+}
+
 export interface AppConfig {
   /** 3-30 chars of a-z, 0-9 and single hyphens; also the app's host name. */
   name: string;
@@ -244,6 +271,8 @@ export interface AppConfig {
   env?: { readonly [name: string]: string };
   /** Live updates pushed to browsers on typed channels. */
   realtime?: RealtimeConfig;
+  /** Send email with the SDK's `Email` service: `true`, or `{ name, dailyLimit }`. */
+  email?: boolean | EmailConfig;
 }
 
 /**
@@ -316,6 +345,8 @@ export const ResolvedManifest = Schema.Struct({
   realtime: Schema.optional(
     Schema.Struct({ subscribe: RealtimeSubscribeSchema, channels: Schema.Array(Schema.String) }),
   ),
+  /** Present when the stage sends email. `dailyLimit` is the declared one (prod's). */
+  email: Schema.optional(Schema.Struct({ name: Schema.optional(Schema.String), dailyLimit: Schema.Finite })),
 });
 export type ResolvedManifest = typeof ResolvedManifest.Type;
 
@@ -361,6 +392,13 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
       { ...q, visibilityTimeoutSeconds: q.visibilityTimeoutSeconds ?? (worker?.timeoutSeconds ?? 60) * 6 },
     ]),
   );
+  const email: ResolvedManifest['email'] =
+    m.email === false
+      ? undefined
+      : {
+          ...(m.email !== true && m.email.name ? { name: m.email.name } : {}),
+          dailyLimit: (m.email !== true && m.email.dailyLimit) || EMAIL_DEFAULT_DAILY_LIMIT,
+        };
   const crons: ResolvedManifest['crons'] = Object.fromEntries(
     Object.entries(m.crons).map(([key, c]) => [key, typeof c === 'string' ? { schedule: c } : c]),
   );
@@ -380,5 +418,6 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     ...(m.realtime
       ? { realtime: { subscribe: m.realtime.subscribe, channels: Object.keys(m.realtime.channels) } }
       : {}),
+    ...(email ? { email } : {}),
   };
 }

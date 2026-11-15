@@ -323,6 +323,67 @@ export const RealtimeStatsResponse = Schema.Struct({
 });
 export type RealtimeStatsResponse = typeof RealtimeStatsResponse.Type;
 
+/** Per-tenant SES counts in one bucket (CloudWatch `Sum`s of `AWS/SES` by tenant). */
+export const EmailPoint = Schema.Struct({
+  ts: Schema.String,
+  sends: Schema.Finite,
+  deliveries: Schema.Finite,
+  bounces: Schema.Finite,
+  complaints: Schema.Finite,
+});
+export type EmailPoint = typeof EmailPoint.Type;
+
+/**
+ * Whether SES lets a stage send. `paused` comes with who paused it: `policy`
+ * (the tenant's reputation policy, after bad bounce or complaint rates),
+ * `manual` (someone changed it in SES), or `aws` (only AWS Support can lift
+ * that one).
+ */
+export const EmailSending = Schema.Struct({
+  status: Schema.Literals(['enabled', 'paused']),
+  pausedBy: optional(Schema.Literals(['policy', 'manual', 'aws'])),
+  /** SES's reason, when paused. */
+  cause: optional(Schema.String),
+  since: optional(Schema.String),
+});
+export type EmailSending = typeof EmailSending.Type;
+
+/** A stage's email: its sender, whether it can send, today's usage and SES's counts over the range. */
+export const EmailStatsResponse = Schema.Struct({
+  app: Schema.String,
+  stage: Schema.String,
+  /** False when the live deployment declares no `email`; the rest is then empty. */
+  enabled: Schema.Boolean,
+  /** `"Todo" <todo@mail…>`. */
+  from: optional(Schema.String),
+  sending: optional(EmailSending),
+  /** Recipients sent today (UTC) and the stage's daily limit. */
+  today: optional(Schema.Struct({ sent: Schema.Finite, limit: Schema.Finite })),
+  res: Resolution,
+  totals: Schema.Struct({
+    sends: Schema.Finite,
+    deliveries: Schema.Finite,
+    bounces: Schema.Finite,
+    complaints: Schema.Finite,
+  }),
+  points: Schema.Array(EmailPoint),
+});
+export type EmailStatsResponse = typeof EmailStatsResponse.Type;
+
+/** An address on a stage's suppression list: SES no longer sends to it from this stage. */
+export const SuppressedAddress = Schema.Struct({
+  address: Schema.String,
+  reason: Schema.Literals(['bounce', 'complaint']),
+  since: Schema.String,
+});
+export type SuppressedAddress = typeof SuppressedAddress.Type;
+
+export const SuppressedResponse = Schema.Struct({
+  items: Schema.Array(SuppressedAddress),
+  next: optional(Schema.String),
+});
+export type SuppressedResponse = typeof SuppressedResponse.Type;
+
 export const ErrorStatus = Schema.Literals(['open', 'resolved', 'ignored']);
 export type ErrorStatus = typeof ErrorStatus.Type;
 
@@ -462,7 +523,11 @@ export type RedriveResponse = typeof RedriveResponse.Type;
 
 export const AdminOverview = Schema.Struct({
   members: Schema.Array(Schema.Struct({ github: Schema.String, role: MemberRole })),
-  limits: Schema.Struct({ appsPerMember: Schema.Finite, stagesPerApp: Schema.Finite }),
+  limits: Schema.Struct({
+    appsPerMember: Schema.Finite,
+    stagesPerApp: Schema.Finite,
+    emailsPerDay: Schema.Finite,
+  }),
   apps: Schema.Finite,
   stages: Schema.Finite,
   previews: Schema.Finite,
