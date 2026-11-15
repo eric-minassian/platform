@@ -4,8 +4,11 @@
  * through bindings the engine injects. Under `plat dev` the same code talks to
  * the AWS Emulator, so there is exactly one implementation.
  *
- * CONTRACT: these exports are documented in templates/app/AGENTS.md and used
- * by every app. Keep signatures stable.
+ * This is the promise API, for apps not written with Effect (the control
+ * plane). Effect apps, and the template, use `@ericminassian/platform/effect`,
+ * which is built on it.
+ *
+ * CONTRACT: used by the control plane and the Effect SDK. Keep signatures stable.
  */
 export type { PlatformUser } from '@ericminassian/platform-core';
 export { type AppInfo, app } from './app.ts';

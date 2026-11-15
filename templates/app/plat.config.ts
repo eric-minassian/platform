@@ -1,5 +1,5 @@
 import { defineApp, event, queue } from '@ericminassian/platform/config';
-import type { EmailJob, TodoCreated } from './src/types.ts';
+import type { EmailJob, TodoCreated } from './src/domain.ts';
 
 // Everything this app needs from the platform. `plat` evaluates this file and
 // provisions what it declares; the SDK checks names and payload types in code
@@ -24,7 +24,7 @@ const app = defineApp({
 
 export default app;
 
-declare module '@ericminassian/platform' {
+declare module '@ericminassian/platform/config' {
   interface Register {
     app: typeof app;
   }

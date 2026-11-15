@@ -3,7 +3,7 @@ import type { AppConfig, PayloadOf } from '@ericminassian/platform-core';
 /**
  * Each app's `plat.config.ts` registers its config here:
  *
- *   declare module '@ericminassian/platform' {
+ *   declare module '@ericminassian/platform/config' {
  *     interface Register { app: typeof app }
  *   }
  *

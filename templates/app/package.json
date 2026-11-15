@@ -10,14 +10,16 @@
     "test": "vitest run",
     "test:integration": "plat test",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json && tsc --noEmit -p e2e/tsconfig.json"
+    "typecheck": "effect-tsgo tsc --noEmit && effect-tsgo tsc --noEmit -p web/tsconfig.json && effect-tsgo tsc --noEmit -p e2e/tsconfig.json"
   },
   "dependencies": {
     "@ericminassian/platform": "workspace:*",
-    "hono": "^4.13.18",
-    "zod": "^4.6.7"
+    "effect": "^4.1.4"
   },
   "devDependencies": {
+    "@effect/atom-react": "^4.1.4",
+    "@effect/tsgo": "^0.69.0",
+    "@effect/vitest": "^4.1.4",
     "@ericminassian/plat": "workspace:*",
     "@playwright/test": "^1.65.1",
     "@types/node": "^24.19.2",
@@ -26,6 +28,7 @@
     "@vitejs/plugin-react": "^6.3.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "scheduler": "^0.28.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.8",
     "vitest": "^5.1.0"

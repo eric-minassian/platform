@@ -12,6 +12,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./config": "./src/config.ts",
+    "./effect": "./src/effect/index.ts",
+    "./effect/api": "./src/effect/api.ts",
     "./server": "./src/server.ts",
     "./worker": "./src/worker.ts",
     "./testing": "./src/testing.ts"
@@ -26,6 +28,14 @@
       "./config": {
         "types": "./dist/config.d.ts",
         "default": "./dist/config.js"
+      },
+      "./effect": {
+        "types": "./dist/effect/index.d.ts",
+        "default": "./dist/effect/index.js"
+      },
+      "./effect/api": {
+        "types": "./dist/effect/api.d.ts",
+        "default": "./dist/effect/api.js"
       },
       "./server": {
         "types": "./dist/server.d.ts",
@@ -47,7 +57,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit && tsc -p test/types",
+    "typecheck": "effect-tsgo tsc --noEmit && effect-tsgo tsc -p test/types",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "prepack": "pnpm run build"
@@ -65,9 +75,19 @@
     "@ericminassian/platform-core": "workspace:*",
     "jose": "^6.2.17"
   },
+  "peerDependencies": {
+    "effect": "^4.1.4"
+  },
+  "peerDependenciesMeta": {
+    "effect": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@effect/tsgo": "^0.69.0",
     "@ericminassian/platform-engine": "workspace:*",
     "@types/aws-lambda": "^8.10.164",
+    "effect": "^4.1.4",
     "hono": "^4.13.18"
   }
 }

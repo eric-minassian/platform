@@ -363,12 +363,18 @@ importers:
         specifier: ^6.2.17
         version: 6.2.17
     devDependencies:
+      '@effect/tsgo':
+        specifier: ^0.69.0
+        version: 0.69.0
       '@ericminassian/platform-engine':
         specifier: workspace:*
         version: link:../engine
       '@types/aws-lambda':
         specifier: ^8.10.164
         version: 8.10.164
+      effect:
+        specifier: ^4.1.4
+        version: 4.1.4
       hono:
         specifier: ^4.13.18
         version: 4.13.18
@@ -490,13 +496,19 @@ importers:
       '@ericminassian/platform':
         specifier: workspace:*
         version: link:../../packages/sdk
-      hono:
-        specifier: ^4.13.18
-        version: 4.13.18
-      zod:
-        specifier: ^4.6.7
-        version: 4.6.7
+      effect:
+        specifier: ^4.1.4
+        version: 4.1.4
     devDependencies:
+      '@effect/atom-react':
+        specifier: ^4.1.4
+        version: 4.1.4(effect@4.1.4)(react@19.3.1)(scheduler@0.28.0)
+      '@effect/tsgo':
+        specifier: ^0.69.0
+        version: 0.69.0
+      '@effect/vitest':
+        specifier: ^4.1.4
+        version: 4.1.4(effect@4.1.4)(vitest@5.1.0(@types/node@24.19.2)(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))
       '@ericminassian/plat':
         specifier: workspace:*
         version: link:../../packages/cli
@@ -521,6 +533,9 @@ importers:
       react-dom:
         specifier: ^19.3.1
         version: 19.3.1(react@19.3.1)
+      scheduler:
+        specifier: ^0.28.0
+        version: 0.28.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -798,6 +813,58 @@ packages:
     engines: {node: '>=14.21.3'}
     cpu: [x64]
     os: [win32]
+
+  '@effect/atom-react@4.1.4':
+    resolution: {integrity: sha512-Xj58DcAzKsysHhzBCPaz2v1QAJq6NvMdGVmG7SV4zkw1RMiTZv8gaOXA1VqIRlpmvdspMwRe/BQ4eayuzRZTpQ==}
+    peerDependencies:
+      effect: ^4.1.4
+      react: '>=19.0.0 <20.0.0'
+      scheduler: '>=0.25.0 <0.29.0'
+
+  '@effect/tsgo-darwin-arm64@0.69.0':
+    resolution: {integrity: sha512-XSkC5Ot7906NmN3tW0uQb+58DV7oVgyX7A20w3Zu7Y26kTve/YibhiDn8ZxhNRH/SiBouyA6IKR6THWjRs1cow==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@effect/tsgo-darwin-x64@0.69.0':
+    resolution: {integrity: sha512-QXVmbe8l0gtkByP2yazqPR7Pw9ImJZ6mX+YqYRED6h39DRRgFF4LvzM6jJQ7PVQFQpk816YpOHztO7bJTjSW1A==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@effect/tsgo-linux-arm64@0.69.0':
+    resolution: {integrity: sha512-BWb3NxRnpYJikfgr2xD2U9DBM5gHm7rScdHYs8tAGXJytqQ6ioAOOYqDa1XZx2MwO2lG3BEAw2liI77mHMVRfQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@effect/tsgo-linux-arm@0.69.0':
+    resolution: {integrity: sha512-XewLmpBZC3CkaKCjhe2f2ZOGfdewZ0hgGIjiCUNiEmHl6Kwt8H8dzNAsYgWPPeahVTi09CSyo5f8iEwEIHt95g==}
+    cpu: [arm]
+    os: [linux]
+
+  '@effect/tsgo-linux-x64@0.69.0':
+    resolution: {integrity: sha512-LZ3joeZ5D/Tv/tQN4r5uA7yoTQ5cHvCjICF3NcTX9ntlhQ51gJlhRcbOvP8v8AzTkOtrty7YXZW++iUOY0OKpw==}
+    cpu: [x64]
+    os: [linux]
+
+  '@effect/tsgo-win32-arm64@0.69.0':
+    resolution: {integrity: sha512-ZlysvNK8BJa0WaQ8KVCUjpY0VgxiqzqchHCQj2+ECJcBwhn178OXcgl4+ZhmFbnr/T4b3ZtsOj0+UXtkr+fPbg==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@effect/tsgo-win32-x64@0.69.0':
+    resolution: {integrity: sha512-EIxwudo6cSjandzmfputEmpTfdlAfTd2sWQ29vWh3F3qFb6MC9JDCAYHXQFWSGOPNhMBK6NXd/8humPW/WkpGA==}
+    cpu: [x64]
+    os: [win32]
+
+  '@effect/tsgo@0.69.0':
+    resolution: {integrity: sha512-ypgO19woAyrfAG0LzU2QwQnprMpV2G30nEo9ffd4Bc0ow0vXupcx0mcSLG1EfvmRGl0jhiQ3yAbsCuJhqwnRhg==}
+    hasBin: true
+
+  '@effect/vitest@4.1.4':
+    resolution: {integrity: sha512-AKpZ6zKihCRhY7hDbiQ2yp/krw+afIkxDRjFMwwzMiyhd0iYk0WaHa9J6GGC7TUF/C7HP2dZyMVq5xC0Qm/2/g==}
+    peerDependencies:
+      effect: ^4.1.4
+      vitest: '>=5.0.0 <6.0.0'
 
   '@emnapi/core@2.0.0-beta.2':
     resolution: {integrity: sha512-MzCVoWtcg4Pm2B3je5mMvYMvj3MmBKw+fU7vbsJc9/iT8ip6/eYIHo/Dsm/mr+wsHB6SEyJDuxB09Yy6r/8+4A==}
@@ -1577,6 +1644,9 @@ packages:
   detect-libc@2.1.2:
     resolution: {integrity: sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==}
     engines: {node: '>=8'}
+
+  effect@4.1.4:
+    resolution: {integrity: sha512-Tgrv/9FN+TZYyOn8XSli+fVqAfwDrDAkiX5Uu9vztINb675VTQdhD0gWI5Kzvhlh9QqzjZvw72iugqw5pwoghQ==}
 
   enhanced-resolve@5.27.0:
     resolution: {integrity: sha512-Do6BB2xzlcc/odFg+XEYyneAx4T/WfywO71yw9ePS2tVfRsf7JVR4mUeELadIeHzixkzbG5DpluiEFPi2WGfYQ==}
@@ -2449,6 +2519,48 @@ snapshots:
   '@biomejs/cli-win32-x64@2.6.7':
     optional: true
 
+  '@effect/atom-react@4.1.4(effect@4.1.4)(react@19.3.1)(scheduler@0.28.0)':
+    dependencies:
+      effect: 4.1.4
+      react: 19.3.1
+      scheduler: 0.28.0
+
+  '@effect/tsgo-darwin-arm64@0.69.0':
+    optional: true
+
+  '@effect/tsgo-darwin-x64@0.69.0':
+    optional: true
+
+  '@effect/tsgo-linux-arm64@0.69.0':
+    optional: true
+
+  '@effect/tsgo-linux-arm@0.69.0':
+    optional: true
+
+  '@effect/tsgo-linux-x64@0.69.0':
+    optional: true
+
+  '@effect/tsgo-win32-arm64@0.69.0':
+    optional: true
+
+  '@effect/tsgo-win32-x64@0.69.0':
+    optional: true
+
+  '@effect/tsgo@0.69.0':
+    optionalDependencies:
+      '@effect/tsgo-darwin-arm64': 0.69.0
+      '@effect/tsgo-darwin-x64': 0.69.0
+      '@effect/tsgo-linux-arm': 0.69.0
+      '@effect/tsgo-linux-arm64': 0.69.0
+      '@effect/tsgo-linux-x64': 0.69.0
+      '@effect/tsgo-win32-arm64': 0.69.0
+      '@effect/tsgo-win32-x64': 0.69.0
+
+  '@effect/vitest@4.1.4(effect@4.1.4)(vitest@5.1.0(@types/node@24.19.2)(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)))':
+    dependencies:
+      effect: 4.1.4
+      vitest: 5.1.0(@types/node@24.19.2)(vite@8.3.8(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   '@emnapi/core@2.0.0-beta.2':
     dependencies:
       '@emnapi/wasi-threads': 2.2.0
@@ -2976,6 +3088,8 @@ snapshots:
   decimal.js-light@2.5.1: {}
 
   detect-libc@2.1.2: {}
+
+  effect@4.1.4: {}
 
   enhanced-resolve@5.27.0:
     dependencies:
