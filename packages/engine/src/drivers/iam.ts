@@ -1,20 +1,12 @@
 import {
   AttachRolePolicyCommand,
-  CreateOpenIDConnectProviderCommand,
-  CreatePolicyCommand,
-  CreatePolicyVersionCommand,
   CreateRoleCommand,
-  DeletePolicyVersionCommand,
   DeleteRoleCommand,
   DeleteRolePermissionsBoundaryCommand,
   DeleteRolePolicyCommand,
   DetachRolePolicyCommand,
-  GetPolicyCommand,
-  GetPolicyVersionCommand,
   GetRoleCommand,
   ListAttachedRolePoliciesCommand,
-  ListOpenIDConnectProvidersCommand,
-  ListPolicyVersionsCommand,
   ListRolePoliciesCommand,
   PutRolePermissionsBoundaryCommand,
   PutRolePolicyCommand,
@@ -130,66 +122,4 @@ export async function deleteRole(ctx: EngineContext, name: string): Promise<bool
   await ignoreNotFound(iam.send(new DeleteRoleCommand({ RoleName: name })));
   ctx.log('info', 'deleted role', `role ${name}`);
   return true;
-}
-
-/** Customer managed policy kept at `document` (new default version when it changes). */
-export async function ensureManagedPolicy(
-  ctx: EngineContext,
-  spec: { name: string; path?: string; description?: string; document: PolicyDocument },
-): Promise<string> {
-  const iam = ctx.clients.iam;
-  const acct = await ctx.accountId();
-  const path = spec.path ?? '/';
-  const arn = `arn:aws:iam::${acct}:policy${path}${spec.name}`;
-  const existing = await ignoreNotFound(iam.send(new GetPolicyCommand({ PolicyArn: arn })));
-  if (!existing?.Policy) {
-    await iam.send(
-      new CreatePolicyCommand({
-        PolicyName: spec.name,
-        Path: path,
-        Description: spec.description,
-        PolicyDocument: JSON.stringify(spec.document),
-      }),
-    );
-    ctx.log('info', 'created managed policy', `policy ${spec.name}`);
-    return arn;
-  }
-  const version = await iam.send(
-    new GetPolicyVersionCommand({ PolicyArn: arn, VersionId: existing.Policy.DefaultVersionId }),
-  );
-  if (samePolicy(version.PolicyVersion?.Document, spec.document)) return arn;
-  const versions = await iam.send(new ListPolicyVersionsCommand({ PolicyArn: arn }));
-  const old = (versions.Versions ?? []).filter((v) => !v.IsDefaultVersion);
-  if ((versions.Versions ?? []).length >= 5 && old.length > 0) {
-    const oldest = old.sort((a, b) => (a.CreateDate?.getTime() ?? 0) - (b.CreateDate?.getTime() ?? 0))[0]!;
-    await iam.send(new DeletePolicyVersionCommand({ PolicyArn: arn, VersionId: oldest.VersionId }));
-  }
-  await iam.send(
-    new CreatePolicyVersionCommand({
-      PolicyArn: arn,
-      PolicyDocument: JSON.stringify(spec.document),
-      SetAsDefault: true,
-    }),
-  );
-  ctx.log('info', 'updated managed policy', `policy ${spec.name}`);
-  return arn;
-}
-
-/** GitHub Actions OIDC identity provider (one per account). */
-export async function ensureGithubOidcProvider(ctx: EngineContext): Promise<string> {
-  const iam = ctx.clients.iam;
-  const url = 'token.actions.githubusercontent.com';
-  const list = await iam.send(new ListOpenIDConnectProvidersCommand({}));
-  const found = (list.OpenIDConnectProviderList ?? []).find((p) => p.Arn?.endsWith(`/${url}`));
-  if (found?.Arn) return found.Arn;
-  const res = await iam.send(
-    new CreateOpenIDConnectProviderCommand({
-      Url: `https://${url}`,
-      ClientIDList: ['sts.amazonaws.com'],
-      // IAM no longer validates thumbprints for GitHub's well-known issuer, but the field is required.
-      ThumbprintList: ['6938fd4d98bab03faadb97b34396831e3780aea1'],
-    }),
-  );
-  ctx.log('info', 'created GitHub OIDC provider', `oidc ${url}`);
-  return res.OpenIDConnectProviderArn!;
 }

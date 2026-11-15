@@ -43,62 +43,73 @@ gh variable set DNS_DELEGATION_ROLE_ARN --body arn:aws:iam::<management account 
 gh secret set ALERT_EMAIL --body <where platform alerts go>     # a secret: variables show in public logs
 ```
 
-## 3. First foundation run (local)
+## 3. Bootstrap CDK (once per account)
+
+The platform's shared resources are one CDK stack, `platform-foundation`
+(`foundation/src/stack.ts`). CDK deploys through a `CDKToolkit` stack (an
+asset bucket and deploy roles) that has to exist first:
 
 ```sh
 export AWS_PROFILE=platform-prod
 export DNS_DELEGATION_ROLE_ARN=...   # ALERT_EMAIL too, once you've picked one
 pnpm install
-pnpm platform:deploy -- --plan   # prints every step, changes nothing
+pnpm --filter @ericminassian/platform-foundation exec cdk bootstrap aws://<platform-prod account id>/us-east-1
+```
+
+## 4. First deploy (local)
+
+```sh
+pnpm platform:diff     # what the deploy would change
 pnpm platform:deploy
 ```
 
-The first run creates the delegated `platform.ericminassian.com` zone and
-registers its NS record in the root zone. It requests two certificates:
+This deploys the stack, then the control plane app, then the account-level
+log subscription that feeds telemetry (`foundation/src/deploy.ts`). The
+stack creates:
 
-- `*.platform.ericminassian.com`: validated automatically in the delegated zone.
-- `*.ericminassian.com`: needs one record in the root zone. The run **stops
-  here** and prints the validation CNAME.
-
-## 4. Certificate validation record (eric-minassian/aws)
-
-Done in [eric-minassian/aws#19](https://github.com/eric-minassian/aws/pull/19).
-It adds the printed record to `DNS_ZONES` in `cdk/config.ts`; ACM re-checks it
-at every renewal, so it stays. After `pnpm deploy` there, the certificate
-showed `ISSUED` within a few minutes:
-
-```sh
-aws acm list-certificates --region us-east-1 --profile platform-prod
-```
-
-## 5. Finish the foundation
-
-```sh
-pnpm platform:deploy
-```
-
-This creates:
-
+- the delegated `platform.ericminassian.com` zone, with its NS record in the
+  root zone (written through the delegation role);
+- certificates for `platform.ericminassian.com` + `*.platform.ericminassian.com`
+  (validated in the delegated zone) and `*.ericminassian.com` (step 5);
 - the router (KeyValueStore, CloudFront Function, distribution, `edge` and
   console aliases);
 - buckets, tables and the Cognito user pool with `login.platform.ericminassian.com`;
 - IAM (permission boundary, control plane role, GitHub OIDC provider,
   `platform-ci` role);
-- the alerts topic, session key and runtime config;
-- the control plane app;
-- the account-level log subscription that feeds telemetry.
+- the alerts topic and runtime config.
 
-On a first run the Cognito step waits a few minutes. Cognito accepts the
-custom domain only once `platform.ericminassian.com` resolves, and that
-record aliases the distribution, which is still deploying.
+The deploy also generates the session key once. It's a SecureString, which
+CloudFormation can't create.
 
-From now on, every merge to `main` re-runs this through
-`.github/workflows/deploy-platform.yml`.
+## 5. Certificate validation record (eric-minassian/aws)
+
+On a first deploy the stack waits on the `*.ericminassian.com` certificate:
+its validation CNAME belongs in the root zone, which this account can't
+write. While it waits, read the record:
+
+```sh
+aws acm list-certificates --region us-east-1 --profile platform-prod \
+  --query "CertificateSummaryList[?DomainName=='*.ericminassian.com'].CertificateArn" --output text
+aws acm describe-certificate --region us-east-1 --profile platform-prod --certificate-arn <arn> \
+  --query 'Certificate.DomainValidationOptions[0].ResourceRecord'
+```
+
+Add it to `DNS_ZONES` in `cdk/config.ts` in eric-minassian/aws and
+`pnpm deploy` there (done in
+[eric-minassian/aws#19](https://github.com/eric-minassian/aws/pull/19)). ACM
+issues the certificate within a few minutes and the stack carries on; if the
+deploy gave up first, run it again. ACM re-checks the record at every
+renewal, so it stays.
+
+From now on, every merge to `main` diffs and deploys through
+`.github/workflows/deploy-platform.yml`. Deploys use drift-aware change sets,
+so changes made to the stack's resources outside the template are undone.
 
 ## 6. Alerts email
 
 Without `ALERT_EMAIL`, the `platform-alerts` topic exists but nobody is
-subscribed. To subscribe:
+subscribed, and a deploy without it removes an existing subscription. To
+subscribe:
 
 1. Set the `ALERT_EMAIL` secret (step 2).
 2. Re-run `pnpm platform:deploy` with it exported.

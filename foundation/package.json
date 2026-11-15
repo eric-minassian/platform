@@ -2,19 +2,25 @@
   "name": "@ericminassian/platform-foundation",
   "version": "0.1.0",
   "private": true,
-  "description": "The platform's own shared resources, applied by the engine (router, buckets, tables, Cognito, IAM).",
+  "description": "The platform's own shared resources (a CDK stack) and the deploy that brings up the control plane on them.",
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "deploy:platform": "node src/deploy.ts",
-    "plan": "node src/deploy.ts --plan"
+    "diff": "cdk diff platform-foundation"
   },
   "dependencies": {
-    "@ericminassian/platform-core": "workspace:*",
-    "@ericminassian/platform-engine": "workspace:*",
+    "@aws-sdk/client-cloudformation": "^3.1169.0",
+    "@aws-sdk/lib-dynamodb": "^3.1169.0",
     "@ericminassian/plat": "workspace:*",
     "@ericminassian/platform-control-plane": "workspace:*",
-    "@aws-sdk/lib-dynamodb": "^3.1169.0"
+    "@ericminassian/platform-core": "workspace:*",
+    "@ericminassian/platform-engine": "workspace:*",
+    "aws-cdk-lib": "^2.277.0",
+    "constructs": "^10.8.1"
+  },
+  "devDependencies": {
+    "aws-cdk": "^2.1148.1"
   }
 }

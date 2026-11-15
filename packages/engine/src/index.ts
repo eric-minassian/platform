@@ -7,7 +7,8 @@
  * The same engine runs in three places:
  *  - the control plane's deployer (real AWS),
  *  - `plat dev` / `plat test` (AWS Emulator, `webMode: 'external'`),
- *  - `foundation/` (the platform's own shared resources).
+ *  - `foundation/`, which deploys the control plane itself (the platform's
+ *    shared resources around it are a CDK stack, not engine resources).
  *
  * CONTRACT: the exported names and types below are used by the CLI, the
  * control plane and the foundation. Keep them stable.

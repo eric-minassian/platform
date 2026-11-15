@@ -1,7 +1,5 @@
 import { readFileSync } from 'node:fs';
 import { Agent } from 'node:https';
-import { ACMClient } from '@aws-sdk/client-acm';
-import { CloudFrontClient } from '@aws-sdk/client-cloudfront';
 import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
@@ -11,10 +9,8 @@ import { IAMClient } from '@aws-sdk/client-iam';
 import { LambdaClient } from '@aws-sdk/client-lambda';
 import { LambdaWebClient } from '@aws-sdk/client-lambda-web';
 import { ResourceGroupsTaggingAPIClient } from '@aws-sdk/client-resource-groups-tagging-api';
-import { Route53Client } from '@aws-sdk/client-route-53';
 import { S3Client } from '@aws-sdk/client-s3';
 import { SchedulerClient } from '@aws-sdk/client-scheduler';
-import { SNSClient } from '@aws-sdk/client-sns';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { STSClient } from '@aws-sdk/client-sts';
@@ -48,15 +44,8 @@ export interface AwsClients {
   readonly s3: S3Client;
   readonly ssm: SSMClient;
   readonly cognito: CognitoIdentityProviderClient;
-  readonly cloudfront: CloudFrontClient;
   readonly kvs: CloudFrontKeyValueStoreClient;
-  readonly route53: Route53Client;
-  /** Certificates for CloudFront and Cognito custom domains must live in us-east-1. */
-  readonly acm: ACMClient;
-  readonly sns: SNSClient;
   readonly tagging: ResourceGroupsTaggingAPIClient;
-  /** Same clients with different credentials (e.g. an assumed cross-account role). */
-  withCredentials(credentials: NonNullable<ClientOptions['credentials']>): AwsClients;
 }
 
 type ClientConfig = {
@@ -120,26 +109,11 @@ export function createClients(opts: ClientOptions): AwsClients {
     get cognito() {
       return lazy('cognito', () => new CognitoIdentityProviderClient(base));
     },
-    get cloudfront() {
-      return lazy('cloudfront', () => new CloudFrontClient({ ...base, region: 'us-east-1' }));
-    },
     get kvs() {
       return lazy('kvs', () => new CloudFrontKeyValueStoreClient({ ...base, region: 'us-east-1' }));
     },
-    get route53() {
-      return lazy('route53', () => new Route53Client({ ...base, region: 'us-east-1' }));
-    },
-    get acm() {
-      return lazy('acm', () => new ACMClient({ ...base, region: 'us-east-1' }));
-    },
-    get sns() {
-      return lazy('sns', () => new SNSClient(base));
-    },
     get tagging() {
       return lazy('tagging', () => new ResourceGroupsTaggingAPIClient(base));
-    },
-    withCredentials(credentials) {
-      return createClients({ ...opts, credentials });
     },
   };
 }

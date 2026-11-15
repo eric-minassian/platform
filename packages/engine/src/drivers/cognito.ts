@@ -2,16 +2,14 @@ import {
   CreateManagedLoginBrandingCommand,
   CreateUserPoolClientCommand,
   CreateUserPoolCommand,
-  CreateUserPoolDomainCommand,
   DeleteUserPoolClientCommand,
-  DescribeUserPoolDomainCommand,
   type ExplicitAuthFlowsType,
   ListUserPoolClientsCommand,
   ListUserPoolsCommand,
   UpdateUserPoolClientCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
 import { AUTH_SCOPES } from '@ericminassian/platform-core';
-import { type EngineContext, errorName, ignoreNotFound, isNotImplemented, retry } from '../util.ts';
+import { type EngineContext, errorName, ignoreNotFound, isNotImplemented } from '../util.ts';
 
 /** Shared user pool for app end users: email sign-in, self sign-up, Essentials tier (managed login). */
 export async function ensureUserPool(
@@ -146,54 +144,4 @@ export async function deleteUserPoolClient(
   );
   ctx.log('info', 'deleted app client', `user-pool-client ${name}`);
   return true;
-}
-
-/**
- * Managed login (v2) on a custom domain. Returns the CloudFront domain Route 53
- * must alias the custom domain to. The certificate must be in us-east-1.
- */
-export async function ensureUserPoolDomain(
-  ctx: EngineContext,
-  spec: { userPoolId: string; domain: string; certificateArn: string },
-): Promise<string | undefined> {
-  const cognito = ctx.clients.cognito;
-  const existing = await cognito.send(new DescribeUserPoolDomainCommand({ Domain: spec.domain }));
-  if (existing.DomainDescription?.UserPoolId) {
-    if (existing.DomainDescription.UserPoolId !== spec.userPoolId) {
-      throw new Error(`domain ${spec.domain} belongs to another user pool`);
-    }
-    return existing.DomainDescription.CloudFrontDistribution;
-  }
-  // Cognito requires the parent domain to resolve to an A record before it
-  // accepts a custom domain. On a first run the parent is an alias to a
-  // CloudFront distribution created moments earlier, which resolves only once
-  // the distribution has deployed (several minutes), so keep retrying.
-  let waiting = false;
-  const res = await retry(
-    () =>
-      cognito.send(
-        new CreateUserPoolDomainCommand({
-          Domain: spec.domain,
-          UserPoolId: spec.userPoolId,
-          ManagedLoginVersion: 2,
-          CustomDomainConfig: { CertificateArn: spec.certificateArn },
-        }),
-      ),
-    {
-      attempts: 120,
-      delayMs: 5_000,
-      when: (e) => {
-        const parentMissing = /resolve a DNS A record for the parent domain/i.test(
-          String((e as Error).message),
-        );
-        if (parentMissing && !waiting) {
-          waiting = true;
-          ctx.log('info', `waiting for the parent of ${spec.domain} to resolve (CloudFront still deploying)`);
-        }
-        return parentMissing;
-      },
-    },
-  );
-  ctx.log('info', 'created managed login domain', `user-pool-domain ${spec.domain}`);
-  return res.CloudFrontDomain;
 }

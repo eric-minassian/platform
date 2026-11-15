@@ -6,8 +6,8 @@ import { type EngineContext, platformTags } from './util.ts';
 
 /**
  * Inside a fresh AWS Emulator, create the shared resources a stage deploy
- * expects (the same ones `foundation/` creates in AWS, minus CloudFront,
- * DNS and certificates) and describe them as a runtime config.
+ * expects (the ones the foundation stack holds in AWS, minus CloudFront, DNS,
+ * certificates and IAM) and describe them as a runtime config.
  */
 export async function ensureLocal(
   ctx: EngineContext,
