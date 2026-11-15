@@ -18,7 +18,7 @@ import { FIXTURES } from './helpers.ts';
 // End to end through the real engine + SDK on the AWS Emulator: what `plat dev`
 // and `plat test` do, minus the router and the frontend dev server.
 const root = join(FIXTURES, 'basic-app');
-const { manifest } = loadProject(root);
+const { manifest } = await loadProject(root);
 
 describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => {
   let stage: LocalStage;

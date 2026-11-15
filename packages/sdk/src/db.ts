@@ -7,6 +7,7 @@ import {
   type QueryCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings } from './bindings.ts';
 import { ddbClient } from './clients.ts';
 import { span } from './telemetry.ts';
@@ -92,7 +93,7 @@ function list<T>(f: Fields<T> | undefined): string[] {
 
 function table(): string {
   const t = getBindings().table;
-  if (!t) throw new Error('This app has no database. Add `"db": true` to platform.json.');
+  if (!t) throw new Error(`This app has no database. Add \`db: true\` to ${APP_CONFIG_FILE}.`);
   return t;
 }
 

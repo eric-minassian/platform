@@ -3,28 +3,32 @@ import { validateCron } from './cron.ts';
 import { APP_NAME_PATTERN, ENV_NAME_PATTERN, EVENT_TYPE_PATTERN, RESOURCE_KEY_PATTERN } from './naming.ts';
 
 /**
- * `platform.json`: everything an app needs, in cloud-neutral terms. This is the
- * whole contract between an app repo and the platform; apps contain no
- * infrastructure code. Keep this schema small and stable.
+ * The app's config file, at the app root. `plat` evaluates it and sends the
+ * result to the platform as JSON; the control plane never runs app code.
+ */
+export const APP_CONFIG_FILE = 'plat.config.ts';
+
+/**
+ * What `plat.config.ts` declares: everything an app needs, in cloud-neutral
+ * terms. This is the whole contract between an app repo and the platform;
+ * apps contain no infrastructure code. Keep this schema small and stable.
+ *
+ * `ManifestSchema` validates the evaluated config (CLI and API); `AppConfig`
+ * below is the same shape written for authors. `test/manifest-types.test.ts`
+ * keeps the two in step.
  */
 const resourceKey = z.string().regex(RESOURCE_KEY_PATTERN, 'must be 1-20 chars of a-z, 0-9, hyphens');
+const eventType = z.string().regex(EVENT_TYPE_PATTERN);
 
 const WebSchema = z
   .object({
-    /** Entry module whose default export is a fetch handler (`{ fetch }` or a Hono app). */
     server: z.string().optional(),
-    /** Directory of built static assets (served from the edge). */
     static: z.string().optional(),
-    /** Shell command that builds `static` (run by `plat build`). */
     build: z.string().optional(),
-    /** Dev server for the frontend, proxied by `plat dev` (e.g. Vite). */
     dev: z.object({ command: z.string(), port: z.number().int().positive() }).optional(),
-    /** Serve `index.html` for unknown non-file paths (client-side routing). */
     spa: z.boolean().default(true),
-    /** When both `server` and `static` exist, path prefixes handled by the server. */
     serverRoutes: z.array(z.string().startsWith('/')).default(['/api/']),
     timeoutSeconds: z.number().int().min(3).max(900).default(30),
-    /** Max concurrent requests per Web Function environment. */
     concurrency: z.number().int().min(1).max(128).default(64),
   })
   .refine((w) => w.server || w.static, { message: 'web needs a server, a static directory, or both' });
@@ -37,26 +41,17 @@ const WorkerSchema = z.object({
 
 const QueueSchema = z.object({
   batchSize: z.number().int().min(1).max(10).default(10),
-  /** Defaults to 6x the worker timeout, as AWS recommends for Lambda consumers. */
   visibilityTimeoutSeconds: z.number().int().min(0).max(43200).optional(),
   maxReceiveCount: z.number().int().min(1).max(1000).default(5),
-  /** Max concurrent worker invocations draining this queue. */
   concurrency: z.number().int().min(2).max(1000).optional(),
 });
 
 const CronSchema = z.union([z.string(), z.object({ schedule: z.string(), timezone: z.string().optional() })]);
 
-const AuthSchema = z.union([
-  z.boolean(),
-  z.object({
-    /** Require a signed-in user for every non-platform route (`/__platform/*` stays open). */
-    required: z.boolean().default(false),
-  }),
-]);
+const AuthSchema = z.union([z.boolean(), z.object({ required: z.boolean().default(false) })]);
 
 export const ManifestSchema = z
   .object({
-    $schema: z.string().optional(),
     name: z
       .string()
       // Reserved names are enforced when an app is registered (API), not here:
@@ -66,17 +61,14 @@ export const ManifestSchema = z
     web: WebSchema.optional(),
     worker: WorkerSchema.optional(),
     auth: AuthSchema.default(false),
-    /** One document database per stage; collections are declared in code. */
     db: z.boolean().default(false),
     queues: z.record(resourceKey, QueueSchema).default({}),
-    /** Event types the worker subscribes to (anything can be published). */
-    events: z.array(z.string().regex(EVENT_TYPE_PATTERN)).default([]),
+    // The array form predates typed event payloads; deployments recorded
+    // before then still store it.
+    events: z.union([z.array(eventType), z.record(eventType, z.object({}))]).default([]),
     crons: z.record(resourceKey, CronSchema).default({}),
-    /** Named file stores. */
     storage: z.array(resourceKey).default([]),
-    /** Secret names; values are set with `plat secrets set`. */
     secrets: z.array(z.string().regex(ENV_NAME_PATTERN)).default([]),
-    /** Plain, non-secret configuration exposed as environment variables. */
     env: z.record(z.string().regex(ENV_NAME_PATTERN), z.string()).default({}),
   })
   .superRefine((m, ctx) => {
@@ -86,8 +78,128 @@ export const ManifestSchema = z
     }
   });
 
+/** The evaluated config as JSON: what the CLI sends and deployments store. */
 export type ManifestInput = z.input<typeof ManifestSchema>;
 export type Manifest = z.output<typeof ManifestSchema>;
+
+// ---------------------------------------------------------------------------
+// Authoring types. Arrays are readonly so `defineApp` can keep literal names.
+
+/** Type-only marker for a queue's message body or an event's detail. Never set at runtime. */
+declare const payloadType: unique symbol;
+
+// A type literal, not an interface, so it fits the schema's `Record<string, never>` event options.
+type Payload<T> = { readonly [payloadType]?: T };
+
+/** The message or detail type declared with `queue<T>()` / `event<T>()`; `unknown` if none. */
+export type PayloadOf<D> = D extends Payload<infer T> ? (unknown extends T ? unknown : T) : unknown;
+
+export interface WebConfig {
+  /** Entry module whose default export is a fetch handler (`{ fetch }`, a function, or a Hono app). */
+  server?: string;
+  /** Directory of built static assets, served from the edge. */
+  static?: string;
+  /** Shell command that builds `static` (run by `plat build`). */
+  build?: string;
+  /** Dev server for the frontend, proxied by `plat dev` (e.g. Vite). */
+  dev?: { command: string; port: number };
+  /** Serve `index.html` for unknown non-file paths (client-side routing). Default `true`. */
+  spa?: boolean;
+  /** When both `server` and `static` exist, path prefixes handled by the server. Default `['/api/']`. */
+  serverRoutes?: readonly string[];
+  /** 3-900. Default 30. */
+  timeoutSeconds?: number;
+  /** Max concurrent requests per Web Function environment, 1-128. Default 64. */
+  concurrency?: number;
+}
+
+export interface WorkerConfig {
+  /** Module whose default export is `defineWorker(...)`. Default `src/worker.ts`. */
+  entry?: string;
+  /** 1-900. Default 60. */
+  timeoutSeconds?: number;
+  /** 128-10240. Default 512. */
+  memoryMb?: number;
+}
+
+/** Declare one with `queue<Body>({ ... })` to type what is sent and received. */
+export interface QueueConfig<Body = unknown> extends Payload<Body> {
+  /** Messages per worker invocation, 1-10. Default 10. */
+  batchSize?: number;
+  /** Defaults to 6x the worker timeout, as AWS recommends for Lambda consumers. */
+  visibilityTimeoutSeconds?: number;
+  /** Deliveries before a message moves to the dead-letter queue, 1-1000. Default 5. */
+  maxReceiveCount?: number;
+  /** Max concurrent worker invocations draining this queue, 2-1000. */
+  concurrency?: number;
+}
+
+/** Declare one with `event<Detail>()` to type what is published and handled. */
+export type EventConfig<Detail = unknown> = Payload<Detail>;
+
+/** 5-field cron in UTC (`0 3 * * *`) or `rate(5 minutes)`. */
+export type CronConfig = string | { schedule: string; timezone?: string };
+
+export interface AppConfig {
+  /** 3-30 chars of a-z, 0-9 and single hyphens; also the app's host name. */
+  name: string;
+  description?: string;
+  web?: WebConfig;
+  /** Present automatically when any queue, event or cron exists. */
+  worker?: WorkerConfig;
+  /** Sign-in with the shared user pool. `{ required: true }` guards every non-platform route. */
+  auth?: boolean | { required?: boolean };
+  /** One document database per stage; collections are declared in code. */
+  db?: boolean;
+  /** Keys are 1-20 chars of a-z, 0-9 and hyphens. Each needs a handler in the worker. */
+  queues?: { readonly [name: string]: QueueConfig };
+  /** Event types the worker subscribes to, e.g. `order.created`. Each needs a handler in the worker. */
+  events?: readonly string[] | { readonly [type: string]: EventConfig };
+  /** Scheduled jobs. Each needs a handler in the worker. */
+  crons?: { readonly [name: string]: CronConfig };
+  /** Named file stores. */
+  storage?: readonly string[];
+  /** Secret names like `STRIPE_KEY`; values are set with `plat secrets set`. */
+  secrets?: readonly string[];
+  /** Plain, non-secret configuration exposed as environment variables. */
+  env?: { readonly [name: string]: string };
+}
+
+/**
+ * Maps every key `T` has but `Shape` doesn't to `never`, recursively, so a
+ * misspelled field is a type error. `defineApp` needs this because a generic
+ * parameter (which keeps the literal names) skips excess-property checks.
+ */
+type Exact<T, Shape> = Shape extends readonly (infer S)[]
+  ? T extends readonly (infer E)[]
+    ? readonly Exact<E, S>[]
+    : Shape
+  : Shape extends object
+    ? T extends object
+      ? { [K in keyof T]: K extends keyof Shape ? Exact<T[K], Shape[K]> : never }
+      : Shape
+    : Shape;
+
+/**
+ * The default export of `plat.config.ts`. Returns the config unchanged with
+ * its literal names, which `Register` hands to the SDK so queue, event, cron,
+ * store and secret names (and payload types) are checked in app code.
+ */
+export function defineApp<const T extends AppConfig>(config: T & Exact<T, AppConfig>): T {
+  return config;
+}
+
+/** A queue whose messages are `Body`: `queues: { emails: queue<EmailJob>({ batchSize: 5 }) }`. */
+export function queue<Body>(options: QueueConfig = {}): QueueConfig<Body> {
+  return options as QueueConfig<Body>;
+}
+
+/** An event subscription whose detail is `Detail`: `events: { 'todo.created': event<TodoCreated>() }`. */
+export function event<Detail>(): EventConfig<Detail> {
+  return {};
+}
+
+// ---------------------------------------------------------------------------
 
 /** Manifest with defaults applied and derived fields normalized. */
 export interface ResolvedManifest {
@@ -109,7 +221,7 @@ export interface ResolvedManifest {
 export class ManifestError extends Error {
   readonly issues: string[];
   constructor(issues: string[]) {
-    super(`Invalid platform.json:\n  - ${issues.join('\n  - ')}`);
+    super(`Invalid ${APP_CONFIG_FILE}:\n  - ${issues.join('\n  - ')}`);
     this.issues = issues;
   }
 }
@@ -123,8 +235,9 @@ export function parseManifest(input: unknown): ResolvedManifest {
 }
 
 export function resolveManifest(m: Manifest): ResolvedManifest {
+  const events = Array.isArray(m.events) ? m.events : Object.keys(m.events);
   const needsWorker =
-    Object.keys(m.queues).length > 0 || m.events.length > 0 || Object.keys(m.crons).length > 0;
+    Object.keys(m.queues).length > 0 || events.length > 0 || Object.keys(m.crons).length > 0;
   const worker = m.worker ?? (needsWorker ? WorkerSchema.parse({}) : undefined);
   const auth =
     typeof m.auth === 'boolean'
@@ -147,14 +260,10 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     auth,
     db: m.db,
     queues,
-    events: [...new Set(m.events)],
+    events: [...new Set(events)],
     crons,
     storage: [...new Set(m.storage)],
     secrets: [...new Set(m.secrets)],
     env: m.env,
   };
 }
-
-/** JSON Schema URL apps reference for editor completion. */
-export const MANIFEST_SCHEMA_URL =
-  'https://raw.githubusercontent.com/eric-minassian/platform/main/packages/core/platform.schema.json';

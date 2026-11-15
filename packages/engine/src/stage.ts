@@ -130,7 +130,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   } else if (await describeTable(ctx, names.table(app, stage))) {
     ctx.log(
       'warn',
-      'db is off in platform.json but the table still exists; keeping it (data)',
+      'db is off in plat.config.ts but the table still exists; keeping it (data)',
       `table ${names.table(app, stage)}`,
     );
   }

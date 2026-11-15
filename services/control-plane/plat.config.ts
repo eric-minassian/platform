@@ -1,0 +1,32 @@
+import { defineApp } from '@ericminassian/platform/config';
+
+const app = defineApp({
+  name: 'platform',
+  description: 'The platform control plane: console, API, deployer and telemetry.',
+  web: {
+    server: 'src/server.ts',
+    static: 'web/dist',
+    build: 'pnpm web:build',
+    dev: { command: 'pnpm web:dev', port: 5173 },
+    spa: true,
+    serverRoutes: ['/v1/', '/auth/'],
+    timeoutSeconds: 120,
+  },
+  // Deploys run here (see src/jobs/call.ts), so the worker gets the full Lambda timeout.
+  worker: { entry: 'src/worker.ts', timeoutSeconds: 900, memoryMb: 1024 },
+  auth: false,
+  crons: {
+    pinger: '*/5 * * * *',
+    watchdog: '*/5 * * * *',
+    cost: '0 7 * * *',
+    reaper: '0 8 * * *',
+  },
+});
+
+export default app;
+
+declare module '@ericminassian/platform' {
+  interface Register {
+    app: typeof app;
+  }
+}

@@ -7,6 +7,10 @@
  *     crons: { nightly: async () => { ... } },
  *   });
  *
+ * With the app's config registered (see `Register`), it must handle exactly
+ * the queues, events and crons `plat.config.ts` declares, and handlers get the
+ * declared payload types.
+ *
  * `plat build` generates `export const handler = createWorkerHandler(def)`.
  * One function per stage handles every queue, event subscription, cron and
  * direct invocation; the handler dispatches on the event shape. Each job is
@@ -17,10 +21,12 @@
  */
 
 import { gunzipSync } from 'node:zlib';
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings, tryBindings } from './bindings.ts';
 import { client } from './clients.ts';
 import { currentTrace, newContext, runWithContext } from './context.ts';
 import type { EventEnvelope } from './events.ts';
+import type { AnyPayload, CronName, EventDetail, EventType, QueueBody, QueueName } from './register.ts';
 import { emit, emitError, installConsoleCapture, installFetchInstrumentation, log } from './telemetry.ts';
 
 export interface JobContext {
@@ -52,9 +58,6 @@ export interface LogsBatch {
   logEvents: Array<{ id: string; timestamp: number; message: string }>;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: handlers choose their own payload types
-type AnyPayload = any;
-
 export interface WorkerDefinition {
   queues?: Record<string, (message: QueueMessage<AnyPayload>, ctx: JobContext) => unknown | Promise<unknown>>;
   events?: Record<string, (event: PlatformEvent<AnyPayload>, ctx: JobContext) => unknown | Promise<unknown>>;
@@ -64,6 +67,30 @@ export interface WorkerDefinition {
   /** CloudWatch Logs subscription deliveries (system use). */
   logs?: (batch: LogsBatch, ctx: JobContext) => unknown | Promise<unknown>;
 }
+
+type QueueHandlers = {
+  [K in QueueName]: (message: QueueMessage<QueueBody<K>>, ctx: JobContext) => unknown | Promise<unknown>;
+};
+type EventHandlers = {
+  [K in EventType]: (event: PlatformEvent<EventDetail<K>>, ctx: JobContext) => unknown | Promise<unknown>;
+};
+type CronHandlers = { [K in CronName]: (ctx: JobContext) => unknown | Promise<unknown> };
+
+/**
+ * Unregistered (names are `string`): an optional map. Registered: required
+ * when the config declares any, and not allowed when it declares none.
+ */
+type Section<Key extends string, Name extends string, Handlers> = string extends Name
+  ? { [P in Key]?: Handlers }
+  : [Name] extends [never]
+    ? { [P in Key]?: never }
+    : { [P in Key]: Handlers };
+
+/** What `defineWorker` accepts: `WorkerDefinition`, checked against the registered config. */
+export type AppWorkerDefinition = Section<'queues', QueueName, QueueHandlers> &
+  Section<'events', EventType, EventHandlers> &
+  Section<'crons', CronName, CronHandlers> &
+  Pick<WorkerDefinition, 'invoke' | 'logs'>;
 
 /** Payload shapes the platform sends to the worker besides SQS/EventBridge records. */
 export type DirectPayload =
@@ -91,7 +118,7 @@ interface EventBridgeEvent {
   detail: unknown;
 }
 
-export function defineWorker<T extends WorkerDefinition>(def: T): T {
+export function defineWorker(def: AppWorkerDefinition): WorkerDefinition {
   return def;
 }
 
@@ -267,7 +294,9 @@ async function handleSqs(
 export async function invokeJob(name: string, payload: unknown): Promise<void> {
   const worker = getBindings().worker;
   if (!worker)
-    throw new Error('This app has no worker. Add a "worker" (or queues/events/crons) to platform.json.');
+    throw new Error(
+      `This app has no worker. Add \`worker\` (or queues, events or crons) to ${APP_CONFIG_FILE}.`,
+    );
   const body: DirectPayload = { __platform: 'invoke', name, payload, trace: currentTrace() };
   // `plat dev` / `plat test` run the worker as a local Node process (the
   // emulator's Lambda sandbox has no networking modules) and set this URL.

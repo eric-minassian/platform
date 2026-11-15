@@ -15,7 +15,7 @@ export function registerManage(program: Command): void {
 
   withTarget(secrets.command('list').description('secret names for a stage (and shared ones)')).action(
     action(async (opts: TargetOpts) => {
-      const list = await apiFor(opts).listSecrets(appFor(opts), { stage: opts.stage });
+      const list = await apiFor(opts).listSecrets(await appFor(opts), { stage: opts.stage });
       result(list, (l) =>
         table(
           l.map((s) => ({
@@ -40,7 +40,7 @@ export function registerManage(program: Command): void {
       const v = value ?? (process.stdin.isTTY ? await prompt(`value for ${name}: `) : readStdin());
       if (!v) throw new CliError('empty secret value', { exitCode: EXIT.usage });
       const info = await apiFor(opts).setSecret(
-        appFor(opts),
+        await appFor(opts),
         name,
         opts.shared ? { value: v, shared: true } : { value: v, stage: opts.stage },
       );
@@ -61,7 +61,7 @@ export function registerManage(program: Command): void {
     action(async (name: string, opts: TargetOpts & { shared?: boolean }) => {
       checkSecretName(name);
       await apiFor(opts).deleteSecret(
-        appFor(opts),
+        await appFor(opts),
         name,
         opts.shared ? { shared: true } : { stage: opts.stage },
       );
@@ -72,7 +72,7 @@ export function registerManage(program: Command): void {
   // ------------------------------------------------------------ deployments & stages
   withTarget(program.command('deployments').description('recent deployments'), false).action(
     action(async (opts: CommonOpts & { stage?: string }) => {
-      const list = await apiFor(opts).listDeployments(appFor(opts), opts.stage);
+      const list = await apiFor(opts).listDeployments(await appFor(opts), opts.stage);
       result(list, (l) =>
         table(
           l.map((d) => ({
@@ -96,7 +96,7 @@ export function registerManage(program: Command): void {
 
   withTarget(program.command('stages').description('stages of an app'), false).action(
     action(async (opts: CommonOpts) => {
-      const list = await apiFor(opts).listStages(appFor(opts));
+      const list = await apiFor(opts).listStages(await appFor(opts));
       result(list, (l) =>
         table(
           l.map((s) => ({
@@ -118,7 +118,7 @@ export function registerManage(program: Command): void {
       .option('--to <deploymentId>', 'a specific earlier deployment'),
   ).action(
     action(async (opts: TargetOpts & { to?: string }) => {
-      const r = await apiFor(opts).rollback(appFor(opts), opts.stage, opts.to);
+      const r = await apiFor(opts).rollback(await appFor(opts), opts.stage, opts.to);
       result(r, () => `${pc.green('✓')} rolled back ${opts.stage}`);
     }),
   );
@@ -139,7 +139,7 @@ export function registerManage(program: Command): void {
           exitCode: EXIT.usage,
         });
       }
-      const app = appFor(opts);
+      const app = await appFor(opts);
       await confirmByTyping(`destroy ${app}/${opts.stage}?`, opts.stage, opts.yes);
       await apiFor(opts).destroyStage(app, opts.stage);
       result(
@@ -153,7 +153,7 @@ export function registerManage(program: Command): void {
   const cron = program.command('cron').description('scheduled jobs');
   withTarget(cron.command('run <name>').description('run a cron now on a deployed stage')).action(
     action(async (name: string, opts: TargetOpts) => {
-      await apiFor(opts).runCron(appFor(opts), name, opts.stage);
+      await apiFor(opts).runCron(await appFor(opts), name, opts.stage);
       result(
         { cron: name, stage: opts.stage, triggered: true },
         () => `${pc.green('✓')} triggered ${name} on ${opts.stage}`,

@@ -1,11 +1,12 @@
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
+import type { SecretName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface Secrets {
   /** Throws if missing. Stage value wins over the app-wide shared value. Cached ~5 min. */
-  get(name: string): Promise<string>;
-  getOptional(name: string): Promise<string | undefined>;
+  get(name: SecretName): Promise<string>;
+  getOptional(name: SecretName): Promise<string | undefined>;
 }
 
 const TTL_MS = 5 * 60 * 1000;

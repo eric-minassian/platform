@@ -1,10 +1,13 @@
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
 import { currentTrace } from './context.ts';
+import type { EventDetail, EventType } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface Events {
-  publish<T = unknown>(type: string, detail: T): Promise<void>;
+  /** Publish to this stage's bus. Types are the ones under `events` in `plat.config.ts`. */
+  publish<K extends EventType>(type: K, detail: EventDetail<K>): Promise<void>;
 }
 
 /** Envelope inside EventBridge `detail`, so the trace survives the hop. */
@@ -17,7 +20,8 @@ export const events: Events = {
   publish: (type, detail) =>
     span('events.publish', type, async () => {
       const b = getBindings();
-      if (!b.bus) throw new Error('This app has no event bus. Add an "events" entry to platform.json.');
+      if (!b.bus)
+        throw new Error(`This app has no event bus. Add an \`events\` entry to ${APP_CONFIG_FILE}.`);
       const envelope: EventEnvelope = { data: detail, trace: currentTrace() };
       const { PutEventsCommand } = await import('@aws-sdk/client-eventbridge');
       const out = await (await client('events')).send(

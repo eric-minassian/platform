@@ -2,7 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 /**
  * Local stand-in for EventBridge Scheduler (the emulator creates schedules but
- * never fires them). Same expressions as platform.json: 5-field cron in UTC
+ * never fires them). Same expressions as plat.config.ts: 5-field cron in UTC
  * (or the cron's timezone) or `rate(n unit)`.
  */
 export interface LocalCron {

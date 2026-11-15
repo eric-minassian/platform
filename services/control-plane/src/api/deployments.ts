@@ -101,7 +101,7 @@ export const stages = new Hono<AuthEnv>()
       throw err;
     }
     if (manifest.name !== app.name)
-      throw badRequest(`platform.json name "${manifest.name}" must be "${app.name}"`);
+      throw badRequest(`plat.config.ts name "${manifest.name}" must be "${app.name}"`);
 
     // manifest.json is always uploaded; tolerate clients that list it.
     const files = [...new Set(body.files ?? [])].filter((f) => f !== 'manifest.json');

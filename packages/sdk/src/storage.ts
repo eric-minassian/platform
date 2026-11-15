@@ -1,5 +1,7 @@
+import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
+import type { StoreName } from './register.ts';
 import { span } from './telemetry.ts';
 
 export interface StoredObject {
@@ -27,7 +29,7 @@ function location(name: string): { bucket: string; prefix: string } {
   if (!s?.stores.includes(name)) {
     const declared = s?.stores ?? [];
     throw new Error(
-      `Unknown store "${name}". Declared storage: ${declared.length ? declared.join(', ') : '(none)'} — add it under "storage" in platform.json.`,
+      `Unknown store "${name}". Declared storage: ${declared.length ? declared.join(', ') : '(none)'} — add it under \`storage\` in ${APP_CONFIG_FILE}.`,
     );
   }
   return { bucket: s.bucket, prefix: `${s.prefix}${name}/` };
@@ -57,7 +59,8 @@ function isNotFound(e: unknown): boolean {
   return name === 'NoSuchKey' || name === 'NotFound' || status === 404;
 }
 
-export function storage(name: string): Store {
+/** A file store declared under `storage` in `plat.config.ts`. */
+export function storage(name: StoreName): Store {
   const get = (key: string) =>
     span('storage.get', name, async () => {
       const { bucket, prefix } = location(name);

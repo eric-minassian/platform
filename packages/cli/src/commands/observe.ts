@@ -32,7 +32,7 @@ export function registerObserve(program: Command): void {
       ) => {
         const keep = (l: LogLine) => opts.runtime || l.level !== 'system';
         const api = apiFor(opts);
-        const app = appFor(opts);
+        const app = await appFor(opts);
         if (opts.follow) {
           const ac = new AbortController();
           process.once('SIGINT', () => ac.abort());
@@ -74,7 +74,7 @@ export function registerObserve(program: Command): void {
   ).action(
     action(async (opts: TargetOpts & { since: string }) => {
       const api = apiFor(opts);
-      const app = appFor(opts);
+      const app = await appFor(opts);
       const range = sinceRange(opts.since);
       const [metrics, routes, jobs] = await Promise.all([
         api.metrics(app, { stage: opts.stage, ...range }),
@@ -150,7 +150,7 @@ export function registerObserve(program: Command): void {
 
   withTarget(program.command('errors').description('grouped errors for a stage')).action(
     action(async (opts: TargetOpts) => {
-      const groups = await apiFor(opts).errors(appFor(opts), { stage: opts.stage });
+      const groups = await apiFor(opts).errors(await appFor(opts), { stage: opts.stage });
       result(groups, (g) =>
         table(
           g.map((e) => ({
@@ -173,7 +173,7 @@ export function registerObserve(program: Command): void {
       .description('every event of one request/job across web, queues and worker'),
   ).action(
     action(async (traceId: string, opts: TargetOpts) => {
-      const t = await apiFor(opts).trace(appFor(opts), traceId, { stage: opts.stage });
+      const t = await apiFor(opts).trace(await appFor(opts), traceId, { stage: opts.stage });
       result(t, (v) => formatTrace(v.events));
     }),
   );
@@ -200,7 +200,7 @@ export function registerObserve(program: Command): void {
         },
       ) => {
         const api = apiFor(opts);
-        const app = appFor(opts);
+        const app = await appFor(opts);
         if (opts.store) {
           const r = await api.files(app, {
             stage: opts.stage,

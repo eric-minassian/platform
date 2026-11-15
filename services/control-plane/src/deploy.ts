@@ -108,7 +108,7 @@ export async function runDeployment(id: string): Promise<void> {
     const doc = JSON.parse(raw) as { manifest?: unknown };
     const manifest = parseManifest(doc.manifest ?? doc);
     if (manifest.name !== app)
-      throw new Error(`platform.json name "${manifest.name}" does not match app "${app}"`);
+      throw new Error(`plat.config.ts name "${manifest.name}" does not match app "${app}"`);
     const artifacts = await findArtifacts(platform, app, stage, id);
     if (manifest.web?.server && !artifacts.server)
       throw new Error('manifest declares web.server but server.zip was not uploaded');

@@ -31,11 +31,11 @@ export interface DeployResult {
 }
 
 export async function deploy(api: ApiClient, opts: DeployOptions): Promise<DeployResult> {
-  const project = loadProject(opts.cwd);
+  const project = await loadProject(opts.cwd);
   const stage = deriveStage(opts.stage);
   const app = project.manifest.name;
 
-  const { files } = await buildApp({ cwd: project.root });
+  const { files } = await buildApp({ cwd: project.root, project });
   // The API always issues an upload for manifest.json; `files` lists the optional bundles.
   const fileNames = (Object.keys(files) as ArtifactFile[]).filter((f) => f !== 'manifest.json');
   const git = gitInfo(project.root);

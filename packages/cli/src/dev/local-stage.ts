@@ -136,7 +136,7 @@ export function emulatorClientConfig(conn: EmulatorConnection) {
 /**
  * `.env.local` (KEY=VALUE, not committed) → SecureString parameters, so
  * `secrets.get()` works locally exactly as deployed. Only names declared in
- * platform.json are loaded.
+ * plat.config.ts are loaded.
  */
 async function seedSecrets(conn: EmulatorConnection, bindings: Bindings, root: string): Promise<void> {
   const values = readDotEnv(join(root, '.env.local'));

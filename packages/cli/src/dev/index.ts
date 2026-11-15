@@ -35,7 +35,7 @@ export const DEV_CONTROL_PREFIX = '/__plat_dev/';
  *  worker (real Node, tsx watch) ← dispatcher (emulator SQS + EventBridge tap + local crons)
  */
 export async function runDev(opts: DevOptions): Promise<void> {
-  const { root, manifest } = loadProject(opts.cwd);
+  const { root, manifest } = await loadProject(opts.cwd);
   const children: ChildProcess[] = [];
   const cleanups: Array<() => void | Promise<void>> = [];
   let stage: LocalStage | undefined;

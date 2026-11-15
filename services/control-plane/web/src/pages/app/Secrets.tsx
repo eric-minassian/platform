@@ -38,7 +38,7 @@ export function SecretsTab() {
             <>
               {d.missing.length > 0 && (
                 <div className="mb-3 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-[12px] text-warn">
-                  Declared in platform.json but not set:{' '}
+                  Declared in plat.config.ts but not set:{' '}
                   {d.missing.map((m) => (
                     <Mono key={m} className="mr-2">
                       {m}

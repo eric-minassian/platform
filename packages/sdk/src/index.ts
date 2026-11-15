@@ -22,6 +22,16 @@ export {
 } from './db.ts';
 export { type Events, events } from './events.ts';
 export { type Queue, queue } from './queue.ts';
+export type {
+  CronName,
+  EventDetail,
+  EventType,
+  QueueBody,
+  QueueName,
+  Register,
+  SecretName,
+  StoreName,
+} from './register.ts';
 export { type Secrets, secrets } from './secrets.ts';
 export { type Store, type StoredObject, storage } from './storage.ts';
 export { log, metrics } from './telemetry.ts';

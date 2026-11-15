@@ -17,9 +17,9 @@ export function withCommon(cmd: Command): Command {
     .addOption(new Option('--api-url <url>', 'platform API base URL').env('PLATFORM_API_URL'));
 }
 
-/** `--app` (defaults to platform.json) and `--stage` (defaults to prod). */
+/** `--app` (defaults to plat.config.ts) and `--stage` (defaults to prod). */
 export function withTarget(cmd: Command, stageDefault: string | false = 'prod'): Command {
-  cmd.option('--app <name>', 'app name (default: from platform.json)');
+  cmd.option('--app <name>', 'app name (default: from plat.config.ts)');
   if (stageDefault) cmd.option('--stage <stage>', 'stage', stageDefault);
   else cmd.option('--stage <stage>', 'stage');
   return withCommon(cmd);
@@ -29,7 +29,7 @@ export function apiFor(opts: CommonOpts): ApiClient {
   return new ApiClient(opts.apiUrl ? { baseUrl: opts.apiUrl } : {});
 }
 
-export function appFor(opts: CommonOpts): string {
+export function appFor(opts: CommonOpts): Promise<string> {
   return resolveAppName(opts.app);
 }
 
