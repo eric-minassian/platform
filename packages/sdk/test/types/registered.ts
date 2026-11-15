@@ -131,3 +131,27 @@ export const cursors = Effect.gen(function* () {
   yield* notes.get({ ownerId: 'a' });
   return [firstPage, nextPage];
 });
+
+export const consistentReads = Effect.gen(function* () {
+  const notes = (yield* Db).collection('notes', {
+    schema: Note,
+    partition: 'ownerId',
+    sort: 'noteId',
+    indexes: { byNote: { slot: 1, partition: 'noteId' } },
+  });
+  yield* notes.get({ ownerId: 'a', noteId: 'n' }, { consistent: true });
+  yield* notes.query({ ownerId: 'a' }, { consistent: true, limit: 10 });
+  yield* notes.queryAll({ ownerId: 'a' }, { consistent: true });
+  yield* notes.query({ noteId: 'n' }, { index: 'byNote', consistent: false });
+  // @ts-expect-error secondary indexes are only eventually consistent
+  yield* notes.query({ noteId: 'n' }, { index: 'byNote', consistent: true });
+  // @ts-expect-error secondary indexes are only eventually consistent
+  yield* notes.queryAll({ noteId: 'n' }, { index: 'byNote', consistent: true });
+  // An index chosen at run time may be set, so it can't be combined with `consistent: true`.
+  const byNoteOrKey = (index: string | undefined) => [
+    notes.query({ noteId: 'n' }, { index }),
+    // @ts-expect-error the index might be set
+    notes.query({ noteId: 'n' }, { index, consistent: true }),
+  ];
+  return byNoteOrKey('byNote');
+});

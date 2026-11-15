@@ -40,23 +40,48 @@ export interface CollectionOptions<T> {
   ttl?: keyof T & string;
 }
 
-export interface QueryOptions {
-  index?: string;
+export interface GetOptions {
+  /**
+   * See every write that finished before this read began. Costs twice the
+   * read capacity of the default, eventually consistent read, which can miss
+   * a write made a moment ago.
+   */
+  consistent?: boolean;
+}
+
+/**
+ * Where a query reads from. Secondary indexes are only eventually
+ * consistent, so `consistent: true` is for the collection's own key.
+ */
+type QuerySource =
+  | (GetOptions & { index?: undefined })
+  | {
+      index: string;
+      /** Index queries can't be consistent: an index can lag its documents by a moment. */
+      consistent?: false;
+    };
+
+/** A query's sort-key condition, order and source. */
+export type QueryAllOptions = QuerySource & {
   beginsWith?: string;
   between?: [KeyValue, KeyValue];
   gt?: KeyValue;
   gte?: KeyValue;
   lt?: KeyValue;
   lte?: KeyValue;
+  reverse?: boolean;
+};
+
+export type QueryOptions = QueryAllOptions & {
   limit?: number;
   /**
    * A `cursor` from the previous page of this same query (same partition,
-   * index and sort condition; `limit` and `reverse` may change). Any other
-   * value throws `InvalidCursorError`, which the server answers with a 400.
+   * index and sort condition; `limit`, `reverse` and `consistent` may change).
+   * Any other value throws `InvalidCursorError`, which the server answers
+   * with a 400.
    */
   cursor?: string;
-  reverse?: boolean;
-}
+};
 
 export interface Page<T> {
   items: T[];
@@ -69,14 +94,14 @@ export interface Page<T> {
 }
 
 export interface Collection<T extends Record<string, unknown>> {
-  get(key: Partial<T>): Promise<T | undefined>;
+  get(key: Partial<T>, opts?: GetOptions): Promise<T | undefined>;
   put(item: T, opts?: { ifNotExists?: boolean }): Promise<T>;
   update(key: Partial<T>, patch: Partial<T>): Promise<T>;
   delete(key: Partial<T>): Promise<void>;
   /** One page of the items sharing the given partition-key values. Continue while `cursor` is set. */
   query(partition: Partial<T>, opts?: QueryOptions): Promise<Page<T>>;
   /** Every matching item, following pages until the last one. */
-  queryAll(partition: Partial<T>, opts?: Omit<QueryOptions, 'cursor' | 'limit'>): Promise<T[]>;
+  queryAll(partition: Partial<T>, opts?: QueryAllOptions): Promise<T[]>;
 }
 
 export interface Db {
@@ -205,14 +230,26 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
     return { ...item, ...primaryKey(item), _c: name, ...extra };
   };
 
+  /**
+   * The index a query reads, or undefined for the collection's own key. The
+   * type already rules out `consistent` on an index; this catches untyped callers.
+   */
+  const queryIndex = (q: QueryAllOptions) => {
+    if (!q.index) return undefined;
+    const ix = indexes.find((i) => i.name === q.index);
+    if (!ix) throw new Error(`${what} has no index "${q.index}"`);
+    if (q.consistent)
+      throw new Error(`${what}: index "${ix.name}" is eventually consistent; drop \`consistent: true\``);
+    return ix;
+  };
+
   const queryInput = (values: Partial<T>, q: QueryOptions, tableName: string): QueryCommandInput => {
     let pkAttr = 'pk';
     let skAttr = 'sk';
     let pkValue: string;
     let indexName: string | undefined;
-    if (q.index) {
-      const ix = indexes.find((i) => i.name === q.index);
-      if (!ix) throw new Error(`${what} has no index "${q.index}"`);
+    const ix = queryIndex(q);
+    if (ix) {
       pkAttr = `gsi${ix.slot}pk`;
       skAttr = `gsi${ix.slot}sk`;
       indexName = `gsi${ix.slot}`;
@@ -257,6 +294,7 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
       ExpressionAttributeValues: vals,
       ScanIndexForward: !q.reverse,
       ...(q.limit ? { Limit: q.limit } : {}),
+      ...(q.consistent ? { ConsistentRead: true } : {}),
     };
   };
 
@@ -274,6 +312,7 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
     primaryKey,
     derived,
     toItem,
+    queryIndex,
     queryInput,
     keyFields,
     derivedSources,
@@ -286,9 +325,15 @@ function collection<T extends Record<string, unknown>>(
 ): Collection<T> {
   const m = createKeyMapper(name, opts);
   return {
-    get: (key) =>
+    get: (key, getOpts) =>
       span('db.get', name, async () => {
-        const out = await ddb().send(new GetCommand({ TableName: table(), Key: m.primaryKey(key) }));
+        const out = await ddb().send(
+          new GetCommand({
+            TableName: table(),
+            Key: m.primaryKey(key),
+            ...(getOpts?.consistent ? { ConsistentRead: true } : {}),
+          }),
+        );
         return stripInternal(out.Item) as T | undefined;
       }),
 

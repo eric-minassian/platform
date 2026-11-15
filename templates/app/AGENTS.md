@@ -127,6 +127,10 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   - For expiry, set `ttl: 'expiresAt'` (epoch seconds).
   - Documents are encoded with the schema on write and decoded on read. When you change a schema, keep it
     able to decode what's already stored (optional fields, defaults), or migrate the data first.
+- **Reading your own writes.** Reads are eventually consistent: a `get` or `query` right after a write
+  can miss it for a moment. Pass `{ consistent: true }` to `get`, `query` or `queryAll` to see every write
+  that finished first, at twice the read cost. Indexes are always eventually consistent, so an index
+  query can't take it (a type error).
 - **Pagination.** Return `page.cursor` to the client and pass it back as `{ cursor }`, with the same
   partition, index and sort condition.
   - `cursor` set means there may be more pages, even when `items` is shorter than `limit`: a page also

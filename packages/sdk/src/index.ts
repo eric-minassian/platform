@@ -34,8 +34,10 @@ export {
   DocumentExists,
   DocumentNotFound,
   type DocumentSchema,
+  type GetOptions,
   type KeyValue,
   type Page,
+  type QueryAllOptions,
   type QueryOptions,
 } from './db.ts';
 export { AuthenticationLayer, toFetchHandler } from './http.ts';
