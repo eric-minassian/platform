@@ -11,6 +11,7 @@ import type {
 import pc from 'picocolors';
 import type { ApiClient } from './api.ts';
 import { buildApp } from './build.ts';
+import { type EdgeChecks, edgeChecksFor, hasEdgeChecks, waitForEdge } from './edge.ts';
 import { appendStepSummary, deriveStage, gitInfo, isGitHubActions, setOutput } from './github.ts';
 import { loadProject } from './project.ts';
 import { CliError, EXIT, info, step, success } from './util/output.ts';
@@ -23,6 +24,8 @@ export interface DeployOptions {
   wait: boolean;
   timeoutMs?: number;
   pollMs?: number;
+  /** How long to wait for this machine's nearest edge to serve the deployment. */
+  edgeTimeoutMs?: number;
 }
 
 export interface DeployResult {
@@ -48,6 +51,13 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
     ...git,
   });
   const id = created.deployment.id;
+  const edge = edgeChecksFor({
+    root: project.root,
+    manifest: project.manifest,
+    stage,
+    deploymentId: id,
+    hasStatic: !!files['static.zip'],
+  });
 
   for (const name of Object.keys(files) as ArtifactFile[]) {
     const post = created.uploads[name];
@@ -78,6 +88,7 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
     );
   }
   const url = deployment.url;
+  if (url) await waitUntilServedHere(url, id, edge, opts.edgeTimeoutMs ?? 60_000);
   success(`deployed ${app} to ${stage}${url ? `: ${pc.underline(url)}` : ''}`);
   if (isGitHubActions()) {
     if (url) setOutput('url', url);
@@ -87,6 +98,28 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
     );
   }
   return { deployment, url };
+}
+
+/**
+ * The API reports success once the edge nearest the control plane serves the
+ * deployment; return only once the edge nearest this machine does too.
+ */
+async function waitUntilServedHere(
+  url: string,
+  id: string,
+  checks: EdgeChecks,
+  timeoutMs: number,
+): Promise<void> {
+  if (!hasEdgeChecks(checks)) return;
+  step(`waiting for ${url} to serve ${id} to this machine`);
+  const r = await waitForEdge(url, id, checks, { timeoutMs });
+  if (!r.ok) {
+    throw new CliError(
+      `deployment ${id} is live, but ${url} did not serve it to this machine within ${Math.round(r.ms / 1000)}s`,
+      { hint: `last seen: ${r.pending.join('; ')}`, exitCode: EXIT.deployFailed },
+    );
+  }
+  info(`  ${pc.dim(`served to this machine after ${(r.ms / 1000).toFixed(1)}s`)}`);
 }
 
 /** Builds the multipart body for an S3 presigned POST (policy fields first, file last). */
