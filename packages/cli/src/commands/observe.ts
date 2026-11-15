@@ -260,7 +260,7 @@ export function formatLogLine(l: LogLine): string {
   return `${ts} ${stream} ${body}`;
 }
 
-export function formatTrace(events: TelemetryEvent[]): string {
+export function formatTrace(events: readonly TelemetryEvent[]): string {
   if (events.length === 0) return pc.dim('(no events for this trace)');
   const sorted = [...events].sort((a, b) => a.ts - b.ts);
   const t0 = sorted[0]!.ts;

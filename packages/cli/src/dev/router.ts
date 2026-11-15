@@ -69,7 +69,7 @@ export function localRouteRecord(opts: {
   deploymentId: string;
   hasServer: boolean;
   hasStatic: boolean;
-  serverRoutes: string[];
+  serverRoutes: readonly string[];
   spa: boolean;
 }): RouteRecord {
   return {

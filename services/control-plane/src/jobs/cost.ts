@@ -7,10 +7,10 @@
 import { GetCostAndUsageCommand, type ResultByTime } from '@aws-sdk/client-cost-explorer';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
 import { TAGS } from '@ericminassian/platform-core';
-import { aws } from '../aws.ts';
-import { getRuntimeConfig } from '../config.ts';
+import { Clock, Context, Effect, Layer } from 'effect';
+import { Aws, tryAws } from '../aws.ts';
+import { Settings } from '../config.ts';
 import { costKey } from '../telemetry/query.ts';
-import { pool } from '../util.ts';
 
 export const PLATFORM_COST_KEY = '_platform';
 export const TOTAL_COST_KEY = '_total';
@@ -38,42 +38,68 @@ export function parseCostResults(results: readonly ResultByTime[]): Map<string, 
   return out;
 }
 
-export async function runCostCollector(days = 35): Promise<{ apps: number }> {
-  const { telemetryTable } = await getRuntimeConfig();
-  const end = new Date().toISOString().slice(0, 10);
-  const start = new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-  const results: ResultByTime[] = [];
-  let NextPageToken: string | undefined;
-  do {
-    const res = await aws.ce().send(
-      new GetCostAndUsageCommand({
-        TimePeriod: { Start: start, End: end },
-        Granularity: 'DAILY',
-        Metrics: ['UnblendedCost'],
-        GroupBy: [{ Type: 'TAG', Key: TAGS.app }],
-        NextPageToken,
-      }),
-    );
-    results.push(...(res.ResultsByTime ?? []));
-    NextPageToken = res.NextPageToken;
-  } while (NextPageToken);
+const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-  const parsed = parseCostResults(results);
-  const items = [...parsed].flatMap(([app, byDate]) =>
-    [...byDate].map(([date, usd]) => ({ app, date, usd })),
+export class CostCollector extends Context.Service<
+  CostCollector,
+  {
+    /** Pulls the last `days` days (default 35) and answers how many cost keys were written. */
+    run(days?: number): Effect.Effect<{ readonly apps: number }>;
+  }
+>()('@ericminassian/platform-control-plane/CostCollector') {
+  static readonly layer: Layer.Layer<CostCollector, never, Aws | Settings> = Layer.effect(
+    CostCollector,
+    Effect.gen(function* () {
+      const aws = yield* Aws;
+      const settings = yield* Settings;
+
+      const run = Effect.fn('CostCollector.run')(function* (days = 35) {
+        const { telemetryTable } = yield* settings.runtime;
+        const now = yield* Clock.currentTimeMillis;
+        const results: ResultByTime[] = [];
+        let NextPageToken: string | undefined;
+        do {
+          const res = yield* tryAws(() =>
+            aws.ce().send(
+              new GetCostAndUsageCommand({
+                TimePeriod: { Start: day(now - days * 86_400_000), End: day(now) },
+                Granularity: 'DAILY',
+                Metrics: ['UnblendedCost'],
+                GroupBy: [{ Type: 'TAG', Key: TAGS.app }],
+                NextPageToken,
+              }),
+            ),
+          );
+          results.push(...(res.ResultsByTime ?? []));
+          NextPageToken = res.NextPageToken;
+        } while (NextPageToken);
+
+        const parsed = parseCostResults(results);
+        const items = [...parsed].flatMap(([app, byDate]) =>
+          [...byDate].map(([date, usd]) => ({ app, date, usd })),
+        );
+        yield* Effect.forEach(
+          items,
+          ({ app, date, usd }) =>
+            tryAws(() =>
+              aws.ddb().send(
+                new PutCommand({
+                  TableName: telemetryTable,
+                  Item: {
+                    pk: costKey(app),
+                    sk: date,
+                    usd: Math.round(usd * 10_000) / 10_000,
+                    ttl: Math.floor(Date.parse(date) / 1000) + 400 * 86_400,
+                  },
+                }),
+              ),
+            ),
+          { concurrency: 8, discard: true },
+        );
+        return { apps: parsed.size };
+      }, Effect.orDie);
+
+      return CostCollector.of({ run });
+    }),
   );
-  await pool(items, 8, async ({ app, date, usd }) => {
-    await aws.ddb().send(
-      new PutCommand({
-        TableName: telemetryTable,
-        Item: {
-          pk: costKey(app),
-          sk: date,
-          usd: Math.round(usd * 10_000) / 10_000,
-          ttl: Math.floor(Date.parse(date) / 1000) + 400 * 86_400,
-        },
-      }),
-    );
-  });
-  return { apps: parsed.size };
 }

@@ -1,102 +1,124 @@
-import { GetParameterCommand, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
-import { type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
-import platformConfig from '../../../platform.config.ts';
-import { aws } from './aws.ts';
-
-/** Repo-root `platform.config.ts` (members, limits, reserved names), bundled at build time. */
-export const config = platformConfig;
-
-const CACHE_MS = 5 * 60_000;
-
-function cached<T>(load: () => Promise<T>): { get(): Promise<T>; reset(): void } {
-  let entry: { value: Promise<T>; at: number } | undefined;
-  return {
-    get() {
-      if (!entry || Date.now() - entry.at > CACHE_MS) {
-        const value = load();
-        entry = { value, at: Date.now() };
-        value.catch(() => {
-          entry = undefined;
-        });
-      }
-      return entry.value;
-    },
-    reset() {
-      entry = undefined;
-    },
-  };
-}
-
 /**
- * Shared resources the foundation created (buckets, tables, KVS, distribution, user pool).
- * `PLATFORM_RUNTIME_CONFIG` (JSON) overrides SSM for local work and tests.
+ * What the control plane is configured with: `platform.config.ts` (bundled at
+ * build time), and the values the foundation keeps in SSM (shared resources,
+ * the session key, the GitHub App). SSM reads are cached for five minutes, and
+ * a failed read is retried on the next use.
  */
-const runtimeConfig = cached(async (): Promise<PlatformRuntimeConfig> => {
-  const override = process.env.PLATFORM_RUNTIME_CONFIG;
-  if (override) return JSON.parse(override) as PlatformRuntimeConfig;
-  const res = await aws.ssm().send(new GetParameterCommand({ Name: platformNames.runtimeConfigParameter }));
-  if (!res.Parameter?.Value) throw new Error(`${platformNames.runtimeConfigParameter} is empty`);
-  return JSON.parse(res.Parameter.Value) as PlatformRuntimeConfig;
-});
+import { GetParameterCommand, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
+import { type PlatformConfig, type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
+import { Config, Context, Effect, Exit, Layer, Option, Redacted } from 'effect';
+import platformConfig from '../../../platform.config.ts';
+import { Aws, tryAws } from './aws.ts';
 
-export const getRuntimeConfig = (): Promise<PlatformRuntimeConfig> => runtimeConfig.get();
-
-/** HS256 key for platform tokens and console sessions. `PLATFORM_SESSION_KEY` overrides SSM. */
-const sessionKey = cached(async (): Promise<Uint8Array> => {
-  const override = process.env.PLATFORM_SESSION_KEY;
-  const value =
-    override ??
-    (
-      await aws
-        .ssm()
-        .send(new GetParameterCommand({ Name: platformNames.sessionKeyParameter, WithDecryption: true }))
-    ).Parameter?.Value;
-  if (!value || value.length < 32) throw new Error('session key is missing or shorter than 32 chars');
-  return new TextEncoder().encode(value);
-});
-
-export const getSessionKey = (): Promise<Uint8Array> => sessionKey.get();
-
+/** GitHub App used for console sign-in and (optionally) error issues. */
 export interface GithubAppSettings {
-  clientId: string;
-  clientSecret: string;
-  appId?: string;
-  privateKey?: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+  readonly appId?: string | undefined;
+  readonly privateKey?: string | undefined;
 }
 
-/** GitHub App used for console sign-in and (optionally) error issues. Null until configured. */
-const githubApp = cached(async (): Promise<GithubAppSettings | null> => {
-  const values: Record<string, string> = {};
-  let NextToken: string | undefined;
-  do {
-    const res = await aws.ssm().send(
-      new GetParametersByPathCommand({
-        Path: platformNames.githubAppParameterPrefix,
-        WithDecryption: true,
-        NextToken,
-      }),
-    );
-    for (const p of res.Parameters ?? []) {
-      if (p.Name && p.Value) values[p.Name.slice(platformNames.githubAppParameterPrefix.length)] = p.Value;
-    }
-    NextToken = res.NextToken;
-  } while (NextToken);
-  if (!values.client_id || !values.client_secret) return null;
-  return {
-    clientId: values.client_id,
-    clientSecret: values.client_secret,
-    ...(values.app_id ? { appId: values.app_id } : {}),
-    ...(values.private_key ? { privateKey: values.private_key } : {}),
-  };
-});
+export class Settings extends Context.Service<
+  Settings,
+  {
+    /** `platform.config.ts`: members, limits, reserved names. */
+    readonly platform: PlatformConfig;
+    /** Public origin of the console (`https://platform.ericminassian.com`). */
+    readonly consoleUrl: string;
+    /** Shared resources the foundation created (buckets, tables, KVS, distribution, user pool). */
+    readonly runtime: Effect.Effect<PlatformRuntimeConfig>;
+    /** HS256 key for platform tokens and console sessions. */
+    readonly sessionKey: Effect.Effect<Uint8Array>;
+    /** None until the GitHub App is configured (see docs/SETUP.md). */
+    readonly githubApp: Effect.Effect<Option.Option<GithubAppSettings>>;
+  }
+>()('@ericminassian/platform-control-plane/Settings') {
+  /**
+   * `PLATFORM_RUNTIME_CONFIG` (JSON) and `PLATFORM_SESSION_KEY` override SSM,
+   * and `PLATFORM_CONSOLE_URL` the console origin, for local work.
+   */
+  static readonly layer: Layer.Layer<Settings, never, Aws> = Layer.effect(
+    Settings,
+    Effect.gen(function* () {
+      const aws = yield* Aws;
+      const env = yield* Config.all({
+        consoleUrl: Config.String('PLATFORM_CONSOLE_URL').pipe(
+          Config.withDefault(`https://${platformConfig.consoleHost}`),
+        ),
+        runtimeConfig: Config.option(Config.String('PLATFORM_RUNTIME_CONFIG')),
+        sessionKey: Config.option(Config.Redacted('PLATFORM_SESSION_KEY')),
+      }).pipe(Effect.orDie);
 
-export const getGithubApp = (): Promise<GithubAppSettings | null> => githubApp.get();
+      /** A parameter's value; dies when it's missing or empty, as the foundation always writes them. */
+      const parameter = (Name: string) =>
+        tryAws(() => aws.ssm().send(new GetParameterCommand({ Name, WithDecryption: true }))).pipe(
+          Effect.map((res) => res.Parameter?.Value ?? ''),
+          Effect.filterOrElse(
+            (value) => value !== '',
+            () => Effect.die(new Error(`${Name} is empty`)),
+          ),
+          Effect.orDie,
+        );
 
-/** Public origin of the console (`https://platform.ericminassian.com`). */
-export function consoleUrl(): string {
-  return process.env.PLATFORM_CONSOLE_URL ?? `https://${config.consoleHost}`;
+      const runtime: Effect.Effect<PlatformRuntimeConfig> = Option.match(env.runtimeConfig, {
+        onSome: Effect.succeed,
+        onNone: () => parameter(platformNames.runtimeConfigParameter),
+      }).pipe(
+        // Written by the foundation deploy (and `plat dev`), which share the
+        // `PlatformRuntimeConfig` type with this code.
+        Effect.map((json) => JSON.parse(json) as PlatformRuntimeConfig),
+      );
+
+      const sessionKey: Effect.Effect<Uint8Array> = Option.match(env.sessionKey, {
+        onSome: (key) => Effect.succeed(Redacted.value(key)),
+        onNone: () => parameter(platformNames.sessionKeyParameter),
+      }).pipe(
+        Effect.filterOrElse(
+          (value) => value.length >= 32,
+          () => Effect.die(new Error('the session key is shorter than 32 chars')),
+        ),
+        Effect.map((value): Uint8Array => new TextEncoder().encode(value)),
+      );
+
+      const githubApp = Effect.gen(function* () {
+        const prefix = platformNames.githubAppParameterPrefix;
+        const values: Record<string, string> = {};
+        let NextToken: string | undefined;
+        do {
+          const res = yield* tryAws(() =>
+            aws.ssm().send(new GetParametersByPathCommand({ Path: prefix, WithDecryption: true, NextToken })),
+          );
+          for (const p of res.Parameters ?? []) {
+            if (p.Name && p.Value) values[p.Name.slice(prefix.length)] = p.Value;
+          }
+          NextToken = res.NextToken;
+        } while (NextToken);
+        if (!values.client_id || !values.client_secret) return Option.none<GithubAppSettings>();
+        return Option.some<GithubAppSettings>({
+          clientId: values.client_id,
+          clientSecret: values.client_secret,
+          appId: values.app_id,
+          privateKey: values.private_key,
+        });
+      }).pipe(Effect.orDie);
+
+      const cached = <A>(load: Effect.Effect<A>) =>
+        Effect.cachedWithTTL(load, (exit) => (Exit.isSuccess(exit) ? '5 minutes' : 0));
+
+      return Settings.of({
+        platform: platformConfig,
+        consoleUrl: env.consoleUrl,
+        runtime: yield* cached(runtime),
+        sessionKey: yield* cached(sessionKey),
+        githubApp: yield* cached(githubApp),
+      });
+    }),
+  );
 }
 
-export function logRetentionDays(stage: string): number {
-  return stage === 'prod' ? config.telemetry.logRetentionDays.prod : config.telemetry.logRetentionDays.other;
+/** CloudWatch log retention for a stage's log groups. */
+export function logRetentionDays(platform: PlatformConfig, stage: string): number {
+  return stage === 'prod'
+    ? platform.telemetry.logRetentionDays.prod
+    : platform.telemetry.logRetentionDays.other;
 }

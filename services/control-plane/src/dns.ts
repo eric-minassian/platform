@@ -4,6 +4,7 @@
  * wildcard, so such an app would never receive traffic).
  */
 import { promises as dnsPromises } from 'node:dns';
+import { Context, Data, Effect, Layer, Option } from 'effect';
 
 export interface Resolver {
   resolveNs(host: string): Promise<string[]>;
@@ -13,37 +14,53 @@ export interface Resolver {
 
 const NO_RECORD = new Set(['ENODATA', 'ENOTFOUND', 'NXDOMAIN']);
 
-async function tryResolve(fn: () => Promise<string[]>): Promise<string[] | null> {
-  try {
-    return await fn();
-  } catch (err) {
-    if (NO_RECORD.has((err as { code?: string }).code ?? '')) return null;
-    throw err;
-  }
-}
+class LookupFailed extends Data.TaggedError('LookupFailed')<{ readonly code: string | undefined }> {}
 
-/**
- * Returns null when `host` is free (no records, or the wildcard CNAME to the
- * platform edge), otherwise a reason. DNS failures other than "no record"
- * are treated as free so an outage never blocks app creation.
- */
-export async function hostConflict(
-  host: string,
-  edgeHost: string,
-  resolver: Resolver = dnsPromises,
-): Promise<string | null> {
-  try {
-    const ns = await tryResolve(() => resolver.resolveNs(host));
-    if (ns?.length) return `${host} is delegated to other name servers`;
-    const cname = await tryResolve(() => resolver.resolveCname(host));
-    if (cname?.length) {
-      const target = cname[0]!.replace(/\.$/, '').toLowerCase();
-      return target === edgeHost.toLowerCase() ? null : `${host} already points at ${target}`;
-    }
-    const a = await tryResolve(() => resolver.resolve4(host));
-    if (a?.length) return `${host} already has an A record`;
-    return null;
-  } catch {
-    return null;
+export class Dns extends Context.Service<
+  Dns,
+  {
+    /**
+     * Why `host` can't be used, or none when it's free (no records, or the
+     * wildcard CNAME to the platform edge). Lookups that fail for other
+     * reasons than "no record" count as free, so a DNS outage never blocks
+     * app creation.
+     */
+    hostConflict(host: string, edgeHost: string): Effect.Effect<Option.Option<string>>;
   }
+>()('@ericminassian/platform-control-plane/Dns') {
+  static readonly layerWith = (resolver: Resolver): Layer.Layer<Dns> =>
+    Layer.succeed(
+      Dns,
+      Dns.of({
+        hostConflict: Effect.fn('Dns.hostConflict')(
+          function* (host: string, edgeHost: string) {
+            const lookup = (resolve: (host: string) => Promise<string[]>) =>
+              Effect.tryPromise({
+                try: () => resolve(host),
+                catch: (e) => new LookupFailed({ code: (e as NodeJS.ErrnoException).code }),
+              }).pipe(
+                Effect.catchIf(
+                  (e) => NO_RECORD.has(e.code ?? ''),
+                  () => Effect.succeed<string[]>([]),
+                ),
+              );
+            const ns = yield* lookup((h) => resolver.resolveNs(h));
+            if (ns.length) return Option.some(`${host} is delegated to other name servers`);
+            const [cname] = yield* lookup((h) => resolver.resolveCname(h));
+            if (cname !== undefined) {
+              const target = cname.replace(/\.$/, '').toLowerCase();
+              return target === edgeHost.toLowerCase()
+                ? Option.none()
+                : Option.some(`${host} already points at ${target}`);
+            }
+            const a = yield* lookup((h) => resolver.resolve4(h));
+            if (a.length) return Option.some(`${host} already has an A record`);
+            return Option.none<string>();
+          },
+          Effect.orElseSucceed(() => Option.none<string>()),
+        ),
+      }),
+    );
+
+  static readonly layer: Layer.Layer<Dns> = Dns.layerWith(dnsPromises);
 }

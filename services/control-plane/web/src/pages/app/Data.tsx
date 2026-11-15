@@ -1,6 +1,8 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useAtomSet, useAtomValue } from '@effect/atom-react';
+import { Exit, Option } from 'effect';
+import { AsyncResult, Atom } from 'effect/reactivity';
 import { useState } from 'react';
-import { api } from '../../api.ts';
+import { ApiClient, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
 import {
   Button,
   Card,
@@ -17,28 +19,90 @@ import {
 import { fmtBytes, relTime } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
 
+const collectionsAtom = Atom.family(({ app, stage }: { app: string; stage: string }) =>
+  fresh(ApiClient.query('manage', 'collections', { params: { app }, query: { stage }, timeToLive })),
+);
+const itemPages = Atom.family(
+  ({
+    app,
+    stage,
+    collection,
+    partition,
+  }: {
+    app: string;
+    stage: string;
+    collection: string;
+    partition: string;
+  }) =>
+    pages(
+      (cursor) =>
+        ApiClient.use((client) =>
+          client.manage.items({
+            params: { app },
+            query: { stage, collection, partition: partition || undefined, cursor },
+          }),
+        ),
+      (page) => page.cursor,
+    ),
+);
+const storesAtom = Atom.family(({ app, stage }: { app: string; stage: string }) =>
+  fresh(ApiClient.query('manage', 'storage', { params: { app }, query: { stage }, timeToLive })),
+);
+const objectPages = Atom.family(({ app, stage, store }: { app: string; stage: string; store: string }) =>
+  pages(
+    (cursor) =>
+      ApiClient.use((client) => client.manage.storage({ params: { app }, query: { stage, store, cursor } })),
+    // With `store`, the endpoint answers a listing.
+    (page) => ('objects' in page ? page.cursor : undefined),
+  ),
+);
+const objectUrlAtom = ApiClient.mutation('manage', 'storageUrl');
+
+function Items(key: { app: string; stage: string; collection: string; partition: string }) {
+  const atom = itemPages(key);
+  const result = useAtomValue(atom);
+  const loadMore = useAtomSet(atom);
+  const loaded = loadedPages(result);
+  const rows = loaded.flatMap((p) => p.items);
+  return (
+    <>
+      <ErrorBox error={result._tag === 'Failure' ? result.cause : undefined} />
+      {AsyncResult.isInitial(result) ? (
+        <Spinner />
+      ) : rows.length === 0 ? (
+        <Empty>No items.</Empty>
+      ) : (
+        <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
+          {rows.map((item, i) => (
+            <pre
+              // biome-ignore lint/suspicious/noArrayIndexKey: items are displayed in scan order
+              key={i}
+              className="overflow-x-auto rounded-md bg-panel-2 p-2 font-mono text-[11px]"
+            >
+              {JSON.stringify(item, null, 2)}
+            </pre>
+          ))}
+        </div>
+      )}
+      {loaded.at(-1)?.cursor !== undefined && (
+        <Button onClick={() => loadMore()} disabled={result.waiting}>
+          Load more
+        </Button>
+      )}
+    </>
+  );
+}
+
 function Collections() {
   const { app, scope } = useApp();
   const [selected, setSelected] = useState<string | null>(null);
   const [partition, setPartition] = useState('');
   const [applied, setApplied] = useState('');
-  const collections = useQuery({
-    queryKey: ['collections', app, scope.stage],
-    queryFn: () => api.collections(app, scope.stage),
-  });
-  const items = useInfiniteQuery({
-    queryKey: ['items', app, scope.stage, selected, applied],
-    queryFn: ({ pageParam }) =>
-      api.items(app, scope.stage, selected!, applied || undefined, pageParam || undefined),
-    initialPageParam: '' as string,
-    getNextPageParam: (last) => last.cursor,
-    enabled: Boolean(selected) && collections.data?.database === true,
-  });
-  const rows = items.data?.pages.flatMap((p) => p.items) ?? [];
+  const collections = useAtomValue(collectionsAtom({ app, stage: scope.stage }));
 
   return (
     <Card title="Database">
-      <Loaded q={collections}>
+      <Loaded result={collections}>
         {(d) =>
           !d.database ? (
             <Empty>No database declared in plat.config.ts.</Empty>
@@ -87,29 +151,7 @@ function Collections() {
                       />
                       <Button type="submit">Filter</Button>
                     </form>
-                    <ErrorBox error={items.error} />
-                    {items.isPending ? (
-                      <Spinner />
-                    ) : rows.length === 0 ? (
-                      <Empty>No items.</Empty>
-                    ) : (
-                      <div className="max-h-[60vh] space-y-1.5 overflow-y-auto">
-                        {rows.map((item, i) => (
-                          <pre
-                            // biome-ignore lint/suspicious/noArrayIndexKey: items are displayed in scan order
-                            key={i}
-                            className="overflow-x-auto rounded-md bg-panel-2 p-2 font-mono text-[11px]"
-                          >
-                            {JSON.stringify(item, null, 2)}
-                          </pre>
-                        ))}
-                      </div>
-                    )}
-                    {items.hasNextPage && (
-                      <Button onClick={() => items.fetchNextPage()} disabled={items.isFetchingNextPage}>
-                        Load more
-                      </Button>
-                    )}
+                    <Items app={app} stage={scope.stage} collection={selected} partition={applied} />
                   </div>
                 )}
               </div>
@@ -121,39 +163,23 @@ function Collections() {
   );
 }
 
-function Storage() {
-  const { app, scope } = useApp();
-  const stores = useQuery({
-    queryKey: ['stores', app, scope.stage],
-    queryFn: () => api.stores(app, scope.stage),
-  });
-  const [store, setStore] = useState('');
-  const active = store || stores.data?.stores[0] || '';
-  const objects = useQuery({
-    queryKey: ['objects', app, scope.stage, active],
-    queryFn: () => api.objects(app, scope.stage, active),
-    enabled: Boolean(active),
-  });
+function Objects(key: { app: string; stage: string; store: string }) {
+  const atom = objectPages(key);
+  const result = useAtomValue(atom);
+  const loadMore = useAtomSet(atom);
+  const objectUrl = useAtomSet(objectUrlAtom, { mode: 'promiseExit' });
+  if (AsyncResult.isInitial(result)) return <Spinner />;
+  const loaded = loadedPages(result);
+  const failed = result._tag === 'Failure' ? <ErrorBox error={result.cause} /> : null;
+  if (loaded.length === 0) return failed;
+  const last = loaded.at(-1);
   return (
-    <Card
-      title="Storage"
-      actions={
-        stores.data && stores.data.stores.length > 0 ? (
-          <Select
-            value={active}
-            onChange={setStore}
-            options={stores.data.stores.map((s) => ({ value: s, label: s }))}
-          />
-        ) : null
-      }
-    >
-      {!active ? (
-        <Empty>No storage declared in plat.config.ts.</Empty>
-      ) : (
-        <Loaded q={objects}>
-          {(o) => (
-            <Table head={['Key', 'Size', 'Modified', '']} empty="No files.">
-              {o.objects.map((obj) => (
+    <>
+      {failed}
+      <Table head={['Key', 'Size', 'Modified', '']} empty="No files.">
+        {loaded.flatMap((page) =>
+          'objects' in page
+            ? page.objects.map((obj) => (
                 <tr key={obj.key}>
                   <td>
                     <Mono>{obj.key}</Mono>
@@ -164,18 +190,59 @@ function Storage() {
                     <Button
                       variant="ghost"
                       onClick={async () => {
-                        const { url } = await api.objectUrl(app, scope.stage, active, obj.key);
-                        window.open(url, '_blank', 'noopener');
+                        const exit = await objectUrl({
+                          params: { app: key.app },
+                          query: { stage: key.stage, store: key.store, key: obj.key },
+                        });
+                        if (Exit.isSuccess(exit)) window.open(exit.value.url, '_blank', 'noopener');
                       }}
                     >
                       Download
                     </Button>
                   </td>
                 </tr>
-              ))}
-            </Table>
-          )}
-        </Loaded>
+              ))
+            : [],
+        )}
+      </Table>
+      {last !== undefined && 'objects' in last && last.cursor !== undefined && (
+        <div className="pt-2">
+          <Button onClick={() => loadMore()} disabled={result.waiting}>
+            Load more
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+function Storage() {
+  const { app, scope } = useApp();
+  const stores = useAtomValue(storesAtom({ app, stage: scope.stage }));
+  // Without `store`, the endpoint answers the declared stores.
+  const declared = Option.match(AsyncResult.value(stores), {
+    onNone: () => [],
+    onSome: (r) => ('stores' in r ? r.stores : []),
+  });
+  const [store, setStore] = useState('');
+  const active = store || declared[0] || '';
+  return (
+    <Card
+      title="Storage"
+      actions={
+        declared.length > 0 ? (
+          <Select
+            value={active}
+            onChange={setStore}
+            options={declared.map((s) => ({ value: s, label: s }))}
+          />
+        ) : null
+      }
+    >
+      {!active ? (
+        <Empty>No storage declared in plat.config.ts.</Empty>
+      ) : (
+        <Objects app={app} stage={scope.stage} store={active} />
       )}
     </Card>
   );

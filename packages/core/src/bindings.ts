@@ -22,8 +22,8 @@ export interface Bindings {
   queues: Record<string, { url: string; arn: string }>;
   bus?: { name: string; arn: string };
   /** Shared storage bucket; each named store is `prefix + <name>/`. */
-  storage?: { bucket: string; prefix: string; stores: string[] };
-  secrets: { path: string; sharedPath: string; names: string[] };
+  storage?: { bucket: string; prefix: string; stores: readonly string[] };
+  secrets: { path: string; sharedPath: string; names: readonly string[] };
   auth?: AuthBindings;
   /** Worker function name, for direct `invoke` jobs. */
   worker?: string;

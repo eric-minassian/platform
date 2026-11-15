@@ -6,13 +6,13 @@
  */
 import {
   bucketStart,
-  isTelemetryEvent,
   latencyBucket,
   RESOLUTION_TTL_DAYS,
   type Resolution,
-  type TelemetryEvent,
+  TelemetryEvent,
   telemetryKeys,
 } from '@ericminassian/platform-core';
+import { Option, Predicate, Schema } from 'effect';
 
 /** Whole-stage HTTP series get minute resolution; per-route/job/metric series start at hourly. */
 const STAGE_RES: readonly Resolution[] = ['1m', '1h', '1d'];
@@ -51,10 +51,13 @@ export interface Aggregation {
   events: number;
 }
 
+const decodeEvent = Schema.decodeUnknownOption(TelemetryEvent);
+
 /**
  * Extracts a platform telemetry event from one CloudWatch Logs message. Handles
  * raw JSON lines, lines with a Lambda text-format prefix (`<ts>\t<reqid>\tINFO\t{...}`),
- * and Lambda JSON-format envelopes (`{"message": ...}`).
+ * and Lambda JSON-format envelopes (`{"message": ...}`). A line that isn't a
+ * valid event (an older or foreign shape) is not telemetry.
  */
 export function parseLogMessage(message: string): TelemetryEvent | null {
   const start = message.indexOf('{');
@@ -65,11 +68,11 @@ export function parseLogMessage(message: string): TelemetryEvent | null {
   } catch {
     return null;
   }
-  if (isTelemetryEvent(parsed)) return parsed;
-  const inner = (parsed as { message?: unknown } | null)?.message;
-  if (isTelemetryEvent(inner)) return inner;
+  const event = decodeEvent(parsed);
+  if (Option.isSome(event)) return event.value;
+  const inner = Predicate.hasProperty(parsed, 'message') ? parsed.message : undefined;
   if (typeof inner === 'string') return parseLogMessage(inner);
-  return null;
+  return Option.getOrNull(decodeEvent(inner));
 }
 
 const ttlFor = (bucket: number, res: Resolution) =>

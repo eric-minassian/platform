@@ -1,9 +1,25 @@
+import { useAtomValue } from '@effect/atom-react';
 import type { AppSummary } from '@ericminassian/platform-core';
-import { useQuery } from '@tanstack/react-query';
+import { Atom } from 'effect/reactivity';
 import { NavLink, Outlet, useOutletContext, useParams, useSearchParams } from 'react-router';
-import { api, type Scope } from '../api.ts';
+import { ApiClient, fresh, timeToLive } from '../client.ts';
 import { Badge, cx, Dot, Loaded, Select, statusTone } from '../components/ui.tsx';
 import { healthTone } from './Apps.tsx';
+
+/** The stage and time range the app's tabs show, from the query string. */
+export interface Scope {
+  stage: string;
+  range: string;
+}
+
+/** Reactivity key of an app's summary: mutations that change its record or stages name it. */
+export const appChanged = (app: string) => [`app:${app}`];
+
+const summaryAtom = Atom.family((app: string) =>
+  fresh(ApiClient.query('apps', 'get', { params: { app }, reactivityKeys: appChanged(app), timeToLive }), {
+    every: '30 seconds',
+  }),
+);
 
 export interface AppContext {
   summary: AppSummary;
@@ -33,7 +49,7 @@ const TABS = [
 export function AppLayout() {
   const { app = '' } = useParams();
   const [params, setParams] = useSearchParams();
-  const q = useQuery({ queryKey: ['app', app], queryFn: () => api.app(app), refetchInterval: 30_000 });
+  const result = useAtomValue(summaryAtom(app));
   const stage = params.get('stage') ?? 'prod';
   const range = params.get('range') ?? '24h';
   const set = (k: string, v: string) =>
@@ -44,7 +60,7 @@ export function AppLayout() {
   const search = `?stage=${encodeURIComponent(stage)}&range=${range}`;
 
   return (
-    <Loaded q={q}>
+    <Loaded result={result}>
       {(summary) => {
         const current = summary.stages.find((s) => s.stage === stage);
         const stageOptions = summary.stages.length

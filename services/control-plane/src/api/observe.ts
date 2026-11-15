@@ -1,156 +1,161 @@
 /** Observability endpoints: metrics, routes, jobs, queues, errors, uptime, cost, logs, traces. */
+import type { JobStats } from '@ericminassian/platform-core';
+import { NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
+import { Cause, Clock, Effect, Option, Stream } from 'effect';
+import { HttpApiBuilder } from 'effect/http-api';
+import { AppQueues } from '../jobs/queues.ts';
+import { Logs } from '../logs.ts';
+import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
+import { Access, stageParam } from './access.ts';
 
-import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
-import type { JobStats, TraceResponse } from '@ericminassian/platform-core';
-import { telemetryKeys } from '@ericminassian/platform-core';
-import { Hono } from 'hono';
-import { streamSSE } from 'hono/streaming';
-import type { AuthEnv } from '../auth.ts';
-import { aws } from '../aws.ts';
-import { getRuntimeConfig } from '../config.ts';
-import { badRequest } from '../errors.ts';
-import { queueStats } from '../jobs/queues.ts';
-import { getTrace, searchLogs, tailLogs } from '../logs.ts';
-import {
-  parseRange,
-  readCost,
-  readErrors,
-  readJobs,
-  readMetrics,
-  readRoutes,
-  readUptime,
-} from '../telemetry/query.ts';
-import { liveManifest, memberApp, stageParam } from './context.ts';
+interface RangeQuery {
+  readonly from?: string | undefined;
+  readonly to?: string | undefined;
+  readonly range?: string | undefined;
+  readonly res?: string | undefined;
+}
 
-const rangeOf = (c: { req: { query(k: string): string | undefined } }) =>
-  parseRange({
-    from: c.req.query('from'),
-    to: c.req.query('to'),
-    range: c.req.query('range'),
-    res: c.req.query('res'),
-  });
+/** `?range=`/`?from=&to=` and `?res=`, relative to now. */
+const rangeOf = (query: RangeQuery, defaultRange?: string) =>
+  Effect.map(Clock.currentTimeMillis, (now) =>
+    parseRange({ from: query.from, to: query.to, range: query.range ?? defaultRange, res: query.res }, now),
+  );
 
-export const observe = new Hono<AuthEnv>()
-  .get('/:app/metrics', async (c) => {
-    const { app } = await memberApp(c);
-    return c.json(await readMetrics(app.name, stageParam(c), rangeOf(c)));
-  })
-  .get('/:app/routes', async (c) => {
-    const { app } = await memberApp(c);
-    return c.json(await readRoutes(app.name, stageParam(c), rangeOf(c)));
-  })
-  .get('/:app/jobs', async (c) => {
-    const { app } = await memberApp(c);
-    const stage = stageParam(c);
-    const m = await liveManifest(app.name, stage);
-    const declared: { kind: JobStats['kind']; name: string }[] = m
-      ? [
-          ...Object.keys(m.queues).map((name) => ({ kind: 'queue' as const, name })),
-          ...m.events.map((name) => ({ kind: 'event' as const, name })),
-          ...Object.keys(m.crons).map((name) => ({ kind: 'cron' as const, name })),
-        ]
-      : [];
-    return c.json({
-      jobs: await readJobs(app.name, stage, rangeOf(c), declared),
-      crons: m ? Object.entries(m.crons).map(([name, cron]) => ({ name, schedule: cron.schedule })) : [],
+/** What a live tail sends when it stops on an error: the reason, as the CLI and console show it. */
+const tailError = (cause: Cause.Cause<unknown>): string => {
+  const error = Cause.squash(cause);
+  if (error instanceof Error) return `${'code' in error ? String(error.code) : error.name}: ${error.message}`;
+  return String(error);
+};
+
+export const ObserveLive = HttpApiBuilder.group(
+  PlatformApi,
+  'observe',
+  Effect.fn(function* (handlers) {
+    const access = yield* Access;
+    const logs = yield* Logs;
+    const queues = yield* AppQueues;
+    const telemetry = yield* TelemetryQuery;
+
+    /** The app and validated stage an endpoint reads. */
+    const scope = Effect.fnUntraced(function* (app: string, stage: string | undefined) {
+      const found = yield* access.memberApp(app);
+      return { app: found.app.name, stage: yield* stageParam(stage) };
     });
-  })
-  .get('/:app/queues', async (c) => {
-    const { app } = await memberApp(c);
-    const stage = stageParam(c);
-    const m = await liveManifest(app.name, stage);
-    return c.json(await queueStats(app.name, stage, m ? Object.keys(m.queues) : []));
-  })
-  .get('/:app/errors', async (c) => {
-    const { app } = await memberApp(c);
-    const status = c.req.query('status');
-    const groups = await readErrors(app.name, stageParam(c));
-    return c.json(status ? groups.filter((g) => g.status === status) : groups);
-  })
-  .patch('/:app/errors/:fp', async (c) => {
-    const { app } = await memberApp(c);
-    const body = (await c.req.json().catch(() => ({}))) as { status?: string };
-    if (body.status !== 'open' && body.status !== 'resolved' && body.status !== 'ignored') {
-      throw badRequest('status must be open, resolved or ignored');
-    }
-    const { telemetryTable } = await getRuntimeConfig();
-    await aws.ddb().send(
-      new UpdateCommand({
-        TableName: telemetryTable,
-        Key: { pk: telemetryKeys.errors(app.name, stageParam(c)), sk: c.req.param('fp') },
-        UpdateExpression: 'SET #s = :s',
-        ConditionExpression: 'attribute_exists(pk)',
-        ExpressionAttributeNames: { '#s': 'status' },
-        ExpressionAttributeValues: { ':s': body.status },
-      }),
-    );
-    return c.json({ status: body.status });
-  })
-  .get('/:app/uptime', async (c) => {
-    const { app } = await memberApp(c);
-    return c.json(await readUptime(app.name, stageParam(c), rangeOf(c)));
-  })
-  .get('/:app/cost', async (c) => {
-    const { app } = await memberApp(c);
-    const days = Math.min(Number(c.req.query('days') ?? 35) || 35, 400);
-    return c.json(await readCost(app.name, days));
-  })
-  .get('/:app/logs', async (c) => {
-    const { app } = await memberApp(c);
-    const range = rangeOf(c);
-    const stream = c.req.query('stream');
-    return c.json(
-      await searchLogs({
-        app: app.name,
-        stage: stageParam(c),
-        from: range.from,
-        to: range.to,
-        ...(c.req.query('q') ? { q: c.req.query('q')! } : {}),
-        ...(stream === 'web' || stream === 'worker' ? { stream } : {}),
-        ...(c.req.query('limit') ? { limit: Number(c.req.query('limit')) } : {}),
-        ...(c.req.query('next') ? { nextToken: c.req.query('next')! } : {}),
-      }),
-    );
-  })
-  .get('/:app/logs/tail', async (c) => {
-    const { app } = await memberApp(c);
-    const stage = stageParam(c);
-    const q = c.req.query('q');
-    return streamSSE(c, async (stream) => {
-      const abort = new AbortController();
-      stream.onAbort(() => abort.abort());
-      // CloudFront drops idle origin connections; keep the stream warm.
-      const ping = setInterval(() => void stream.writeSSE({ event: 'ping', data: '' }), 20_000);
-      try {
-        for await (const line of tailLogs({
-          app: app.name,
-          stage,
-          signal: abort.signal,
-          ...(q ? { q } : {}),
-        })) {
-          await stream.writeSSE({ event: 'line', data: JSON.stringify(line) });
-        }
-      } catch (err) {
-        if (!abort.signal.aborted) await stream.writeSSE({ event: 'error', data: String(err) });
-      } finally {
-        clearInterval(ping);
-      }
+
+    return handlers.handleAll({
+      metrics: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return yield* telemetry.metrics(app, stage, yield* rangeOf(query));
+        }),
+
+      routes: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return yield* telemetry.routes(app, stage, yield* rangeOf(query));
+        }),
+
+      jobs: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
+          const declared: Array<{ kind: JobStats['kind']; name: string }> = manifest
+            ? [
+                ...Object.keys(manifest.queues).map((name) => ({ kind: 'queue' as const, name })),
+                ...manifest.events.map((name) => ({ kind: 'event' as const, name })),
+                ...Object.keys(manifest.crons).map((name) => ({ kind: 'cron' as const, name })),
+              ]
+            : [];
+          return {
+            jobs: yield* telemetry.jobs(app, stage, yield* rangeOf(query), declared),
+            crons: manifest
+              ? Object.entries(manifest.crons).map(([name, cron]) => ({ name, schedule: cron.schedule }))
+              : [],
+          };
+        }),
+
+      queues: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = yield* access.liveManifest(app, stage);
+          return yield* queues.stats(
+            app,
+            stage,
+            Option.match(manifest, { onNone: () => [], onSome: (m) => Object.keys(m.queues) }),
+          );
+        }),
+
+      errors: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const groups = yield* telemetry.errors(app, stage);
+          return query.status ? groups.filter((g) => g.status === query.status) : groups;
+        }),
+
+      updateError: ({ params, query, payload }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const updated = yield* telemetry.setErrorStatus(app, stage, params.fingerprint, payload.status);
+          if (!updated) return yield* NotFound.of(`error group ${params.fingerprint}`);
+          return { status: payload.status };
+        }),
+
+      uptime: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return yield* telemetry.uptime(app, stage, yield* rangeOf(query));
+        }),
+
+      cost: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app } = yield* access.memberApp(params.app);
+          return yield* telemetry.cost(app.name, Math.max(1, Math.min(query.days || 35, 400)));
+        }),
+
+      logs: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const range = yield* rangeOf(query);
+          return yield* logs.search({
+            app,
+            stage,
+            from: range.from,
+            to: range.to,
+            q: query.q,
+            stream: query.stream,
+            limit: query.limit,
+            nextToken: query.next,
+          });
+        }),
+
+      tail: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return logs.tail({ app, stage, q: query.q }).pipe(
+            Stream.map((line) => ({ event: 'line' as const, data: line })),
+            // The tail ends with the reason it stopped; a client that left needs none.
+            Stream.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Stream.empty
+                : Stream.make({ event: 'error' as const, data: tailError(cause) }),
+            ),
+          );
+        }),
+
+      trace: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const range = yield* rangeOf(query, '7d');
+          const events = yield* logs.trace({
+            app,
+            stage,
+            trace: params.trace,
+            from: range.from,
+            to: range.to,
+          });
+          return { trace: params.trace, events };
+        }),
     });
-  })
-  .get('/:app/traces/:trace', async (c) => {
-    const { app } = await memberApp(c);
-    const range = parseRange({
-      from: c.req.query('from'),
-      to: c.req.query('to'),
-      range: c.req.query('range') ?? '7d',
-    });
-    const trace = c.req.param('trace');
-    let events: TraceResponse['events'];
-    try {
-      events = await getTrace({ app: app.name, stage: stageParam(c), trace, from: range.from, to: range.to });
-    } catch (err) {
-      throw badRequest(err instanceof Error ? err.message : String(err));
-    }
-    const res: TraceResponse = { trace, events };
-    return c.json(res);
-  });
+  }),
+);

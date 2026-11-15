@@ -13,6 +13,7 @@
     ".": "./src/index.ts",
     "./auth": "./src/auth.ts",
     "./cloudfront-function": "./src/cloudfront-function.ts",
+    "./platform-api": "./src/platform-api.ts",
     "./router/decide.js": "./src/router/decide.js"
   },
   "publishConfig": {
@@ -30,6 +31,10 @@
         "types": "./dist/cloudfront-function.d.ts",
         "default": "./dist/cloudfront-function.js"
       },
+      "./platform-api": {
+        "types": "./dist/platform-api.d.ts",
+        "default": "./dist/platform-api.js"
+      },
       "./router/decide.js": "./dist/router/decide.js"
     }
   },
@@ -44,6 +49,6 @@
     "prepack": "pnpm run build"
   },
   "dependencies": {
-    "zod": "^4.6.7"
+    "effect": "^4.1.4"
   }
 }

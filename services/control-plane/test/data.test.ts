@@ -1,68 +1,109 @@
 import { ResourceNotFoundException } from '@aws-sdk/client-dynamodb';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { aws } from '../src/aws.ts';
-import { listCollections, listItems } from '../src/data.ts';
-import { ApiError } from '../src/errors.ts';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { assert, describe, it } from '@effect/vitest';
+import { Effect, Exit, Layer } from 'effect';
+import { DataBrowser } from '../src/data.ts';
+import { awsLayer, settingsLayer } from './support.ts';
 
-function stubDdb(send: (cmd: { input: Record<string, unknown> }) => Promise<unknown>) {
-  const fn = vi.fn(send);
-  vi.spyOn(aws, 'ddb').mockReturnValue({ send: fn } as unknown as ReturnType<typeof aws.ddb>);
-  return fn;
-}
+type Command = { readonly input: Record<string, unknown> };
+
+/** The data browser over a DynamoDB client that answers with `send`. */
+const browser = (send: (command: Command) => Promise<unknown>) => {
+  const sent: Command[] = [];
+  const ddb = {
+    send: (command: Command) => {
+      sent.push(command);
+      return send(command);
+    },
+  } as unknown as DynamoDBDocumentClient;
+  const layer = DataBrowser.layer.pipe(Layer.provide([awsLayer({ ddb: () => ddb }), settingsLayer()]));
+  return {
+    sent,
+    use: <A, E>(f: (data: DataBrowser['Service']) => Effect.Effect<A, E>) =>
+      Effect.provide(DataBrowser.use(f), layer),
+  };
+};
 
 const noTable = () =>
   Promise.reject(new ResourceNotFoundException({ message: 'Requested resource not found', $metadata: {} }));
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
 describe('data browser', () => {
-  it('reports a stage without a table as having no database', async () => {
-    const send = stubDdb(noTable);
-    expect(await listCollections('todo', 'prod')).toEqual({ database: false, collections: [] });
-    expect(send.mock.calls[0]?.[0].input.TableName).toBe('todo--prod');
-  });
+  it.effect('reports a stage without a table as having no database', () =>
+    Effect.gen(function* () {
+      const { sent, use } = browser(noTable);
+      assert.deepStrictEqual(yield* use((d) => d.collections('todo', 'prod')), {
+        database: false,
+        collections: [],
+      });
+      assert.strictEqual(sent[0]?.input.TableName, 'todo--prod');
+    }),
+  );
 
-  it('answers 404 for items on a stage without a table', async () => {
-    stubDdb(noTable);
-    for (const partition of [undefined, 'userId=1']) {
-      const err = await listItems({
-        app: 'todo',
-        stage: 'pr-3',
-        collection: 'todos',
-        ...(partition ? { partition } : {}),
-      }).catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(ApiError);
-      expect(err).toMatchObject({ status: 404, code: 'not_found' });
-      expect((err as ApiError).message).toContain('todo/pr-3 has no database');
-    }
-  });
+  it.effect('answers 404 for items on a stage without a table', () =>
+    Effect.gen(function* () {
+      const { use } = browser(noTable);
+      for (const partition of [undefined, 'userId=1']) {
+        const error = yield* Effect.flip(
+          use((d) => d.items({ app: 'todo', stage: 'pr-3', collection: 'todos', partition })),
+        );
+        assert.strictEqual(error._tag, 'NotFound');
+        assert.strictEqual(error.code, 'not_found');
+        assert.include(error.message, 'todo/pr-3 has no database');
+      }
+    }),
+  );
 
-  it('still fails on other errors', async () => {
-    stubDdb(() => Promise.reject(Object.assign(new Error('denied'), { name: 'AccessDeniedException' })));
-    await expect(listCollections('todo', 'prod')).rejects.toThrow('denied');
-    await expect(listItems({ app: 'todo', stage: 'prod', collection: 'todos' })).rejects.toThrow('denied');
-  });
+  it.effect('answers 400 for a cursor it did not issue', () =>
+    Effect.gen(function* () {
+      const { use } = browser(async () => ({ Items: [] }));
+      const error = yield* Effect.flip(
+        use((d) => d.items({ app: 'todo', stage: 'prod', collection: 'todos', cursor: '!!' })),
+      );
+      assert.deepStrictEqual([error._tag, error.message], ['BadRequest', 'invalid cursor']);
+    }),
+  );
 
-  it('counts collections across scan pages', async () => {
-    stubDdb(async (cmd) =>
-      cmd.input.ExclusiveStartKey
-        ? { Items: [{ _c: 'todos' }, {}], ScannedCount: 2 }
-        : { Items: [{ _c: 'users' }, { _c: 'todos' }], ScannedCount: 2, LastEvaluatedKey: { pk: 'x' } },
-    );
-    expect(await listCollections('todo', 'prod')).toEqual({
-      database: true,
-      collections: [
-        { name: '(untyped)', sampled: 1 },
-        { name: 'todos', sampled: 2 },
-        { name: 'users', sampled: 1 },
-      ],
-    });
-  });
+  it.effect('treats other DynamoDB failures as defects', () =>
+    Effect.gen(function* () {
+      const { use } = browser(() =>
+        Promise.reject(Object.assign(new Error('denied'), { name: 'AccessDeniedException' })),
+      );
+      const exit = yield* Effect.exit(use((d) => d.collections('todo', 'prod')));
+      assert.isTrue(Exit.isFailure(exit) && Exit.hasDies(exit));
+    }),
+  );
 
-  it('shows an existing but empty table as an empty database', async () => {
-    stubDdb(async () => ({ Items: [], ScannedCount: 0 }));
-    expect(await listCollections('todo', 'prod')).toEqual({ database: true, collections: [] });
-  });
+  it.effect('counts collections across scan pages', () =>
+    Effect.gen(function* () {
+      const { use } = browser(async (cmd) =>
+        cmd.input.ExclusiveStartKey
+          ? { Items: [{ _c: 'todos' }, {}], ScannedCount: 2 }
+          : { Items: [{ _c: 'users' }, { _c: 'todos' }], ScannedCount: 2, LastEvaluatedKey: { pk: 'x' } },
+      );
+      assert.deepStrictEqual(yield* use((d) => d.collections('todo', 'prod')), {
+        database: true,
+        collections: [
+          { name: '(untyped)', sampled: 1 },
+          { name: 'todos', sampled: 2 },
+          { name: 'users', sampled: 1 },
+        ],
+      });
+    }),
+  );
+
+  it.effect('pages items without internal attributes, keeping their key', () =>
+    Effect.gen(function* () {
+      const { sent, use } = browser(async () => ({
+        Items: [{ pk: 'todos#u1', sk: '1', gsi1pk: 'x', _c: 'todos', title: 'milk' }],
+        LastEvaluatedKey: { pk: 'todos#u1', sk: '1' },
+      }));
+      const page = yield* use((d) =>
+        d.items({ app: 'todo', stage: 'prod', collection: 'todos', partition: 'u1' }),
+      );
+      assert.deepStrictEqual(page.items, [{ title: 'milk', _key: { pk: 'todos#u1', sk: '1' } }]);
+      assert.isString(page.cursor);
+      yield* use((d) => d.items({ app: 'todo', stage: 'prod', collection: 'todos', cursor: page.cursor }));
+      assert.deepStrictEqual(sent[1]?.input.ExclusiveStartKey, { pk: 'todos#u1', sk: '1' });
+    }),
+  );
 });

@@ -41,7 +41,18 @@ function agentGuide(): Plugin {
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   plugins: [react(), tailwindcss(), agentGuide()],
-  build: { outDir: 'dist', emptyOutDir: true, sourcemap: false },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    sourcemap: false,
+    rolldownOptions: {
+      output: {
+        // Effect (the API client and its atoms) changes far less often than the console:
+        // its own chunk stays cached across deploys.
+        codeSplitting: { groups: [{ name: 'effect', test: /[\\/]node_modules[\\/](effect|@effect)[\\/]/ }] },
+      },
+    },
+  },
   server: {
     port: platDevPort ?? 5173,
     strictPort: platDevPort !== undefined,

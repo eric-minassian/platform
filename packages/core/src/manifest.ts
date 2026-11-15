@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { Effect, Schema } from 'effect';
 import { validateCron } from './cron.ts';
 import { APP_NAME_PATTERN, ENV_NAME_PATTERN, EVENT_TYPE_PATTERN, RESOURCE_KEY_PATTERN } from './naming.ts';
 
@@ -17,70 +17,102 @@ export const APP_CONFIG_FILE = 'plat.config.ts';
  * below is the same shape written for authors. `test/manifest-types.test.ts`
  * keeps the two in step.
  */
-const resourceKey = z.string().regex(RESOURCE_KEY_PATTERN, 'must be 1-20 chars of a-z, 0-9, hyphens');
-const eventType = z.string().regex(EVENT_TYPE_PATTERN);
+const RESOURCE_KEY_MESSAGE = 'must be 1-20 chars of a-z, 0-9, hyphens';
+const resourceKey = Schema.String.check(
+  Schema.isPattern(RESOURCE_KEY_PATTERN, { message: RESOURCE_KEY_MESSAGE }),
+);
+const eventType = Schema.String.check(Schema.isPattern(EVENT_TYPE_PATTERN));
+const envName = Schema.String.check(Schema.isPattern(ENV_NAME_PATTERN));
 
-const WebSchema = z
-  .object({
-    server: z.string().optional(),
-    static: z.string().optional(),
-    build: z.string().optional(),
-    dev: z.object({ command: z.string(), port: z.number().int().min(1).max(65535).optional() }).optional(),
-    spa: z.boolean().default(true),
-    serverRoutes: z.array(z.string().startsWith('/')).default(['/api/']),
-    timeoutSeconds: z.number().int().min(3).max(900).default(30),
-    concurrency: z.number().int().min(1).max(128).default(64),
-  })
-  .refine((w) => w.server || w.static, { message: 'web needs a server, a static directory, or both' });
+/**
+ * A record whose keys must match `pattern`. `Schema.Record` drops keys that fail
+ * its key schema, which would make a misnamed queue silently disappear, so
+ * keys are checked here and reported at their path instead.
+ */
+const recordOf = <V extends Schema.Top>(pattern: RegExp, value: V, message = `must match ${pattern}`) =>
+  Schema.Record(Schema.String, value).check(
+    Schema.makeFilter((record) =>
+      Object.keys(record)
+        .filter((key) => !pattern.test(key))
+        .map((key) => ({ path: [key], issue: message })),
+    ),
+  );
+const intBetween = (minimum: number, maximum: number) =>
+  Schema.Int.check(Schema.isBetween({ minimum, maximum }));
+/** Absent (or `undefined`) decodes to `value`. */
+const orElse =
+  <S extends Schema.Top>(value: S['Encoded']) =>
+  (schema: S) =>
+    schema.pipe(Schema.withDecodingDefault(Effect.succeed(value)));
 
-const WorkerSchema = z.object({
-  entry: z.string().default('src/worker.ts'),
-  timeoutSeconds: z.number().int().min(1).max(900).default(60),
-  memoryMb: z.number().int().min(128).max(10240).default(512),
+const WebSchema = Schema.Struct({
+  server: Schema.optional(Schema.String),
+  static: Schema.optional(Schema.String),
+  build: Schema.optional(Schema.String),
+  dev: Schema.optional(
+    Schema.Struct({ command: Schema.String, port: Schema.optional(intBetween(1, 65535)) }),
+  ),
+  spa: Schema.Boolean.pipe(orElse(true)),
+  serverRoutes: Schema.Array(Schema.String.check(Schema.isStartingWith('/'))).pipe(orElse(['/api/'])),
+  timeoutSeconds: intBetween(3, 900).pipe(orElse(30)),
+  concurrency: intBetween(1, 128).pipe(orElse(64)),
+}).check(
+  Schema.makeFilter((w) =>
+    w.server || w.static ? undefined : 'web needs a server, a static directory, or both',
+  ),
+);
+
+const WorkerSchema = Schema.Struct({
+  entry: Schema.String.pipe(orElse('src/worker.ts')),
+  timeoutSeconds: intBetween(1, 900).pipe(orElse(60)),
+  memoryMb: intBetween(128, 10240).pipe(orElse(512)),
 });
 
-const QueueSchema = z.object({
-  batchSize: z.number().int().min(1).max(10).default(10),
-  visibilityTimeoutSeconds: z.number().int().min(0).max(43200).optional(),
-  maxReceiveCount: z.number().int().min(1).max(1000).default(5),
-  concurrency: z.number().int().min(2).max(1000).optional(),
+const QueueSchema = Schema.Struct({
+  batchSize: intBetween(1, 10).pipe(orElse(10)),
+  visibilityTimeoutSeconds: Schema.optional(intBetween(0, 43200)),
+  maxReceiveCount: intBetween(1, 1000).pipe(orElse(5)),
+  concurrency: Schema.optional(intBetween(2, 1000)),
 });
 
-const CronSchema = z.union([z.string(), z.object({ schedule: z.string(), timezone: z.string().optional() })]);
+const CronSchema = Schema.Union([
+  Schema.String,
+  Schema.Struct({ schedule: Schema.String, timezone: Schema.optional(Schema.String) }),
+]).check(
+  Schema.makeFilter((cron) => validateCron(typeof cron === 'string' ? cron : cron.schedule) ?? undefined),
+);
 
-const AuthSchema = z.union([z.boolean(), z.object({ required: z.boolean().default(false) })]);
+const AuthSchema = Schema.Union([
+  Schema.Boolean,
+  Schema.Struct({ required: Schema.Boolean.pipe(orElse(false)) }),
+]);
 
-export const ManifestSchema = z
-  .object({
-    name: z
-      .string()
-      // Reserved names are enforced when an app is registered (API), not here:
-      // the control plane itself is the app named `platform`.
-      .regex(APP_NAME_PATTERN, 'must be 3-30 chars of a-z, 0-9, single hyphens'),
-    description: z.string().max(200).optional(),
-    web: WebSchema.optional(),
-    worker: WorkerSchema.optional(),
-    auth: AuthSchema.default(false),
-    db: z.boolean().default(false),
-    queues: z.record(resourceKey, QueueSchema).default({}),
-    // The array form predates typed event payloads; deployments recorded
-    // before then still store it.
-    events: z.union([z.array(eventType), z.record(eventType, z.object({}))]).default([]),
-    crons: z.record(resourceKey, CronSchema).default({}),
-    storage: z.array(resourceKey).default([]),
-    secrets: z.array(z.string().regex(ENV_NAME_PATTERN)).default([]),
-    env: z.record(z.string().regex(ENV_NAME_PATTERN), z.string()).default({}),
-  })
-  .superRefine((m, ctx) => {
-    for (const [key, cron] of Object.entries(m.crons)) {
-      const err = validateCron(typeof cron === 'string' ? cron : cron.schedule);
-      if (err) ctx.addIssue({ code: 'custom', path: ['crons', key], message: err });
-    }
-  });
+export const ManifestSchema = Schema.Struct({
+  // Reserved names are enforced when an app is registered (API), not here:
+  // the control plane itself is the app named `platform`.
+  name: Schema.String.check(
+    Schema.isPattern(APP_NAME_PATTERN, { message: 'must be 3-30 chars of a-z, 0-9, single hyphens' }),
+  ),
+  description: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+  web: Schema.optional(WebSchema),
+  worker: Schema.optional(WorkerSchema),
+  auth: AuthSchema.pipe(orElse(false)),
+  db: Schema.Boolean.pipe(orElse(false)),
+  queues: recordOf(RESOURCE_KEY_PATTERN, QueueSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
+  // The array form predates typed event payloads; deployments recorded
+  // before then still store it.
+  events: Schema.Union([Schema.Array(eventType), recordOf(EVENT_TYPE_PATTERN, Schema.Struct({}))]).pipe(
+    orElse([]),
+  ),
+  crons: recordOf(RESOURCE_KEY_PATTERN, CronSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
+  storage: Schema.Array(resourceKey).pipe(orElse([])),
+  secrets: Schema.Array(envName).pipe(orElse([])),
+  env: recordOf(ENV_NAME_PATTERN, Schema.String).pipe(orElse({})),
+});
 
 /** The evaluated config as JSON: what the CLI sends and deployments store. */
-export type ManifestInput = z.input<typeof ManifestSchema>;
-export type Manifest = z.output<typeof ManifestSchema>;
+export type ManifestInput = typeof ManifestSchema.Encoded;
+export type Manifest = typeof ManifestSchema.Type;
 
 // ---------------------------------------------------------------------------
 // Authoring types. Arrays are readonly so `defineApp` can keep literal names.
@@ -205,22 +237,33 @@ export function event<Detail>(): EventConfig<Detail> {
 
 // ---------------------------------------------------------------------------
 
-/** Manifest with defaults applied and derived fields normalized. */
-export interface ResolvedManifest {
-  name: string;
-  description?: string;
-  web?: z.output<typeof WebSchema>;
+/**
+ * Manifest with defaults applied and derived fields normalized: what
+ * deployments store. Decoding fills defaults for fields added since a stored
+ * manifest was written, so earlier deployments keep decoding.
+ */
+export const ResolvedManifest = Schema.Struct({
+  name: Schema.String,
+  description: Schema.optional(Schema.String),
+  web: Schema.optional(WebSchema),
   /** Present when any queue, event subscription or cron exists. */
-  worker?: z.output<typeof WorkerSchema>;
-  auth: { enabled: boolean; required: boolean };
-  db: boolean;
-  queues: Record<string, z.output<typeof QueueSchema> & { visibilityTimeoutSeconds: number }>;
-  events: string[];
-  crons: Record<string, { schedule: string; timezone?: string }>;
-  storage: string[];
-  secrets: string[];
-  env: Record<string, string>;
-}
+  worker: Schema.optional(WorkerSchema),
+  auth: Schema.Struct({ enabled: Schema.Boolean, required: Schema.Boolean }),
+  db: Schema.Boolean,
+  queues: Schema.Record(
+    Schema.String,
+    Schema.Struct({ ...QueueSchema.fields, visibilityTimeoutSeconds: Schema.Finite }),
+  ),
+  events: Schema.Array(Schema.String),
+  crons: Schema.Record(
+    Schema.String,
+    Schema.Struct({ schedule: Schema.String, timezone: Schema.optional(Schema.String) }),
+  ),
+  storage: Schema.Array(Schema.String),
+  secrets: Schema.Array(Schema.String),
+  env: Schema.Record(Schema.String, Schema.String),
+});
+export type ResolvedManifest = typeof ResolvedManifest.Type;
 
 export class ManifestError extends Error {
   readonly issues: string[];
@@ -230,32 +273,43 @@ export class ManifestError extends Error {
   }
 }
 
+const validateManifest = Schema.toStandardSchemaV1(ManifestSchema, { parseOptions: { errors: 'all' } })[
+  '~standard'
+].validate;
+
 export function parseManifest(input: unknown): ResolvedManifest {
-  const parsed = ManifestSchema.safeParse(input);
-  if (!parsed.success) {
-    throw new ManifestError(parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`));
+  const result = validateManifest(input);
+  // The schema has no asynchronous checks, so validation is synchronous.
+  if (result instanceof Promise) throw new Error('manifest validation must be synchronous');
+  if (result.issues) {
+    throw new ManifestError(
+      result.issues.map((i) => {
+        const path = (i.path ?? []).map((p) => String(typeof p === 'object' ? p.key : p)).join('.');
+        return `${path || '(root)'}: ${i.message}`;
+      }),
+    );
   }
-  return resolveManifest(parsed.data);
+  return resolveManifest(result.value);
 }
 
 export function resolveManifest(m: Manifest): ResolvedManifest {
   const events = Array.isArray(m.events) ? m.events : Object.keys(m.events);
   const needsWorker =
     Object.keys(m.queues).length > 0 || events.length > 0 || Object.keys(m.crons).length > 0;
-  const worker = m.worker ?? (needsWorker ? WorkerSchema.parse({}) : undefined);
+  const worker = m.worker ?? (needsWorker ? Schema.decodeUnknownSync(WorkerSchema)({}) : undefined);
   const auth =
     typeof m.auth === 'boolean'
       ? { enabled: m.auth, required: false }
       : { enabled: true, required: m.auth.required };
-  const queues: ResolvedManifest['queues'] = {};
-  for (const [key, q] of Object.entries(m.queues)) {
-    queues[key] = {
-      ...q,
-      visibilityTimeoutSeconds: q.visibilityTimeoutSeconds ?? (worker?.timeoutSeconds ?? 60) * 6,
-    };
-  }
-  const crons: ResolvedManifest['crons'] = {};
-  for (const [key, c] of Object.entries(m.crons)) crons[key] = typeof c === 'string' ? { schedule: c } : c;
+  const queues: ResolvedManifest['queues'] = Object.fromEntries(
+    Object.entries(m.queues).map(([key, q]) => [
+      key,
+      { ...q, visibilityTimeoutSeconds: q.visibilityTimeoutSeconds ?? (worker?.timeoutSeconds ?? 60) * 6 },
+    ]),
+  );
+  const crons: ResolvedManifest['crons'] = Object.fromEntries(
+    Object.entries(m.crons).map(([key, c]) => [key, typeof c === 'string' ? { schedule: c } : c]),
+  );
   return {
     name: m.name,
     ...(m.description ? { description: m.description } : {}),

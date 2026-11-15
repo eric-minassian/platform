@@ -1,6 +1,6 @@
 import { Cause, type Effect, Exit, Layer, ManagedRuntime } from 'effect';
 import type { AnyPayload } from '../register.ts';
-import type { AppWorkerHandlers, JobContext, WorkerDefinition } from '../worker.ts';
+import type { AppWorkerHandlers, JobContext, LogsBatch, WorkerDefinition } from '../worker.ts';
 import { observability } from './observability.ts';
 
 type Job<R> = Effect.Effect<unknown, unknown, R>;
@@ -10,6 +10,11 @@ export type EffectWorkerDefinition<R, E> = {
   readonly layer: Layer.Layer<R, E>;
   /** Direct invocations by name (`invokeJob`); the result is the invoke's result. */
   readonly invoke?: Readonly<Record<string, (payload: AnyPayload, ctx: JobContext) => Job<NoInfer<R>>>>;
+  /**
+   * CloudWatch Logs subscription deliveries (system use: the platform's
+   * telemetry processor). A failure fails the delivery, which Lambda retries.
+   */
+  readonly logs?: (batch: LogsBatch, ctx: JobContext) => Job<NoInfer<R>>;
 } & AppWorkerHandlers<Job<NoInfer<R>>>;
 
 type Handlers<R> = Readonly<Record<string, (...args: never[]) => Job<R>>>;
@@ -43,10 +48,12 @@ export function defineWorker<R, E>(definition: EffectWorkerDefinition<R, E>): Wo
     'queues' | 'events' | 'crons' | 'invoke',
     Handlers<R> | undefined
   >;
+  const logs = definition.logs;
   return {
     ...(d.queues ? { queues: wrap(d.queues) } : {}),
     ...(d.events ? { events: wrap(d.events) } : {}),
     ...(d.crons ? { crons: wrap(d.crons) } : {}),
     ...(d.invoke ? { invoke: wrap(d.invoke) } : {}),
+    ...(logs ? { logs: (batch: LogsBatch, ctx: JobContext) => run(logs(batch, ctx)) } : {}),
   } as WorkerDefinition;
 }

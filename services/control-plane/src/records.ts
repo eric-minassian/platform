@@ -11,24 +11,41 @@
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
  */
-import type { AppRecord, DeploymentRecord, RouteRecord, StageRecord } from '@ericminassian/platform-core';
+import { type AppRecord, DeploymentRecord, StageRecord } from '@ericminassian/platform-core';
+import { Schema } from 'effect';
 
-/** Stage record plus what rollback needs. */
-export interface StageItem extends StageRecord {
-  route?: RouteRecord;
-  previousRoute?: RouteRecord;
+/** A route record (`RouteRecord` in core) as the store keeps it, for rollbacks. */
+const StoredRoute = Schema.Struct({
+  v: Schema.Literal(1),
+  app: Schema.String,
+  stage: Schema.String,
+  d: Schema.String,
+  o: Schema.optional(Schema.String),
+  s: Schema.optional(Schema.String),
+  r: Schema.optional(Schema.Array(Schema.String)),
+  spa: Schema.optional(Schema.Literals([0, 1])),
+});
+
+/** Stage record plus what rollback and the uptime pinger need. */
+export const StageItem = Schema.Struct({
+  ...StageRecord.fields,
+  route: Schema.optional(StoredRoute),
+  previousRoute: Schema.optional(StoredRoute),
   /** Last uptime check result (prod), used for up/down transition alerts. */
-  up?: boolean;
-  upChangedAt?: string;
+  up: Schema.optional(Schema.Boolean),
+  upChangedAt: Schema.optional(Schema.String),
   /** Consecutive failed uptime checks. */
-  failures?: number;
-}
+  failures: Schema.optional(Schema.Finite),
+});
+export type StageItem = typeof StageItem.Type;
 
 /** Deployment record plus what a later rollback to it needs. */
-export interface DeploymentItem extends DeploymentRecord {
-  route?: RouteRecord;
-  revisionId?: string;
-}
+export const DeploymentItem = Schema.Struct({
+  ...DeploymentRecord.fields,
+  route: Schema.optional(StoredRoute),
+  revisionId: Schema.optional(Schema.String),
+});
+export type DeploymentItem = typeof DeploymentItem.Type;
 
 export const appKey = (name: string) => ({ pk: `APP#${name}`, sk: 'META' });
 export const stageKey = (app: string, stage: string) => ({ pk: `APP#${app}`, sk: `STAGE#${stage}` });

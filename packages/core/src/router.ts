@@ -16,7 +16,7 @@ export interface RouteRecord {
   /** Static prefix in the sites bucket (no leading slash). */
   s?: string;
   /** Server route prefixes (only meaningful when both `o` and `s` exist). */
-  r?: string[];
+  r?: readonly string[];
   spa?: 0 | 1;
 }
 

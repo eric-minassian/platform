@@ -3,7 +3,9 @@
  * member allowlist. Members are GitHub usernames; inviting someone is a PR
  * plus a platform deploy. No emails or account ids here (the repo is public).
  */
-export type MemberRole = 'admin' | 'member';
+import { Schema } from 'effect';
+export const MemberRole = Schema.Literals(['admin', 'member']);
+export type MemberRole = typeof MemberRole.Type;
 
 export interface Member {
   github: string;

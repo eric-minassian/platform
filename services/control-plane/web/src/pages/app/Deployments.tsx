@@ -1,6 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useAtom, useAtomValue } from '@effect/atom-react';
+import type { DeploymentStatus } from '@ericminassian/platform-core';
+import { Atom } from 'effect/reactivity';
 import { useState } from 'react';
-import { api } from '../../api.ts';
+import { ApiClient, failure, fresh, timeToLive } from '../../client.ts';
 import {
   Badge,
   Button,
@@ -14,19 +16,36 @@ import {
   Table,
 } from '../../components/ui.tsx';
 import { duration, fmtDateTime, relTime, shortId } from '../../format.ts';
-import { useApp } from '../AppLayout.tsx';
+import { appChanged, useApp } from '../AppLayout.tsx';
+
+/** Reactivity key of an app's deployment list, on every stage. */
+const deploymentsChanged = (app: string) => [`deployments:${app}`];
+
+const inProgress: readonly DeploymentStatus[] = ['queued', 'running', 'awaiting_upload'];
+
+const deploymentsAtom = Atom.family(({ app, stage }: { app: string; stage: string }) =>
+  fresh(
+    ApiClient.query('deployments', 'list', {
+      params: { app },
+      query: { stage },
+      reactivityKeys: deploymentsChanged(app),
+      timeToLive,
+    }),
+    { every: '10 seconds' },
+  ),
+);
+// Follows a deployment's event log while it runs.
+const deploymentAtom = Atom.family((id: string) =>
+  fresh(ApiClient.query('deployments', 'get', { params: { id }, timeToLive }), {
+    every: (d) => (inProgress.includes(d.status) ? '2 seconds' : undefined),
+  }),
+);
+const rollbackAtom = ApiClient.mutation('stages', 'rollback');
+const destroyAtom = ApiClient.mutation('stages', 'destroy');
 
 function Events({ id }: { id: string }) {
-  const q = useQuery({
-    queryKey: ['deployment', id],
-    queryFn: () => api.deployment(id),
-    refetchInterval: (query) =>
-      query.state.data && ['queued', 'running', 'awaiting_upload'].includes(query.state.data.status)
-        ? 2_000
-        : false,
-  });
   return (
-    <Loaded q={q}>
+    <Loaded result={useAtomValue(deploymentAtom(id))}>
       {(d) => (
         <div className="space-y-2">
           {d.error && <ErrorBox error={d.error} />}
@@ -54,30 +73,16 @@ function Events({ id }: { id: string }) {
 
 export function DeploymentsTab() {
   const { app, scope, summary } = useApp();
-  const qc = useQueryClient();
   const [open, setOpen] = useState<string | null>(null);
-  const q = useQuery({
-    queryKey: ['deployments', app, scope.stage],
-    queryFn: () => api.deployments(app, scope.stage),
-    refetchInterval: 10_000,
-  });
+  const result = useAtomValue(deploymentsAtom({ app, stage: scope.stage }));
   const stage = summary.stages.find((s) => s.stage === scope.stage);
-  const rollback = useMutation({
-    mutationFn: (id: string) => api.rollback(app, scope.stage, id),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['deployments', app] });
-      qc.invalidateQueries({ queryKey: ['app', app] });
-    },
-  });
-  const destroy = useMutation({
-    mutationFn: (s: string) => api.destroyStage(app, s, s === 'prod' ? app : undefined),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['app', app] }),
-  });
+  const [rollback, rollBackTo] = useAtom(rollbackAtom);
+  const [destroy, destroyStage] = useAtom(destroyAtom);
 
   return (
     <div className="space-y-3">
       <Card title="Stages">
-        <ErrorBox error={destroy.error} />
+        <ErrorBox error={failure(destroy)} />
         <Table head={['Stage', 'Status', 'URL', 'Live deployment', 'Updated', '']}>
           {summary.stages.map((s) => (
             <tr key={s.stage}>
@@ -100,8 +105,15 @@ export function DeploymentsTab() {
                 {s.preview && s.status !== 'destroying' && (
                   <Button
                     variant="danger"
-                    onClick={() => destroy.mutate(s.stage)}
-                    disabled={destroy.isPending}
+                    onClick={() =>
+                      destroyStage({
+                        params: { app, stage: s.stage },
+                        // Prod is only destroyed when the request names the app.
+                        query: { confirm: s.stage === 'prod' ? app : undefined },
+                        reactivityKeys: appChanged(app),
+                      })
+                    }
+                    disabled={destroy.waiting}
                   >
                     Destroy
                   </Button>
@@ -112,8 +124,8 @@ export function DeploymentsTab() {
         </Table>
       </Card>
       <Card title={`Deployments · ${scope.stage}`}>
-        <ErrorBox error={rollback.error} />
-        <Loaded q={q}>
+        <ErrorBox error={failure(rollback)} />
+        <Loaded result={result}>
           {(deps) =>
             deps.length === 0 ? (
               <Empty>
@@ -147,9 +159,13 @@ export function DeploymentsTab() {
                           <Button
                             onClick={(e) => {
                               e.stopPropagation();
-                              rollback.mutate(d.id);
+                              rollBackTo({
+                                params: { app, stage: scope.stage },
+                                payload: { deploymentId: d.id },
+                                reactivityKeys: [...deploymentsChanged(app), ...appChanged(app)],
+                              });
                             }}
-                            disabled={rollback.isPending}
+                            disabled={rollback.waiting}
                           >
                             Roll back to this
                           </Button>

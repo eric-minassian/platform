@@ -15,7 +15,7 @@
  * CONTRACT: documented in templates/app/AGENTS.md and used by every Effect app.
  */
 
-export type { JobContext, PlatformEvent, QueueMessage } from '../worker.ts';
+export type { JobContext, LogsBatch, PlatformEvent, QueueMessage } from '../worker.ts';
 export {
   Authentication,
   CurrentUser,

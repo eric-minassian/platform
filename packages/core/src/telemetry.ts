@@ -5,100 +5,121 @@
  * aggregates rollups into the telemetry table. Logs Insights covers the rest
  * (search, traces) on demand. No CloudWatch custom metrics are ever created.
  */
+import { Schema } from 'effect';
 
-export type TelemetryKind = 'req' | 'err' | 'job' | 'span' | 'log' | 'metric' | 'env';
+export const TelemetryKind = Schema.Literals(['req', 'err', 'job', 'span', 'log', 'metric', 'env']);
+export type TelemetryKind = typeof TelemetryKind.Type;
 
-interface Base {
+const base = {
   /** Marker so the subscription filter only matches platform lines. */
-  _p: 1;
-  t: TelemetryKind;
+  _p: Schema.Literal(1),
   /** Epoch milliseconds. */
-  ts: number;
-  app: string;
-  stage: string;
+  ts: Schema.Finite,
+  app: Schema.String,
+  stage: Schema.String,
   /** Deployment id. */
-  rev: string;
-  trace?: string;
-  span?: string;
-  parent?: string;
-}
+  rev: Schema.String,
+  trace: Schema.optional(Schema.String),
+  span: Schema.optional(Schema.String),
+  parent: Schema.optional(Schema.String),
+};
 
-export interface RequestEvent extends Base {
-  t: 'req';
-  method: string;
+export const RequestEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('req'),
+  method: Schema.String,
   /** Route pattern when known (`/api/todos/:id`), else the raw path. */
-  route: string;
-  path: string;
-  status: number;
+  route: Schema.String,
+  path: Schema.String,
+  status: Schema.Finite,
   /** Duration in ms. */
-  dur: number;
-  bytes?: number;
-  country?: string;
+  dur: Schema.Finite,
+  bytes: Schema.optional(Schema.Finite),
+  country: Schema.optional(Schema.String),
   /** Hashed user id when signed in. */
-  user?: string;
-  cold?: boolean;
-}
+  user: Schema.optional(Schema.String),
+  cold: Schema.optional(Schema.Boolean),
+});
+export type RequestEvent = typeof RequestEvent.Type;
 
-export interface ErrorEvent extends Base {
-  t: 'err';
-  source: 'http' | 'job' | 'unhandled' | 'log';
-  name: string;
-  message: string;
-  stack?: string;
-  route?: string;
-  job?: string;
-  fingerprint: string;
-}
+export const ErrorEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('err'),
+  source: Schema.Literals(['http', 'job', 'unhandled', 'log']),
+  name: Schema.String,
+  message: Schema.String,
+  stack: Schema.optional(Schema.String),
+  route: Schema.optional(Schema.String),
+  job: Schema.optional(Schema.String),
+  fingerprint: Schema.String,
+});
+export type ErrorEvent = typeof ErrorEvent.Type;
 
-export interface JobEvent extends Base {
-  t: 'job';
-  kind: 'queue' | 'event' | 'cron' | 'invoke';
-  name: string;
-  status: 'ok' | 'error';
-  dur: number;
-  attempt?: number;
-}
+export const JobEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('job'),
+  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke']),
+  name: Schema.String,
+  status: Schema.Literals(['ok', 'error']),
+  dur: Schema.Finite,
+  attempt: Schema.optional(Schema.Finite),
+});
+export type JobEvent = typeof JobEvent.Type;
 
-export interface SpanEvent extends Base {
-  t: 'span';
+export const SpanEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('span'),
   /** `db.get`, `db.query`, `queue.send`, `events.publish`, `storage.put`, `fetch`, ... */
-  op: string;
-  name?: string;
-  dur: number;
-  status: 'ok' | 'error';
+  op: Schema.String,
+  name: Schema.optional(Schema.String),
+  dur: Schema.Finite,
+  status: Schema.Literals(['ok', 'error']),
   /** Start offset relative to the trace root, ms. */
-  start?: number;
-}
+  start: Schema.optional(Schema.Finite),
+});
+export type SpanEvent = typeof SpanEvent.Type;
 
-export interface LogEvent extends Base {
-  t: 'log';
-  level: 'debug' | 'info' | 'warn' | 'error';
-  msg: string;
-  [field: string]: unknown;
-}
+/** A log line; any other fields are the structured fields it was logged with. */
+export const LogEvent = Schema.StructWithRest(
+  Schema.Struct({
+    ...base,
+    t: Schema.Literal('log'),
+    level: Schema.Literals(['debug', 'info', 'warn', 'error']),
+    msg: Schema.String,
+  }),
+  [Schema.Record(Schema.String, Schema.Unknown)],
+);
+export type LogEvent = typeof LogEvent.Type;
 
-export interface MetricEvent extends Base {
-  t: 'metric';
-  name: string;
-  value: number;
-  unit?: string;
-}
+export const MetricEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('metric'),
+  name: Schema.String,
+  value: Schema.Finite,
+  unit: Schema.optional(Schema.String),
+});
+export type MetricEvent = typeof MetricEvent.Type;
 
-export interface EnvEvent extends Base {
-  t: 'env';
-  event: 'start' | 'stop';
-  runtime: 'web' | 'worker';
-  initMs?: number;
-}
+export const EnvEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('env'),
+  event: Schema.Literals(['start', 'stop']),
+  runtime: Schema.Literals(['web', 'worker']),
+  initMs: Schema.optional(Schema.Finite),
+});
+export type EnvEvent = typeof EnvEvent.Type;
 
-export type TelemetryEvent =
-  | RequestEvent
-  | ErrorEvent
-  | JobEvent
-  | SpanEvent
-  | LogEvent
-  | MetricEvent
-  | EnvEvent;
+/** One telemetry line, as the SDK writes it and the telemetry processor reads it. */
+export const TelemetryEvent = Schema.Union([
+  RequestEvent,
+  ErrorEvent,
+  JobEvent,
+  SpanEvent,
+  LogEvent,
+  MetricEvent,
+  EnvEvent,
+]);
+export type TelemetryEvent = typeof TelemetryEvent.Type;
 
 /** Account-level subscription filter: only aggregate-worthy kinds reach the processor. */
 export const TELEMETRY_FILTER_PATTERN =
@@ -143,7 +164,8 @@ export function percentile(hist: readonly number[], p: number): number | null {
 // Rollups (telemetry table layout)
 // ---------------------------------------------------------------------------
 
-export type Resolution = '1m' | '1h' | '1d';
+export const Resolution = Schema.Literals(['1m', '1h', '1d']);
+export type Resolution = typeof Resolution.Type;
 
 export const RESOLUTION_MS: Record<Resolution, number> = { '1m': 60_000, '1h': 3_600_000, '1d': 86_400_000 };
 
