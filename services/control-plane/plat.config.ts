@@ -20,6 +20,8 @@ const app = defineApp({
     watchdog: '*/5 * * * *',
     cost: '0 7 * * *',
     reaper: '0 8 * * *',
+    // Extends realtime's public subscribe key (AppSync keys last at most a year).
+    'realtime-key': '0 9 * * *',
   },
 });
 

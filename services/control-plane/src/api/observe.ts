@@ -4,6 +4,7 @@ import { NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api
 import { Cause, Clock, Effect, Option, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { AppQueues } from '../jobs/queues.ts';
+import { AppRealtime } from '../jobs/realtime.ts';
 import { Logs } from '../logs.ts';
 import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
 import { Access, stageParam } from './access.ts';
@@ -35,6 +36,7 @@ export const ObserveLive = HttpApiBuilder.group(
     const access = yield* Access;
     const logs = yield* Logs;
     const queues = yield* AppQueues;
+    const realtime = yield* AppRealtime;
     const telemetry = yield* TelemetryQuery;
 
     /** The app and validated stage an endpoint reads. */
@@ -84,6 +86,13 @@ export const ObserveLive = HttpApiBuilder.group(
             stage,
             Option.match(manifest, { onNone: () => [], onSome: (m) => Object.keys(m.queues) }),
           );
+        }),
+
+      realtime: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
+          return yield* realtime.stats(app, stage, manifest?.realtime, yield* rangeOf(query));
         }),
 
       errors: ({ params, query }) =>

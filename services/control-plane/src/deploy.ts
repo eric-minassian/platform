@@ -8,7 +8,9 @@ import {
   type ArtifactFile,
   type DeploymentEventEntry,
   ManifestError,
+  type PlatformRuntimeConfig,
   parseManifest,
+  type RealtimeEdgeEntry,
   type ResolvedManifest,
   type RollbackResponse,
   type RouteRecord,
@@ -71,6 +73,14 @@ export class StageEngine extends Context.Service<
       input: DestroyStageInput,
       log: (entry: EngineLogEntry) => void,
     ): Effect.Effect<void, DeployFailed>;
+    /**
+     * Makes sure realtime's public API key exists and lasts another year, and
+     * that the router's realtime entry is current. None without an Event API.
+     */
+    ensureRealtime(
+      platform: PlatformRuntimeConfig,
+      log: (entry: EngineLogEntry) => void,
+    ): Effect.Effect<Option.Option<RealtimeEdgeEntry>, DeployFailed>;
   }
 >()('@ericminassian/platform-control-plane/StageEngine') {
   static readonly layer: Layer.Layer<StageEngine> = Layer.succeed(
@@ -91,6 +101,11 @@ export class StageEngine extends Context.Service<
           try: () => createEngine({ region: input.platform.region, log }).destroyStage(input),
           catch: engineFailed,
         }),
+      ensureRealtime: (platform, log) =>
+        Effect.tryPromise({
+          try: () => createEngine({ region: platform.region, log }).ensureRealtimePlatform(platform),
+          catch: engineFailed,
+        }).pipe(Effect.map(Option.fromUndefinedOr)),
     }),
   );
 }

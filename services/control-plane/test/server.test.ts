@@ -707,6 +707,68 @@ describe('observability', () => {
     }),
   );
 
+  it.effect('reads realtime activity for the live manifest’s namespace', () =>
+    Effect.gen(function* () {
+      const seen: Array<{ stage: string; realtime: unknown; res: string }> = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage()],
+          deployments: [
+            {
+              id: 'd1',
+              app: 'shop',
+              stage: 'prod',
+              status: 'succeeded',
+              actor: 'bob',
+              events: [],
+              createdAt: '2026-11-01T00:00:00.000Z',
+              manifest: {
+                name: 'shop',
+                auth: { enabled: false, required: false },
+                db: false,
+                queues: {},
+                events: [],
+                crons: {},
+                storage: [],
+                secrets: [],
+                env: {},
+                realtime: { subscribe: 'public', channels: ['board'] },
+              },
+            },
+          ],
+        }),
+        realtime: {
+          stats: (app, stage, realtime, range) =>
+            Effect.sync(() => {
+              seen.push({ stage, realtime, res: range.res });
+              return {
+                app,
+                stage,
+                enabled: true,
+                subscribe: 'public' as const,
+                channels: ['board'],
+                res: range.res,
+                totals: { events: 3, publishes: 2, subscribes: 1, errors: 0 },
+                points: [],
+              };
+            }),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/realtime?range=1h', { headers: yield* signIn('bob') });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(((yield* json(res)) as { totals: unknown }).totals, {
+        events: 3,
+        publishes: 2,
+        subscribes: 1,
+        errors: 0,
+      });
+      assert.deepStrictEqual(seen, [
+        { stage: 'prod', realtime: { subscribe: 'public', channels: ['board'] }, res: '1m' },
+      ]);
+    }),
+  );
+
   it.effect('lists and triages error groups', () =>
     Effect.gen(function* () {
       const group = {

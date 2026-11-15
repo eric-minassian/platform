@@ -23,6 +23,7 @@ import {
 } from '@ericminassian/platform-engine';
 import { bundleWorker, zipBundle } from '../build.ts';
 import { CliError } from '../util/output.ts';
+import { type LocalRealtime, localRealtime } from './router.ts';
 
 /**
  * A stage running inside a private AWS Emulator: shared platform resources
@@ -39,6 +40,8 @@ export interface LocalStage {
   bindings: Bindings;
   deploymentId: string;
   stage: string;
+  /** Present when the manifest declares `realtime`: what the local router serves for it. */
+  realtime?: LocalRealtime;
   stop(): Promise<void>;
 }
 
@@ -75,6 +78,7 @@ export async function startLocalStage(opts: StartLocalStageOptions): Promise<Loc
       logRetentionDays: 1,
     });
     await seedSecrets(conn, result.bindings, opts.root);
+    const realtime = await setUpRealtime(engine, platform, opts.manifest, result.bindings);
     return {
       conn,
       engine,
@@ -83,12 +87,37 @@ export async function startLocalStage(opts: StartLocalStageOptions): Promise<Loc
       bindings: result.bindings,
       deploymentId,
       stage: opts.stage,
+      ...(realtime ? { realtime } : {}),
       stop: () => conn.stop(),
     };
   } catch (err) {
     await conn.stop();
     throw err;
   }
+}
+
+/**
+ * The realtime the local router serves: the emulator's Event API (with its
+ * subscribe key) as the edge would read it from the route store, and the
+ * stage's namespace from its bindings.
+ */
+async function setUpRealtime(
+  engine: Engine,
+  platform: PlatformRuntimeConfig,
+  manifest: ResolvedManifest,
+  bindings: Bindings,
+): Promise<LocalRealtime | undefined> {
+  if (!manifest.realtime) return undefined;
+  const entry = await engine.ensureRealtimePlatform(platform);
+  if (!entry || !bindings.realtime) {
+    throw new CliError('the AWS Emulator has no Event API for realtime', {
+      hint: 'upgrade @ericminassian/plat and the AWS Emulator',
+    });
+  }
+  return localRealtime(entry, {
+    namespace: bindings.realtime.namespace,
+    subscribe: bindings.realtime.subscribe,
+  });
 }
 
 export async function uploadWorker(

@@ -13,6 +13,7 @@ import { Dns } from './dns.ts';
 import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
 import { AppQueues } from './jobs/queues.ts';
+import { AppRealtime } from './jobs/realtime.ts';
 import { BaseLive } from './layers.ts';
 import { Logs } from './logs.ts';
 import { AppSecrets } from './secrets.ts';
@@ -23,6 +24,7 @@ export const ServerLive = HttpLive.pipe(
   Layer.provide(
     Layer.mergeAll(
       AppQueues.layer,
+      AppRealtime.layer,
       AppSecrets.layer,
       Artifacts.layer,
       DataBrowser.layer,

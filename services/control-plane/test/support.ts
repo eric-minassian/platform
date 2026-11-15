@@ -24,6 +24,7 @@ import { Dns } from '../src/dns.ts';
 import { GitHub } from '../src/github.ts';
 import { WorkerJobs } from '../src/jobs/call.ts';
 import { AppQueues } from '../src/jobs/queues.ts';
+import { AppRealtime } from '../src/jobs/realtime.ts';
 import { Logs } from '../src/logs.ts';
 import { AppSecrets } from '../src/secrets.ts';
 import { AlreadyExists, type DeploymentItem, type Patch, type StageItem, Store } from '../src/store.ts';
@@ -247,6 +248,7 @@ export interface TestServices {
   readonly data?: Partial<DataBrowser['Service']>;
   readonly secrets?: Partial<AppSecrets['Service']>;
   readonly queues?: Partial<AppQueues['Service']>;
+  readonly realtime?: Partial<AppRealtime['Service']>;
   readonly artifacts?: Partial<Artifacts['Service']>;
   /** What a synchronous worker job (`call`) answers. */
   readonly call?: WorkerJobs['Service']['call'];
@@ -278,6 +280,7 @@ export const testServices = (options: TestServices = {}) =>
     Layer.mock(DataBrowser, options.data ?? {}),
     Layer.mock(AppSecrets, options.secrets ?? {}),
     Layer.mock(AppQueues, options.queues ?? {}),
+    Layer.mock(AppRealtime, options.realtime ?? {}),
     Layer.mock(Artifacts, options.artifacts ?? {}),
     Layer.mock(WorkerJobs, {
       invoke: (name, payload) =>

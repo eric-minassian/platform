@@ -69,21 +69,23 @@ export function registerObserve(program: Command): void {
   withTarget(
     program
       .command('metrics')
-      .description('requests, errors, latency and jobs for a stage')
+      .description('requests, errors, latency, jobs and realtime for a stage')
       .option('--since <duration>', 'time range', '6h'),
   ).action(
     action(async (opts: TargetOpts & { since: string }) => {
       const api = apiFor(opts);
       const app = await appFor(opts);
       const range = sinceRange(opts.since);
-      const [metrics, routes, jobs] = await Promise.all([
+      const [metrics, routes, jobs, realtime] = await Promise.all([
         api.metrics(app, { stage: opts.stage, ...range }),
         api.routes(app, { stage: opts.stage, from: range.from, to: range.to }).catch(() => []),
         api
           .jobs(app, { stage: opts.stage, from: range.from, to: range.to })
           .catch(() => ({ jobs: [], queues: [] })),
+        // Control planes from before realtime answer 404.
+        api.realtime(app, { stage: opts.stage, ...range }).catch(() => undefined),
       ]);
-      result({ metrics, routes, ...jobs }, (v) => {
+      result({ metrics, routes, ...jobs, ...(realtime?.enabled ? { realtime } : {}) }, (v) => {
         const pts = v.metrics.points;
         const total = pts.reduce((a, p) => a + p.req, 0);
         const errors = pts.reduce((a, p) => a + p.s5xx, 0);
@@ -126,6 +128,17 @@ export function registerObserve(program: Command): void {
                 last: j.lastRun ? shortTime(j.lastRun) : '-',
               })),
             ),
+          );
+        }
+        if (v.realtime) {
+          const rt = v.realtime;
+          const pts = rt.points;
+          lines.push(
+            '',
+            `${pc.bold('realtime')} ${pc.dim(`${rt.subscribe ?? 'public'} · ${rt.channels.join(', ')}`)}`,
+            `  events    ${String(rt.totals.events).padStart(8)}  ${sparkline(pts.map((p) => p.events))}`,
+            `  subscribes${String(rt.totals.subscribes).padStart(8)}  ${sparkline(pts.map((p) => p.subscribes))}`,
+            `  errors    ${String(rt.totals.errors).padStart(8)}  ${pc.red(sparkline(pts.map((p) => p.errors)))}`,
           );
         }
         if (v.queues.length) {

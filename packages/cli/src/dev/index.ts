@@ -91,8 +91,17 @@ export async function runDev(opts: DevOptions): Promise<void> {
       hasStatic: !!(manifest.web?.static || manifest.web?.dev),
       serverRoutes: manifest.web?.serverRoutes ?? ['/api/'],
       spa: manifest.web?.spa ?? true,
+      ...(stage.realtime
+        ? {
+            realtime: {
+              namespace: stage.realtime.config.namespace,
+              subscribe: stage.realtime.config.subscribe,
+            },
+          }
+        : {}),
     }),
     ...(manifest.web?.static ? { staticDir: resolve(root, manifest.web.static) } : {}),
+    ...(stage.realtime ? { realtime: stage.realtime } : {}),
   };
 
   // ------------------------------------------------------------ worker
@@ -260,6 +269,12 @@ function printBanner(
   if (manifest.events.length) lines.push(`  ${pc.dim('➜')} Events:    ${manifest.events.join(', ')}`);
   if (b.storage) lines.push(`  ${pc.dim('➜')} Storage:   ${b.storage.stores.join(', ')}`);
   if (b.auth) lines.push(`  ${pc.dim('➜')} Auth:      local sign-in at /__platform/auth/login (any email)`);
+  if (manifest.realtime) {
+    // The emulator never calls the authorizer, so signed-in subscribe tokens aren't checked locally.
+    const who =
+      manifest.realtime.subscribe === 'signed-in' ? 'signed-in (tokens not checked locally)' : 'public';
+    lines.push(`  ${pc.dim('➜')} Realtime:  ${manifest.realtime.channels.join(', ')} ${pc.dim(`· ${who}`)}`);
+  }
   for (const name of Object.keys(manifest.crons)) {
     const next = crons?.next(name);
     lines.push(

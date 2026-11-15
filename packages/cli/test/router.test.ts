@@ -1,11 +1,14 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { type AddressInfo, createServer as createTcpServer, type Server as TcpServer } from 'node:net';
 import { join } from 'node:path';
+import { REALTIME_PATH, REALTIME_TOKEN_PATH, type RealtimeEdgeEntry } from '@ericminassian/platform-core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  type LocalRealtime,
   type LocalRouterState,
   localDecision,
+  localRealtime,
   localRouteRecord,
   safeJoin,
   startLocalRouter,
@@ -23,6 +26,7 @@ const record = localRouteRecord({
 });
 const server = { host: '127.0.0.1', port: 1 };
 const webDev = { host: '127.0.0.1', port: 2 };
+const entry: RealtimeEdgeEntry = { v: 1, h: '127.0.0.1:4001', o: '127.0.0.1:4002', k: 'da2-local' };
 
 describe('localDecision', () => {
   it('mirrors the edge: api + platform routes to the server, the rest to the frontend', () => {
@@ -75,6 +79,42 @@ describe('localDecision', () => {
       kind: 'health',
       body: { ok: true, app: 'a', stage: 'local', revision: 'd1' },
     });
+  });
+
+  it('keeps the realtime path for the router when the stage has realtime', () => {
+    const rtRecord = localRouteRecord({
+      app: 'shop',
+      stage: 'local',
+      deploymentId: 'd1',
+      hasServer: true,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+      realtime: { namespace: 'shop--local', subscribe: 'signed-in' },
+    });
+    expect(rtRecord.rt).toEqual({ n: 'shop--local', m: 's' });
+    const realtime = localRealtime(entry, { namespace: 'shop--local', subscribe: 'signed-in' });
+    const s: LocalRouterState = { record: rtRecord, server, webDev, realtime };
+    expect(localDecision(s, `${REALTIME_PATH}?x=1`)).toEqual({ kind: 'realtime', realtime });
+    // The token comes from the app's server.
+    expect(localDecision(s, REALTIME_TOKEN_PATH)).toEqual({ kind: 'server', target: server });
+    expect(localDecision({ record: rtRecord, server }, REALTIME_PATH).kind).toBe('unavailable');
+    // No realtime declared: the path is the server's, like any platform path.
+    expect(localDecision({ record, server }, REALTIME_PATH)).toEqual({ kind: 'server', target: server });
+  });
+
+  it('serves the key only to public stages, like the edge', () => {
+    expect(localRealtime(entry, { namespace: 'shop--local', subscribe: 'public' })).toEqual({
+      config: {
+        v: 1,
+        host: '127.0.0.1:4001',
+        namespace: 'shop--local',
+        subscribe: 'public',
+        apiKey: 'da2-local',
+      },
+      target: { host: '127.0.0.1', port: 4002 },
+    });
+    expect(localRealtime(entry, { namespace: 'n', subscribe: 'signed-in' }).config.apiKey).toBeUndefined();
   });
 
   it('never escapes the static root', () => {
@@ -151,5 +191,127 @@ describe('startLocalRouter', () => {
 
   it('runs interceptors first', async () => {
     expect(await (await fetch(`${base}/__plat_dev/ping`)).text()).toBe('pong');
+  });
+});
+
+describe('startLocalRouter realtime', () => {
+  let upstream: TcpServer;
+  let router: Server;
+  let routerPort: number;
+  let realtime: LocalRealtime;
+  /** The request head the fake AppSync realtime endpoint received. */
+  let head = '';
+
+  beforeAll(async () => {
+    // A stand-in for the emulator's realtime endpoint: records the handshake,
+    // switches protocols, then echoes bytes back.
+    upstream = createTcpServer((socket) => {
+      let buffered = '';
+      const onData = (chunk: Buffer) => {
+        buffered += chunk.toString('latin1');
+        const end = buffered.indexOf('\r\n\r\n');
+        if (end === -1) return;
+        socket.off('data', onData);
+        head = buffered.slice(0, end);
+        socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n');
+        const rest = buffered.slice(end + 4);
+        if (rest) socket.write(Buffer.from(rest, 'latin1'));
+        socket.pipe(socket);
+      };
+      socket.on('data', onData);
+    });
+    await new Promise<void>((r) => upstream.listen(0, '127.0.0.1', r));
+    const port = (upstream.address() as AddressInfo).port;
+    realtime = localRealtime(
+      { v: 1, h: '127.0.0.1:4001', o: `127.0.0.1:${port}`, k: 'da2-local' },
+      { namespace: 'shop--local', subscribe: 'public' },
+    );
+    const rtRecord = localRouteRecord({
+      app: 'shop',
+      stage: 'local',
+      deploymentId: 'd1',
+      hasServer: false,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+      realtime: { namespace: 'shop--local', subscribe: 'public' },
+    });
+    router = await startLocalRouter({
+      port: 0,
+      state: () => ({ record: rtRecord, staticDir: '/srv', realtime }),
+    });
+    routerPort = (router.address() as AddressInfo).port;
+  });
+
+  afterAll(() => {
+    router?.close();
+    upstream?.close();
+  });
+
+  it('answers the realtime config', async () => {
+    const res = await fetch(`http://127.0.0.1:${routerPort}${REALTIME_PATH}`);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(await res.json()).toEqual(realtime.config);
+  });
+
+  it('tunnels a WebSocket handshake to AppSync’s path and host, without cookies', async () => {
+    const echoed = await new Promise<string>((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port: routerPort,
+        path: `${REALTIME_PATH}?v=1`,
+        headers: {
+          host: 'shop.localhost:3000',
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'sec-websocket-key': 'dGhlIHNhbXBsZSBub25jZQ==',
+          'sec-websocket-version': '13',
+          'sec-websocket-protocol': 'aws-appsync-event-ws, header-abc',
+          cookie: '__platform_id=secret',
+          authorization: 'Bearer x',
+        },
+      });
+      req.once('error', reject);
+      req.once('upgrade', (res, socket) => {
+        expect(res.statusCode).toBe(101);
+        socket.once('data', (d) => {
+          resolve(d.toString());
+          socket.destroy();
+        });
+        socket.write('ping');
+      });
+      req.end();
+    });
+    expect(echoed).toBe('ping');
+    const [requestLine, ...headers] = head.split('\r\n');
+    expect(requestLine).toBe('GET /event/realtime HTTP/1.1');
+    const byName = Object.fromEntries(
+      headers.map((h) => [h.slice(0, h.indexOf(':')).toLowerCase(), h.slice(h.indexOf(':') + 1).trim()]),
+    );
+    expect(byName.host).toBe(`${realtime.target.host}:${realtime.target.port}`);
+    expect(byName['sec-websocket-protocol']).toBe('aws-appsync-event-ws, header-abc');
+    expect(byName.cookie).toBeUndefined();
+    expect(byName.authorization).toBeUndefined();
+  });
+
+  it('refuses other upgrades', async () => {
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const req = request({
+        host: '127.0.0.1',
+        port: routerPort,
+        path: '/ws',
+        headers: {
+          connection: 'Upgrade',
+          upgrade: 'websocket',
+          'sec-websocket-key': 'x',
+          'sec-websocket-version': '13',
+        },
+      });
+      req.once('error', reject);
+      req.once('response', (res) => resolve(res.statusCode));
+      req.once('upgrade', () => resolve(101));
+      req.end();
+    });
+    expect(status).toBe(501);
   });
 });
