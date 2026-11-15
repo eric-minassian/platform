@@ -5,7 +5,7 @@
  */
 import { DateTime, Effect, Exit, Option, Schema } from 'effect';
 import { expect } from 'vitest';
-import { Db } from '../src/index.ts';
+import { Db, type QueryOptions } from '../src/index.ts';
 
 const Note = Schema.Struct({
   ownerId: Schema.String,
@@ -57,6 +57,16 @@ export const dbContract = (name: string) =>
     expect(garbage._tag).toBe('InvalidCursor');
 
     expect((yield* notes.queryAll({ ownerId: 'u1' })).map((n) => n.noteId)).toEqual(['n1', 'n2', 'n3']);
+
+    // Strongly consistent reads find the same documents.
+    expect(yield* notes.get({ ownerId: 'u1', noteId: 'n1' }, { consistent: true })).toEqual(Option.some(n1));
+    expect(ids(yield* notes.query({ ownerId: 'u1' }, { gt: 'n1', consistent: true }))).toEqual(['n2', 'n3']);
+    const all = yield* notes.queryAll({ ownerId: 'u1' }, { reverse: true, consistent: true });
+    expect(all.map((n) => n.noteId)).toEqual(['n3', 'n2', 'n1']);
+    // An index is eventually consistent: asking it for a consistent read is a defect (and a type error).
+    const indexRead = { index: 'byTag', consistent: true } as unknown as QueryOptions;
+    expect(Exit.hasDies(yield* Effect.exit(notes.query({ tag: 'work' }, indexRead)))).toBe(true);
+    expect(Exit.hasDies(yield* Effect.exit(notes.queryAll({ tag: 'work' }, indexRead)))).toBe(true);
 
     const work = yield* notes.query({ tag: 'work' }, { index: 'byTag', gte: '2026-01-02' });
     expect(ids(work)).toEqual(['n3']);

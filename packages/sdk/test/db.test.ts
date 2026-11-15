@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { newContext, runWithContext } from '../src/runtime/context.ts';
 import { InvalidCursorError } from '../src/runtime/cursor.ts';
-import { createKeyMapper, db, setExpression, stripInternal } from '../src/runtime/db.ts';
+import { createKeyMapper, db, type QueryOptions, setExpression, stripInternal } from '../src/runtime/db.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 interface Todo extends Record<string, unknown> {
@@ -165,6 +165,28 @@ describe('collection operations', () => {
       expect(spans).toEqual(['db.get', 'db.put', 'db.delete', 'db.query']);
     }));
 
+  it('asks DynamoDB for a strongly consistent read only when told to', async () => {
+    await todos().get({ userId: 'u1', id: 't1' }, { consistent: true });
+    await todos().query({ userId: 'u1' }, { consistent: true, limit: 5 });
+    await todos().get({ userId: 'u1', id: 't1' }, { consistent: false });
+    await todos().query({ userId: 'u1' });
+    expect(sent.map((s) => [s.name, s.input.ConsistentRead])).toEqual([
+      ['GetCommand', true],
+      ['QueryCommand', true],
+      ['GetCommand', undefined],
+      ['QueryCommand', undefined],
+    ]);
+  });
+
+  it('refuses a consistent read of an index, even from an untyped caller', async () => {
+    // Typed callers get a compile error instead (test/types/registered.ts).
+    const q = { index: 'byStatus', consistent: true } as unknown as QueryOptions;
+    const partition = { userId: 'u1', status: 'open' };
+    await expect(todos().query(partition, q)).rejects.toThrow(/index "byStatus" is eventually consistent/);
+    await expect(todos().queryAll(partition, q)).rejects.toThrow(/index "byStatus" is eventually consistent/);
+    expect(sent).toEqual([]);
+  });
+
   it('update recomputes index attributes when their sources change', async () => {
     const out = await todos().update({ userId: 'u1', id: 't1' }, { title: 'new', status: 'done' });
     expect(out).toEqual({ userId: 'u1', id: 't1', title: 'new', status: 'done', createdAt: 'c' });
@@ -239,9 +261,17 @@ describe('query cursors', () => {
     expect(Buffer.from(cursor, 'base64url').toString('latin1')).not.toMatch(/todos#u1|"pk"|"sk"/);
     expect(await issue(lastKey)).not.toBe(await issue(lastKey));
 
-    // Limit and order may change between pages; the key condition may not.
-    await todos().query({ userId: 'u1' }, { beginsWith: 't', limit: 10, reverse: true, cursor });
-    expect(queries[0]).toMatchObject({ ExclusiveStartKey: lastKey, Limit: 10, ScanIndexForward: false });
+    // Limit, order and consistency may change between pages; the key condition may not.
+    await todos().query(
+      { userId: 'u1' },
+      { beginsWith: 't', limit: 10, reverse: true, consistent: true, cursor },
+    );
+    expect(queries[0]).toMatchObject({
+      ExclusiveStartKey: lastKey,
+      Limit: 10,
+      ScanIndexForward: false,
+      ConsistentRead: true,
+    });
   });
 
   it('works on indexes and treats an empty cursor as the first page', async () => {
@@ -302,7 +332,7 @@ describe('query cursors', () => {
     );
     const tel = captureTelemetry();
     const items = await runWithContext(newContext(), () =>
-      todos().queryAll({ userId: 'u1' }, { reverse: true }),
+      todos().queryAll({ userId: 'u1' }, { reverse: true, consistent: true }),
     );
     tel.stop();
     expect(items.map((t) => t.id)).toEqual(['t1', 't2', 't3', 't4']);
@@ -313,7 +343,9 @@ describe('query cursors', () => {
       { pk: 'todos#u1', sk: 't3' },
       { pk: 'todos#u1', sk: 't3' },
     ]);
-    expect(queries.every((q) => q.ScanIndexForward === false && !('Limit' in q))).toBe(true);
+    expect(
+      queries.every((q) => q.ScanIndexForward === false && q.ConsistentRead === true && !('Limit' in q)),
+    ).toBe(true);
     expect(tel.events.filter((e) => e.t === 'span').map((e) => (e as { op: string }).op)).toEqual([
       'db.query',
       'db.query',

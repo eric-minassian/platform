@@ -5,12 +5,14 @@ import {
   type CollectionOptions as BaseCollectionOptions,
   createKeyMapper,
   db,
+  type GetOptions,
   keyPart,
+  type QueryAllOptions,
   type QueryOptions,
   stripInternal,
 } from './runtime/db.ts';
 
-export type { KeyValue, QueryOptions } from './runtime/db.ts';
+export type { GetOptions, KeyValue, QueryAllOptions, QueryOptions } from './runtime/db.ts';
 
 /** `insert` found a document with the same key. */
 export class DocumentExists extends Schema.TaggedError<DocumentExists, { readonly brand: unique symbol }>()(
@@ -71,7 +73,7 @@ export interface Page<T> {
  */
 export interface Collection<T, Key extends keyof T> {
   readonly name: string;
-  get(key: Pick<T, Key>): Effect.Effect<Option.Option<T>>;
+  get(key: Pick<T, Key>, options?: GetOptions): Effect.Effect<Option.Option<T>>;
   /** Create or replace. */
   put(document: T): Effect.Effect<T>;
   /** Create, failing if a document with the same key exists. */
@@ -91,10 +93,7 @@ export interface Collection<T, Key extends keyof T> {
   ): Effect.Effect<Page<T>>;
   query(partition: Partial<T>, options: QueryOptions): Effect.Effect<Page<T>, InvalidCursor>;
   /** Every matching document, following pages until the last one. */
-  queryAll(
-    partition: Partial<T>,
-    options?: Omit<QueryOptions, 'cursor' | 'limit'>,
-  ): Effect.Effect<ReadonlyArray<T>>;
+  queryAll(partition: Partial<T>, options?: QueryAllOptions): Effect.Effect<ReadonlyArray<T>>;
 }
 
 /** The stage's document database (`db: true`). Collections need no provisioning. */
@@ -128,7 +127,7 @@ class DynamoFailure extends Data.TaggedError('DynamoFailure')<{ readonly cause: 
 
 /** Raw, schema-less storage of encoded documents. */
 interface Store {
-  get(key: Doc): Effect.Effect<Doc | undefined>;
+  get(key: Doc, options: GetOptions): Effect.Effect<Doc | undefined>;
   put(item: Doc, ifNotExists: boolean): Effect.Effect<void, ConditionFailed>;
   update(key: Doc, patch: Doc): Effect.Effect<Doc, ConditionFailed>;
   delete(key: Doc): Effect.Effect<void>;
@@ -136,7 +135,7 @@ interface Store {
     values: Doc,
     options: QueryOptions,
   ): Effect.Effect<{ items: Doc[]; cursor?: string | undefined }, BadCursor>;
-  queryAll(values: Doc, options: QueryOptions): Effect.Effect<Doc[]>;
+  queryAll(values: Doc, options: QueryAllOptions): Effect.Effect<Doc[]>;
 }
 
 type StoreFactory = (name: string, options: BaseCollectionOptions<Doc>) => Store;
@@ -159,7 +158,7 @@ const dynamo = <A>(call: () => Promise<A>): Effect.Effect<A, ConditionFailed | B
 const dynamoStore: StoreFactory = (name, options) => {
   const c = db.collection<Doc>(name, options);
   return {
-    get: (key) => Effect.orDie(dynamo(() => c.get(key))),
+    get: (key, o) => Effect.orDie(dynamo(() => c.get(key, o))),
     put: (item, ifNotExists) =>
       dynamo(() => c.put(item, { ifNotExists })).pipe(
         Effect.catchTag('BadCursor', Effect.die),
@@ -177,7 +176,8 @@ const dynamoStore: StoreFactory = (name, options) => {
  * A table in memory: items are stored exactly as DynamoDB would hold them
  * (`toItem`), so partition, sort and index keys, `begins_with`/range
  * conditions (string comparisons, like DynamoDB's) and cursors behave the same.
- * Cursors are bound to their query like sealed ones, but not encrypted.
+ * Cursors are bound to their query like sealed ones, but not encrypted. Every
+ * read sees every earlier write, so `consistent` only has its index check.
  */
 function memoryStore(): StoreFactory {
   const table = new Map<string, Doc>();
@@ -251,13 +251,12 @@ function memoryStore(): StoreFactory {
     };
 
     /** The query's items in order, and the scope its cursors are bound to (as `cursorScope` in db.ts). */
-    function matching(values: Doc, q: QueryOptions) {
+    function matching(values: Doc, q: QueryAllOptions) {
       let pkAttr = 'pk';
       let skAttr = 'sk';
       let pkValue: string;
-      if (q.index) {
-        const ix = m.indexes.find((i) => i.name === q.index);
-        if (!ix) throw new Error(`${what} has no index "${q.index}"`);
+      const ix = m.queryIndex(q);
+      if (ix) {
         pkAttr = `gsi${ix.slot}pk`;
         skAttr = `gsi${ix.slot}sk`;
         pkValue = `${name}#${ix.name}#${keyPart(values, ix.partition, what)}`;
@@ -294,7 +293,7 @@ function compare(a: unknown, b: unknown): number {
 }
 
 /** The key condition `queryInput` builds for DynamoDB, as a predicate on the sort key. */
-function sortCondition(q: QueryOptions): (sk: string) => boolean {
+function sortCondition(q: QueryAllOptions): (sk: string) => boolean {
   if (q.beginsWith !== undefined) {
     const prefix = q.beginsWith;
     return (sk) => sk.startsWith(prefix);
@@ -366,9 +365,9 @@ function makeCollection<S extends DocumentSchema, P extends FieldOf<S>, K extend
 
   return {
     name,
-    get: (key) =>
+    get: (key, o = {}) =>
       raw
-        .get(key as Doc)
+        .get(key as Doc, o)
         .pipe(Effect.flatMap((item) => (item ? Effect.asSome(decode(item)) : Effect.succeedNone))),
     put: (document) =>
       encode(document).pipe(
