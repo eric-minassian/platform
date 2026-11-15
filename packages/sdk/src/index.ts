@@ -27,6 +27,7 @@ export {
   Unauthorized,
   User,
 } from './api.ts';
+export { type ClientInfo, clientInfo } from './client-info.ts';
 export {
   type Collection,
   type CollectionOptions,

@@ -12,6 +12,7 @@ import {
   localRouteRecord,
   safeJoin,
   startLocalRouter,
+  viewerAddress,
 } from '../src/dev/router.ts';
 import { tempDir } from './helpers.ts';
 
@@ -179,6 +180,21 @@ describe('startLocalRouter', () => {
     expect(text).toBe('server:POST /api/items?q=1');
     expect(seen.at(-1)?.['x-platform-host']).toBe('shop.localhost:3000');
     expect(seen.at(-1)?.['x-forwarded-proto']).toBe('http');
+  });
+
+  it('tells the server the client address like the edge, replacing what the client sent', async () => {
+    await fetch(`${base}/api/items`, {
+      headers: { 'cloudfront-viewer-address': '203.0.113.9:1', 'cloudfront-viewer-country': 'ZZ' },
+    });
+    expect(seen.at(-1)?.['cloudfront-viewer-address']).toMatch(/^127\.0\.0\.1:\d+$/);
+    expect(seen.at(-1)).not.toHaveProperty('cloudfront-viewer-country');
+  });
+
+  it('writes client addresses the way CloudFront does', () => {
+    expect(viewerAddress('127.0.0.1', 51234)).toBe('127.0.0.1:51234');
+    expect(viewerAddress('::ffff:127.0.0.1', 51234)).toBe('127.0.0.1:51234');
+    expect(viewerAddress('::1', 51234)).toBe('::1:51234');
+    expect(viewerAddress(undefined, undefined)).toBeUndefined();
   });
 
   it('serves static files and the SPA fallback', async () => {

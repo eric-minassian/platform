@@ -17,6 +17,7 @@ import {
   type RealtimeEdgeEntry,
   type RealtimeSubscribe,
   type RouteRecord,
+  VIEWER_ADDRESS_HEADER,
 } from '@ericminassian/platform-core';
 
 /**
@@ -215,7 +216,7 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
   });
 }
 
-/** Headers the edge would add, so apps see their public host. */
+/** Headers the edge would add, so apps see their public host and the client's address. */
 export function forwardedHeaders(
   req: IncomingMessage,
   toServer: boolean,
@@ -223,11 +224,22 @@ export function forwardedHeaders(
   const headers: Record<string, string | string[] | undefined> = { ...req.headers };
   const host = req.headers.host ?? 'localhost';
   if (toServer) {
+    // CloudFront replaces the `CloudFront-*` headers a client sends; never pass one through.
+    for (const name of Object.keys(headers)) if (name.startsWith('cloudfront-')) delete headers[name];
     headers[HOST_HEADER] = host;
     headers['x-forwarded-host'] = host;
     headers['x-forwarded-proto'] = 'http';
+    const address = viewerAddress(req.socket.remoteAddress, req.socket.remotePort);
+    if (address) headers[VIEWER_ADDRESS_HEADER] = address;
   }
   return headers;
+}
+
+/** `ip:port` the way CloudFront writes it: IPv6 unbracketed, an IPv4 client as plain IPv4. */
+export function viewerAddress(ip: string | undefined, port: number | undefined): string | undefined {
+  if (!ip || port === undefined) return undefined;
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip)?.[1];
+  return `${mapped ?? ip}:${port}`;
 }
 
 function proxy(req: IncomingMessage, res: ServerResponse, target: Target, toServer: boolean): Promise<void> {
