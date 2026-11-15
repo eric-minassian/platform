@@ -108,7 +108,18 @@ export interface TransactItem {
 export interface Collection<T extends Record<string, unknown>> {
   get(key: Partial<T>, opts?: GetOptions): Promise<T | undefined>;
   put(item: T, opts?: { ifNotExists?: boolean }): Promise<T>;
-  update(key: Partial<T>, patch: Partial<T>): Promise<T>;
+  /**
+   * Requires the item to exist and, with `if`, to hold those values (`null`:
+   * an absent or null attribute). When either fails it throws DynamoDB's
+   * ConditionalCheckFailedException, whose `Item` is set if the item exists.
+   */
+  update(key: Partial<T>, patch: Partial<T>, opts?: { if?: Record<string, unknown> }): Promise<T>;
+  /**
+   * Adds `amounts` to number attributes in one atomic write. A missing item is
+   * created from `key` and `create`, whose attributes are otherwise written only
+   * where the item lacks them; without `create`, the item must exist.
+   */
+  increment(key: Partial<T>, amounts: Record<string, number>, create?: Record<string, unknown>): Promise<T>;
   delete(key: Partial<T>): Promise<void>;
   /**
    * Puts in BatchWriteItem calls of 25, retrying what DynamoDB leaves
@@ -448,6 +459,35 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
 
   const keyFields = new Set([...partition, ...sort]);
 
+  /**
+   * Throws unless `increment` may add `amounts` and create the item with
+   * `create`. Counters stay out of keys, indexes and the TTL: those attributes
+   * are copies of fields, which an atomic ADD can't keep in step.
+   */
+  const checkIncrement = (
+    key: Record<string, unknown>,
+    amounts: Record<string, unknown>,
+    create: Record<string, unknown> | undefined,
+  ) => {
+    for (const [f, by] of Object.entries(amounts)) {
+      const ix = indexes.find((i) => i.partition.includes(f) || i.sort.includes(f));
+      const role = keyFields.has(f)
+        ? 'it is part of the key'
+        : ix
+          ? `index "${ix.name}" is built from it`
+          : f === opts.ttl
+            ? 'it is the ttl field'
+            : undefined;
+      if (role) throw new Error(`${what}: cannot increment "${f}": ${role}`);
+      if (typeof by !== 'number' || !Number.isFinite(by))
+        throw new Error(`${what}: increment "${f}" by a finite number, not ${String(by)}`);
+      if (create && create[f] !== undefined)
+        throw new Error(`${what}: "${f}" is incremented, so leave it out of \`create\``);
+    }
+    for (const [f, v] of Object.entries(create ?? {}))
+      if (keyFields.has(f) && v !== key[f]) throw new Error(`${what}: cannot change key attribute "${f}"`);
+  };
+
   return {
     name,
     partition,
@@ -463,6 +503,7 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
     queryIndex,
     queryInput,
     keyFields,
+    checkIncrement,
   };
 }
 
@@ -473,6 +514,51 @@ function collection<T extends Record<string, unknown>>(
   opts: CollectionOptions<T>,
 ): Collection<T> {
   const m = createKeyMapper(name, opts);
+
+  /**
+   * Rewrites the derived attributes `attrs` from `item`, in a write of their
+   * own that applies only while their `sources` still hold `item`'s values. A
+   * failed condition means a later write changed them, and every write that
+   * changes a source writes these attributes too, so there is nothing left to
+   * fix. One write per index keeps a later write to one index from cancelling
+   * another's rebuild.
+   */
+  const rebuild = async (
+    tableName: string,
+    Key: Record<string, unknown>,
+    item: Record<string, unknown>,
+    attrs: string[],
+    sources: string[],
+  ) => {
+    const all = m.derived(item);
+    const d = setExpression(Object.fromEntries(attrs.map((a) => [a, all[a]])), new Set());
+    const rebuildNames: Record<string, string> = { ...d.names, '#pk': 'pk' };
+    const rebuildValues: Record<string, unknown> = { ...d.values };
+    const unchanged = sources
+      .filter((f) => !m.keyFields.has(f))
+      .map((f, i) => {
+        rebuildNames[`#c${i}`] = f;
+        if (item[f] === undefined) return `attribute_not_exists(#c${i})`;
+        rebuildValues[`:c${i}`] = item[f];
+        return `#c${i} = :c${i}`;
+      });
+    try {
+      await retryTransient(() =>
+        ddb().send(
+          new UpdateCommand({
+            TableName: tableName,
+            Key,
+            UpdateExpression: d.expr,
+            ExpressionAttributeNames: rebuildNames,
+            ...(Object.keys(rebuildValues).length ? { ExpressionAttributeValues: rebuildValues } : {}),
+            ConditionExpression: ['attribute_exists(#pk)', ...unchanged].join(' AND '),
+          }),
+        ),
+      );
+    } catch (e) {
+      if (errorName(e) !== 'ConditionalCheckFailedException') throw e;
+    }
+  };
 
   const putInput = (item: T, putOpts?: { ifNotExists?: boolean }) => ({
     TableName: table(),
@@ -530,7 +616,7 @@ function collection<T extends Record<string, unknown>>(
         return item;
       }),
 
-    update: (key, patch) =>
+    update: (key, patch, updateOpts = {}) =>
       span('db.update', name, async () => {
         m.assertKeyUnchanged(key, patch);
         const tableName = table();
@@ -538,62 +624,79 @@ function collection<T extends Record<string, unknown>>(
         // Indexes the key and patch determine are written with the patch, atomically.
         const plan = m.planDerived(key, patch);
         const { expr, names, values } = setExpression({ ...patch, ...plan.set }, m.keyFields);
+        const cond = conditionExpression(updateOpts.if ?? {});
+        const allValues = { ...values, ...cond.values };
         const out = await retryTransient(() =>
           ddb().send(
             new UpdateCommand({
               TableName: tableName,
               Key,
               UpdateExpression: expr,
-              ExpressionAttributeNames: { ...names, '#pk': 'pk' },
-              ...(Object.keys(values).length ? { ExpressionAttributeValues: values } : {}),
-              ConditionExpression: 'attribute_exists(#pk)',
+              ExpressionAttributeNames: { ...names, ...cond.names },
+              ...(Object.keys(allValues).length ? { ExpressionAttributeValues: allValues } : {}),
+              ConditionExpression: cond.expr,
+              // Tells a document that fails `if` apart from a missing one, in the same write.
+              ...(updateOpts.if ? { ReturnValuesOnConditionCheckFailure: 'ALL_OLD' as const } : {}),
               ReturnValues: 'ALL_NEW',
             }),
           ),
         );
         const item = out.Attributes ?? {};
-        // The rest need the item's other fields: each is rebuilt from the item the first
-        // call returned, in its own write, if that index's fields still hold. A failed
-        // condition means a later write changed them, and every write that changes an
-        // index field writes that index too, so there is nothing left to fix. One write
-        // per index keeps a later write to one index from cancelling another's rebuild.
-        const all = m.derived(item);
-        for (const { index } of plan.unresolved) {
-          const d = setExpression(
-            {
-              [`gsi${index.slot}pk`]: all[`gsi${index.slot}pk`],
-              [`gsi${index.slot}sk`]: all[`gsi${index.slot}sk`],
-            },
-            new Set(),
+        // The rest need the item's other fields: each is rebuilt from the item the first call returned.
+        for (const { index } of plan.unresolved)
+          await rebuild(
+            tableName,
+            Key,
+            item,
+            [`gsi${index.slot}pk`, `gsi${index.slot}sk`],
+            [...index.partition, ...index.sort],
           );
-          const rebuildNames: Record<string, string> = { ...d.names, '#pk': 'pk' };
-          const rebuildValues: Record<string, unknown> = { ...d.values };
-          const unchanged = [...index.partition, ...index.sort]
-            .filter((f) => !m.keyFields.has(f))
-            .map((f, i) => {
-              rebuildNames[`#c${i}`] = f;
-              if (item[f] === undefined) return `attribute_not_exists(#c${i})`;
-              rebuildValues[`:c${i}`] = item[f];
-              return `#c${i} = :c${i}`;
-            });
-          try {
-            await retryTransient(() =>
-              ddb().send(
-                new UpdateCommand({
-                  TableName: tableName,
-                  Key,
-                  UpdateExpression: d.expr,
-                  ExpressionAttributeNames: rebuildNames,
-                  ...(Object.keys(rebuildValues).length ? { ExpressionAttributeValues: rebuildValues } : {}),
-                  ConditionExpression: ['attribute_exists(#pk)', ...unchanged].join(' AND '),
-                }),
-              ),
-            );
-          } catch (e) {
-            if (errorName(e) !== 'ConditionalCheckFailedException') throw e;
-          }
-        }
         // The document as this update left it; the rebuilds only touch index attributes.
+        return stripInternal(item) as T;
+      }),
+
+    increment: (key, amounts, create) =>
+      span('db.increment', name, async () => {
+        m.checkIncrement(key, amounts, create);
+        const tableName = table();
+        const Key = m.primaryKey(key);
+        const keyAttrs = Object.fromEntries([...m.keyFields].map((f) => [f, key[f]]));
+        const fill: Record<string, unknown> = {};
+        if (create) {
+          for (const [f, v] of Object.entries(create))
+            if (!m.keyFields.has(f) && v !== undefined) fill[f] = v;
+          // Index and TTL attributes the key and `create` already determine, so
+          // creating a document usually takes this one write.
+          for (const [a, v] of Object.entries(m.derived({ ...keyAttrs, ...fill })))
+            if (v !== null) fill[a] = v;
+        }
+        const { expr, names, values } = incrementExpression({ ...keyAttrs, _c: name }, fill, amounts);
+        // A conflict with a transaction rejects the write unapplied, so the ADD can go again.
+        const out = await retryTransient(() =>
+          ddb().send(
+            new UpdateCommand({
+              TableName: tableName,
+              Key,
+              UpdateExpression: expr,
+              ExpressionAttributeNames: create ? names : { ...names, '#pk': 'pk' },
+              ExpressionAttributeValues: values,
+              ...(create ? {} : { ConditionExpression: 'attribute_exists(#pk)' }),
+              ReturnValues: 'ALL_NEW',
+            }),
+          ),
+        );
+        const item = out.Attributes ?? {};
+        // `create` fills a field only where the item lacks it, so an existing item
+        // may keep values other than those its index and TTL attributes were
+        // guessed from (or may predate an index): rebuild any that don't match.
+        const all = m.derived(item);
+        const stale = (attrs: string[]) => attrs.some((a) => (item[a] ?? null) !== all[a]);
+        for (const ix of m.indexes) {
+          const attrs = [`gsi${ix.slot}pk`, `gsi${ix.slot}sk`];
+          if (stale(attrs)) await rebuild(tableName, Key, item, attrs, [...ix.partition, ...ix.sort]);
+        }
+        if (opts.ttl && stale(['_ttl'])) await rebuild(tableName, Key, item, ['_ttl'], [opts.ttl]);
+        // The totals this increment's own ADD produced, not a later one's.
         return stripInternal(item) as T;
       }),
 
@@ -724,6 +827,72 @@ function transact(items: readonly TransactItem[]): Promise<void> {
     const input = { TransactItems: items.map((i) => i.write) };
     await retryTransient(() => ddb().send(new TransactWriteCommand(input)));
   });
+}
+
+/**
+ * `attribute_exists(#pk) AND #i0 = :i0 AND ...`. `undefined`/`null` asks for an
+ * absent or null attribute: `update` removes fields set to null, but `put`
+ * stores a null it's given.
+ */
+export function conditionExpression(conditions: Record<string, unknown>): {
+  expr: string;
+  names: Record<string, string>;
+  values: Record<string, unknown>;
+} {
+  const parts = ['attribute_exists(#pk)'];
+  const names: Record<string, string> = { '#pk': 'pk' };
+  const values: Record<string, unknown> = {};
+  let i = 0;
+  for (const [k, v] of Object.entries(conditions)) {
+    const n = `#i${i}`;
+    names[n] = k;
+    if (v === undefined || v === null) {
+      values[`:i${i}`] = 'NULL';
+      parts.push(`(attribute_not_exists(${n}) OR attribute_type(${n}, :i${i}))`);
+    } else {
+      values[`:i${i}`] = v;
+      parts.push(`${n} = :i${i}`);
+    }
+    i++;
+  }
+  return { expr: parts.join(' AND '), names, values };
+}
+
+/** `SET <set>, <fill> where missing ADD <amounts>`: the write behind `increment`. */
+export function incrementExpression(
+  set: Record<string, unknown>,
+  fill: Record<string, unknown>,
+  amounts: Record<string, number>,
+): { expr: string; names: Record<string, string>; values: Record<string, unknown> } {
+  const sets: string[] = [];
+  const adds: string[] = [];
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  let i = 0;
+  const bind = (attr: string, value: unknown) => {
+    const n = `#f${i}`;
+    const v = `:v${i}`;
+    i++;
+    names[n] = attr;
+    values[v] = value;
+    return [n, v] as const;
+  };
+  for (const [a, value] of Object.entries(set)) {
+    const [n, v] = bind(a, value);
+    sets.push(`${n} = ${v}`);
+  }
+  for (const [a, value] of Object.entries(fill)) {
+    const [n, v] = bind(a, value);
+    sets.push(`${n} = if_not_exists(${n}, ${v})`);
+  }
+  for (const [a, by] of Object.entries(amounts)) {
+    const [n, v] = bind(a, by);
+    adds.push(`${n} ${v}`);
+  }
+  const parts: string[] = [];
+  if (sets.length) parts.push(`SET ${sets.join(', ')}`);
+  if (adds.length) parts.push(`ADD ${adds.join(', ')}`);
+  return { expr: parts.join(' '), names, values };
 }
 
 export const db: Db = {

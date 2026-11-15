@@ -31,11 +31,13 @@ export { type ClientInfo, clientInfo } from './client-info.ts';
 export {
   type Collection,
   type CollectionOptions,
+  ConditionFailed,
   Db,
   DocumentExists,
   DocumentNotFound,
   type DocumentSchema,
   type GetOptions,
+  type Increments,
   type KeyValue,
   type Page,
   type QueryAllOptions,

@@ -3,7 +3,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Db, TransactionCanceled } from '../src/index.ts';
 import { newContext, runWithContext } from '../src/runtime/context.ts';
 import { InvalidCursorError } from '../src/runtime/cursor.ts';
-import { createKeyMapper, db, type QueryOptions, setExpression, stripInternal } from '../src/runtime/db.ts';
+import {
+  conditionExpression,
+  createKeyMapper,
+  db,
+  incrementExpression,
+  type QueryOptions,
+  setExpression,
+  stripInternal,
+} from '../src/runtime/db.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 interface Todo extends Record<string, unknown> {
@@ -125,6 +133,22 @@ describe('key mapping', () => {
       expr: 'SET #f0 = :v0 REMOVE #f1',
       names: { '#f0': 'title', '#f1': 'status' },
       values: { ':v0': 'x' },
+    });
+  });
+
+  it('builds conditions: equal values, and absent or null fields for undefined', () => {
+    expect(conditionExpression({ status: 'open', assignee: undefined, version: 0 })).toEqual({
+      expr: 'attribute_exists(#pk) AND #i0 = :i0 AND (attribute_not_exists(#i1) OR attribute_type(#i1, :i1)) AND #i2 = :i2',
+      names: { '#pk': 'pk', '#i0': 'status', '#i1': 'assignee', '#i2': 'version' },
+      values: { ':i0': 'open', ':i1': 'NULL', ':i2': 0 },
+    });
+  });
+
+  it('builds increments: SET, SET where missing, then ADD', () => {
+    expect(incrementExpression({ userId: 'u1' }, { title: 't' }, { n: 2 })).toEqual({
+      expr: 'SET #f0 = :v0, #f1 = if_not_exists(#f1, :v1) ADD #f2 :v2',
+      names: { '#f0': 'userId', '#f1': 'title', '#f2': 'n' },
+      values: { ':v0': 'u1', ':v1': 't', ':v2': 2 },
     });
   });
 });
@@ -695,5 +719,193 @@ describe('batch writes and retries', () => {
     expect(Cause.squash((defect as Exit.Failure<void, unknown>).cause)).toMatchObject({
       name: 'ValidationException',
     });
+  });
+});
+
+describe('increments and conditional updates', () => {
+  interface Usage extends Record<string, unknown> {
+    clientId: string;
+    minute: number;
+    strokes?: number;
+    points?: number;
+    expiresAt?: number;
+    plan?: string;
+  }
+  const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+  let replies: unknown[];
+  let tel: ReturnType<typeof captureTelemetry>;
+
+  beforeEach(() => {
+    useTestBindings({ table: 'app--test' });
+    tel = captureTelemetry();
+    sent.length = 0;
+    replies = [];
+    mockClient('ddb', (cmd) => {
+      sent.push({ name: cmd.constructor.name, input: cmd.input });
+      const reply = replies.shift();
+      if (reply instanceof Error) throw reply;
+      return reply ?? {};
+    });
+  });
+  afterEach(() => {
+    tel.stop();
+    resetPlatform();
+  });
+
+  const usage = () =>
+    db.collection<Usage>('usage', {
+      partition: 'clientId',
+      sort: 'minute',
+      ttl: 'expiresAt',
+      indexes: { byPlan: { slot: 1, partition: 'plan', sort: 'clientId' } },
+    });
+  const key = { clientId: 'c1', minute: 5 };
+  const stored = (fields: Partial<Usage>) => ({
+    Attributes: { pk: 'usage#c1', sk: '5', _c: 'usage', ...key, ...fields },
+  });
+  const conditionFailed = (item?: Record<string, unknown>) =>
+    Object.assign(new Error('The conditional request failed'), {
+      name: 'ConditionalCheckFailedException',
+      ...(item ? { Item: item } : {}),
+    });
+
+  it('increment creates in one write, with the ttl and index attributes `create` determines', () =>
+    runWithContext(newContext(), async () => {
+      replies.push(
+        stored({
+          strokes: 1,
+          points: 3,
+          expiresAt: 420,
+          plan: 'pro',
+          _ttl: 420,
+          gsi1pk: 'usage#byPlan#pro',
+          gsi1sk: 'c1',
+        }),
+      );
+      const out = await usage().increment(key, { strokes: 1, points: 3 }, { expiresAt: 420.7, plan: 'pro' });
+      expect(out).toEqual({ ...key, strokes: 1, points: 3, expiresAt: 420, plan: 'pro' });
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.input).toEqual({
+        TableName: 'app--test',
+        Key: { pk: 'usage#c1', sk: '5' },
+        UpdateExpression:
+          'SET #f0 = :v0, #f1 = :v1, #f2 = :v2, #f3 = if_not_exists(#f3, :v3), #f4 = if_not_exists(#f4, :v4), ' +
+          '#f5 = if_not_exists(#f5, :v5), #f6 = if_not_exists(#f6, :v6), #f7 = if_not_exists(#f7, :v7) ' +
+          'ADD #f8 :v8, #f9 :v9',
+        ExpressionAttributeNames: {
+          '#f0': 'clientId',
+          '#f1': 'minute',
+          '#f2': '_c',
+          '#f3': 'expiresAt',
+          '#f4': 'plan',
+          '#f5': 'gsi1pk',
+          '#f6': 'gsi1sk',
+          '#f7': '_ttl',
+          '#f8': 'strokes',
+          '#f9': 'points',
+        },
+        ExpressionAttributeValues: {
+          ':v0': 'c1',
+          ':v1': 5,
+          ':v2': 'usage',
+          ':v3': 420.7,
+          ':v4': 'pro',
+          ':v5': 'usage#byPlan#pro',
+          ':v6': 'c1',
+          ':v7': 420,
+          ':v8': 1,
+          ':v9': 3,
+        },
+        ReturnValues: 'ALL_NEW',
+      });
+      const spans = tel.events.filter((e) => e.t === 'span').map((e) => (e as { op: string }).op);
+      expect(spans).toEqual(['db.increment']);
+    }));
+
+  it('increment without `create` requires the item', async () => {
+    replies.push(stored({ strokes: 2 }));
+    await usage().increment(key, { strokes: 1 });
+    expect(sent[0]!.input).toMatchObject({
+      UpdateExpression: 'SET #f0 = :v0, #f1 = :v1, #f2 = :v2 ADD #f3 :v3',
+      ConditionExpression: 'attribute_exists(#pk)',
+      ExpressionAttributeNames: { '#pk': 'pk' },
+    });
+    replies.push(conditionFailed());
+    await expect(usage().increment(key, { strokes: 1 })).rejects.toMatchObject({
+      name: 'ConditionalCheckFailedException',
+    });
+  });
+
+  it('increment rebuilds stale index and ttl attributes, each guarded by the fields it comes from', async () => {
+    // A document written before the index and TTL existed keeps its own plan and
+    // expiry, so the attributes guessed from `create` don't match it.
+    replies.push(
+      stored({ strokes: 4, plan: 'free', expiresAt: 300, gsi1pk: 'usage#byPlan#pro', gsi1sk: 'c1' }),
+    );
+    const out = await usage().increment(key, { strokes: 1 }, { plan: 'pro', expiresAt: 900 });
+    expect(out).toEqual({ ...key, strokes: 4, plan: 'free', expiresAt: 300 });
+    expect(sent.map((c) => c.input)).toEqual([
+      expect.anything(),
+      {
+        TableName: 'app--test',
+        Key: { pk: 'usage#c1', sk: '5' },
+        UpdateExpression: 'SET #f0 = :v0, #f1 = :v1',
+        ConditionExpression: 'attribute_exists(#pk) AND #c0 = :c0',
+        ExpressionAttributeNames: { '#f0': 'gsi1pk', '#f1': 'gsi1sk', '#pk': 'pk', '#c0': 'plan' },
+        ExpressionAttributeValues: { ':v0': 'usage#byPlan#free', ':v1': 'c1', ':c0': 'free' },
+      },
+      {
+        TableName: 'app--test',
+        Key: { pk: 'usage#c1', sk: '5' },
+        UpdateExpression: 'SET #f0 = :v0',
+        ConditionExpression: 'attribute_exists(#pk) AND #c0 = :c0',
+        ExpressionAttributeNames: { '#f0': '_ttl', '#pk': 'pk', '#c0': 'expiresAt' },
+        ExpressionAttributeValues: { ':v0': 300, ':c0': 300 },
+      },
+    ]);
+  });
+
+  it('a rebuild that loses to a later write, or to a delete, is dropped and the increment keeps its totals', async () => {
+    replies.push(stored({ strokes: 4, plan: 'free', gsi1pk: 'usage#byPlan#pro', gsi1sk: 'c1' }));
+    // Meanwhile another write moved the plan on (and wrote its index), or deleted the item.
+    replies.push(conditionFailed());
+    const out = await usage().increment(key, { strokes: 1 }, { plan: 'pro' });
+    expect(out).toEqual({ ...key, strokes: 4, plan: 'free' });
+    expect(sent.map((c) => c.name)).toEqual(['UpdateCommand', 'UpdateCommand']);
+  });
+
+  it('increment refuses key, index and ttl counters, bad amounts and key changes before writing', async () => {
+    const refused: Array<[Record<string, number>, Record<string, unknown> | undefined, RegExp]> = [
+      [{ minute: 1 }, {}, /cannot increment "minute": it is part of the key/],
+      [{ plan: 1 }, {}, /cannot increment "plan": index "byPlan" is built from it/],
+      [{ expiresAt: 60 }, {}, /cannot increment "expiresAt": it is the ttl field/],
+      [{ strokes: Number.NaN }, {}, /increment "strokes" by a finite number/],
+      [{ strokes: 1 }, { strokes: 0 }, /"strokes" is incremented, so leave it out of `create`/],
+      [{ strokes: 1 }, { clientId: 'c2' }, /cannot change key attribute "clientId"/],
+    ];
+    for (const [amounts, create, message] of refused)
+      await expect(usage().increment(key, amounts, create)).rejects.toThrow(message);
+    expect(sent).toEqual([]);
+  });
+
+  it('update with `if` checks the values in the same write and reports which check failed', async () => {
+    replies.push(stored({ strokes: 2, plan: 'pro' }));
+    await usage().update(key, { strokes: 2 }, { if: { strokes: 1, plan: undefined } });
+    expect(sent[0]!.input).toMatchObject({
+      UpdateExpression: 'SET #f0 = :v0',
+      ConditionExpression:
+        'attribute_exists(#pk) AND #i0 = :i0 AND (attribute_not_exists(#i1) OR attribute_type(#i1, :i1))',
+      ExpressionAttributeNames: { '#f0': 'strokes', '#pk': 'pk', '#i0': 'strokes', '#i1': 'plan' },
+      ExpressionAttributeValues: { ':v0': 2, ':i0': 1, ':i1': 'NULL' },
+      ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
+    });
+    replies.push(conditionFailed({ pk: { S: 'usage#c1' } }));
+    await expect(usage().update(key, { strokes: 3 }, { if: { strokes: 1 } })).rejects.toHaveProperty('Item');
+
+    // Without `if`, a missing item is the only way to fail: nothing extra comes back.
+    replies.push(stored({ strokes: 2 }));
+    await usage().update(key, { strokes: 2 });
+    expect(sent[2]!.input).not.toHaveProperty('ReturnValuesOnConditionCheckFailure');
+    expect(sent[2]!.input.ConditionExpression).toBe('attribute_exists(#pk)');
   });
 });

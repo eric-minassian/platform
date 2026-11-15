@@ -25,7 +25,7 @@ import {
   resetPlatform,
   useTestBindings,
 } from '../src/testing.ts';
-import { batchContract, dbContract, transactContract } from './effect-db-contract.ts';
+import { batchContract, countersContract, dbContract, transactContract } from './effect-db-contract.ts';
 
 let telemetry: ReturnType<typeof captureTelemetry>;
 beforeEach(() => {
@@ -88,6 +88,9 @@ describe('Db in memory', () => {
       /writes from this database/,
     );
   });
+
+  it('increments and updates conditionally like DynamoDB', () =>
+    Effect.runPromise(countersContract('mem').pipe(Effect.provide(Db.layerMemory()))));
 });
 
 describe('toFetchHandler', () => {
