@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { newContext, runWithContext } from '../src/context.ts';
-import { createKeyMapper, db, decodeCursor, encodeCursor, setExpression, stripInternal } from '../src/db.ts';
+import { InvalidCursorError } from '../src/cursor.ts';
+import { createKeyMapper, db, setExpression, stripInternal } from '../src/db.ts';
 import { captureTelemetry, mockClient, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 interface Todo extends Record<string, unknown> {
@@ -62,9 +63,8 @@ describe('key mapping', () => {
     ).toThrow(/slot 1/);
   });
 
-  it('builds queries with sort conditions, index, cursor and order', () => {
-    const cursor = encodeCursor({ pk: 'todos#u1', sk: 't5' });
-    const q = m.queryInput({ userId: 'u1' }, { beginsWith: 't', limit: 5, cursor, reverse: true }, 'tbl');
+  it('builds queries with sort conditions, index and order', () => {
+    const q = m.queryInput({ userId: 'u1' }, { beginsWith: 't', limit: 5, reverse: true }, 'tbl');
     expect(q).toEqual({
       TableName: 'tbl',
       KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :b)',
@@ -72,7 +72,6 @@ describe('key mapping', () => {
       ExpressionAttributeValues: { ':pk': 'todos#u1', ':b': 't' },
       ScanIndexForward: false,
       Limit: 5,
-      ExclusiveStartKey: { pk: 'todos#u1', sk: 't5' },
     });
     const ix = m.queryInput(
       { userId: 'u1', status: 'open' },
@@ -90,12 +89,10 @@ describe('key mapping', () => {
     expect(() => m.queryInput({ userId: 'u1' }, { index: 'nope' }, 't')).toThrow(/no index/);
   });
 
-  it('strips internal attributes and round-trips cursors', () => {
+  it('strips internal attributes', () => {
     expect(stripInternal({ pk: 'a', sk: 'b', gsi1pk: 'c', _c: 'x', _ttl: 1, title: 't' })).toEqual({
       title: 't',
     });
-    expect(decodeCursor(encodeCursor({ a: 1 }))).toEqual({ a: 1 });
-    expect(() => decodeCursor('%%%')).toThrow(/cursor/);
   });
 
   it('builds SET/REMOVE update expressions', () => {
@@ -156,7 +153,7 @@ describe('collection operations', () => {
       await todos().delete({ userId: 'u1', id: 't2' });
       const page = await todos().query({ userId: 'u1' });
       expect(page.items).toEqual([{ userId: 'u1', id: 't1', title: 'hi' }]);
-      expect(decodeCursor(page.cursor)).toEqual({ pk: 'p', sk: 's' });
+      expect(page.cursor).toEqual(expect.any(String));
 
       expect(sent.map((s) => s.name)).toEqual(['GetCommand', 'PutCommand', 'DeleteCommand', 'QueryCommand']);
       expect(sent[0]!.input).toEqual({ TableName: 'app--test', Key: { pk: 'todos#u1', sk: 't1' } });
@@ -193,5 +190,135 @@ describe('collection operations', () => {
   it('explains a missing database binding', async () => {
     useTestBindings({});
     await expect(todos().get({ userId: 'u1', id: 't1' })).rejects.toThrow(/`db: true` to plat\.config\.ts/);
+  });
+});
+
+describe('query cursors', () => {
+  const queries: Array<Record<string, unknown>> = [];
+  let pages: Array<{ Items: Record<string, unknown>[]; LastEvaluatedKey?: Record<string, unknown> }>;
+
+  const row = (id: string, status?: string) => ({
+    pk: 'todos#u1',
+    sk: id,
+    _c: 'todos',
+    userId: 'u1',
+    id,
+    title: id,
+    ...(status ? { status, gsi2pk: `todos#byStatus#u1#${status}`, gsi2sk: '2026' } : {}),
+  });
+
+  beforeEach(() => {
+    useTestBindings({ table: 'app--test' });
+    queries.length = 0;
+    pages = [];
+    mockClient('ddb', (cmd) => {
+      queries.push(cmd.input);
+      return pages.shift() ?? { Items: [] };
+    });
+  });
+  afterEach(() => resetPlatform());
+
+  const todos = () => db.collection<Todo>('todos', opts);
+
+  /** A cursor the SDK issued for `todos.query(partition, q)`, whose start key is `lastKey`. */
+  async function issue(
+    lastKey: Record<string, unknown>,
+    partition: Partial<Todo> = { userId: 'u1' },
+    q = {},
+  ) {
+    pages.push({ Items: [], LastEvaluatedKey: lastKey });
+    const { cursor } = await todos().query(partition, q);
+    queries.length = 0;
+    return cursor!;
+  }
+
+  it('hides the key layout and resumes from the start key it sealed', async () => {
+    const lastKey = { pk: 'todos#u1', sk: 't5' };
+    const cursor = await issue(lastKey, { userId: 'u1' }, { beginsWith: 't', limit: 2 });
+    expect(cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(Buffer.from(cursor, 'base64url').toString('latin1')).not.toMatch(/todos#u1|"pk"|"sk"/);
+    expect(await issue(lastKey)).not.toBe(await issue(lastKey));
+
+    // Limit and order may change between pages; the key condition may not.
+    await todos().query({ userId: 'u1' }, { beginsWith: 't', limit: 10, reverse: true, cursor });
+    expect(queries[0]).toMatchObject({ ExclusiveStartKey: lastKey, Limit: 10, ScanIndexForward: false });
+  });
+
+  it('works on indexes and treats an empty cursor as the first page', async () => {
+    const lastKey = { gsi2pk: 'todos#byStatus#u1#open', gsi2sk: '2026', pk: 'todos#u1', sk: 't1' };
+    const partition = { userId: 'u1', status: 'open' };
+    const cursor = await issue(lastKey, partition, { index: 'byStatus' });
+    await todos().query(partition, { index: 'byStatus', cursor });
+    expect(queries[0]).toMatchObject({ IndexName: 'gsi2', ExclusiveStartKey: lastKey });
+
+    await todos().query({ userId: 'u1' }, { cursor: '' });
+    expect(queries[1]).not.toHaveProperty('ExclusiveStartKey');
+  });
+
+  it('rejects edited, made-up and raw-key cursors without calling DynamoDB', async () => {
+    const cursor = await issue({ pk: 'todos#u1', sk: 't5' });
+    const edited = cursor.slice(0, 20) + (cursor[20] === 'A' ? 'B' : 'A') + cursor.slice(21);
+    const rawKey = Buffer.from(JSON.stringify({ pk: 'todos#u1', sk: 't5' })).toString('base64url');
+    for (const bad of [edited, cursor.slice(0, -4), rawKey, '%%%', 'abc', 42]) {
+      await expect(todos().query({ userId: 'u1' }, { cursor: bad as string })).rejects.toBeInstanceOf(
+        InvalidCursorError,
+      );
+    }
+    expect(queries).toEqual([]);
+  });
+
+  it('rejects cursors issued for another query or stage', async () => {
+    const cursor = await issue({ pk: 'todos#u1', sk: 't5' }, { userId: 'u1' }, { gt: 't1' });
+    const reject = (p: Promise<unknown>) =>
+      expect(p).rejects.toMatchObject({ status: 400, code: 'invalid_cursor' });
+
+    await reject(todos().query({ userId: 'u2' }, { gt: 't1', cursor })); // another partition
+    await reject(todos().query({ userId: 'u1' }, { gt: 't9', cursor })); // another sort condition
+    await reject(todos().query({ userId: 'u1' }, { cursor })); // no sort condition
+    await reject(todos().query({ userId: 'u1', status: 'open' }, { index: 'byStatus', gt: 't1', cursor }));
+    await reject(db.collection<Todo>('notes', opts).query({ userId: 'u1' }, { gt: 't1', cursor }));
+    useTestBindings({ table: 'app--test', stageKey: Buffer.alloc(32, 7).toString('base64url') });
+    await reject(todos().query({ userId: 'u1' }, { gt: 't1', cursor }));
+    expect(queries).toEqual([]);
+  });
+
+  it('omits the cursor on the last page and explains a stage without a key', async () => {
+    pages.push({ Items: [row('t1')] });
+    expect(await todos().query({ userId: 'u1' })).toEqual({
+      items: [{ userId: 'u1', id: 't1', title: 't1' }],
+    });
+
+    useTestBindings({ table: 'app--test', stageKey: undefined });
+    pages.push({ Items: [row('t1')], LastEvaluatedKey: { pk: 'todos#u1', sk: 't1' } });
+    await expect(todos().query({ userId: 'u1' })).rejects.toThrow(/no stage key.*Redeploy/);
+  });
+
+  it('queryAll follows every page, including short and empty ones', async () => {
+    pages.push(
+      { Items: [row('t1'), row('t2')], LastEvaluatedKey: { pk: 'todos#u1', sk: 't2' } },
+      { Items: [row('t3')], LastEvaluatedKey: { pk: 'todos#u1', sk: 't3' } },
+      { Items: [], LastEvaluatedKey: { pk: 'todos#u1', sk: 't3' } },
+      { Items: [row('t4', 'open')] },
+    );
+    const tel = captureTelemetry();
+    const items = await runWithContext(newContext(), () =>
+      todos().queryAll({ userId: 'u1' }, { reverse: true }),
+    );
+    tel.stop();
+    expect(items.map((t) => t.id)).toEqual(['t1', 't2', 't3', 't4']);
+    expect(items[3]).toEqual({ userId: 'u1', id: 't4', title: 't4', status: 'open' });
+    expect(queries.map((q) => q.ExclusiveStartKey)).toEqual([
+      undefined,
+      { pk: 'todos#u1', sk: 't2' },
+      { pk: 'todos#u1', sk: 't3' },
+      { pk: 'todos#u1', sk: 't3' },
+    ]);
+    expect(queries.every((q) => q.ScanIndexForward === false && !('Limit' in q))).toBe(true);
+    expect(tel.events.filter((e) => e.t === 'span').map((e) => (e as { op: string }).op)).toEqual([
+      'db.query',
+      'db.query',
+      'db.query',
+      'db.query',
+    ]);
   });
 });

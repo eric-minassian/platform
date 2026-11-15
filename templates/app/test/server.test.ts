@@ -44,11 +44,10 @@ vi.mock('@ericminassian/platform', () => {
             return next;
           },
           delete: async (key: Record<string, unknown>) => void store.delete(k(key)),
-          query: async (part: Record<string, unknown>) => ({
-            items: [...store.entries()]
+          queryAll: async (part: Record<string, unknown>) =>
+            [...store.entries()]
               .filter(([key]) => key.startsWith(`${name}#${part.userId}#`))
               .map(([, v]) => v),
-          }),
         };
       },
     },

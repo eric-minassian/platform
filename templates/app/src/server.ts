@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { Todo } from './types.ts';
 
 // One collection per entity. Partition by user so each user's todos are one query.
-// Sort keys are time-ordered ids, so `query` returns oldest first.
+// Sort keys are time-ordered ids, so queries return oldest first.
 const todos = db.collection<Todo>('todos', { partition: 'userId', sort: 'id' });
 
 const NewTodo = z.object({ title: z.string().trim().min(1).max(200) });
@@ -34,8 +34,7 @@ const api = new Hono()
 
   .get('/todos', async (c) => {
     const user = await auth.requireUser(c.req.raw);
-    const page = await todos.query({ userId: user.id });
-    return c.json({ todos: page.items });
+    return c.json({ todos: await todos.queryAll({ userId: user.id }) });
   })
 
   .post('/todos', json(NewTodo), async (c) => {

@@ -27,6 +27,12 @@ export interface Bindings {
   auth?: AuthBindings;
   /** Worker function name, for direct `invoke` jobs. */
   worker?: string;
+  /**
+   * The stage's secret (32 random bytes, base64url), kept in SSM at
+   * `names.stageKeyParameter`. The SDK derives a key per purpose from it, e.g.
+   * to seal `db` query cursors. Absent on stages deployed before it existed.
+   */
+  stageKey?: string;
 }
 
 export interface AuthBindings {

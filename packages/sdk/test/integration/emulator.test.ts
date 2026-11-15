@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   CognitoIdentityProviderClient,
   CreateUserPoolClientCommand,
@@ -28,7 +29,7 @@ import { BINDINGS_ENV, type Bindings, encodeBindings } from '@ericminassian/plat
 import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setBindings } from '../../src/bindings.ts';
-import { auth, db, events, queue, secrets, storage } from '../../src/index.ts';
+import { auth, db, events, InvalidCursorError, queue, secrets, storage } from '../../src/index.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
 
 const region = process.env.AWS_REGION ?? 'us-east-1';
@@ -189,6 +190,7 @@ beforeAll(async () => {
       loginUrl: 'http://unused.localhost',
       required: false,
     },
+    stageKey: randomBytes(32).toString('base64url'),
   };
   process.env[BINDINGS_ENV] = encodeBindings(bindings);
   process.env.PLATFORM_LOCAL = '1';
@@ -233,6 +235,14 @@ describe('against the AWS Emulator', () => {
     expect(page1.items.map((n) => n.noteId)).toEqual(['n3', 'n2']);
     const page2 = await notes().query({ ownerId: 'u1' }, { limit: 2, reverse: true, cursor: page1.cursor });
     expect(page2.items.map((n) => n.noteId)).toEqual(['n1']);
+    await expect(notes().query({ ownerId: 'u2' }, { cursor: page1.cursor })).rejects.toBeInstanceOf(
+      InvalidCursorError,
+    );
+    const rawKey = Buffer.from(JSON.stringify({ pk: 'notes#u2', sk: 'n1' })).toString('base64url');
+    await expect(notes().query({ ownerId: 'u1' }, { cursor: rawKey })).rejects.toBeInstanceOf(
+      InvalidCursorError,
+    );
+    expect((await notes().queryAll({ ownerId: 'u1' })).map((n) => n.noteId)).toEqual(['n1', 'n2', 'n3']);
 
     const work = await notes().query({ tag: 'work' }, { index: 'byTag', gte: '2026-01-02' });
     expect(work.items.map((n) => n.noteId)).toEqual(['n3']);

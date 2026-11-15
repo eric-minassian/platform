@@ -134,7 +134,10 @@ declare module '@ericminassian/platform' {
 
 The engine passes resource names to the runtime in one environment variable,
 `PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): table, queue URLs,
-bus, storage prefix, secrets paths, auth settings, worker name, public URL.
+bus, storage prefix, secrets paths, auth settings, worker name, public URL, and
+the stage key. The stage key is a random secret the engine creates once per stage
+in SSM. The SDK seals `db` query cursors with it, so cursors are opaque and
+can't be forged.
 
 ## Naming: names are the state
 
@@ -155,6 +158,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Role         | `/platform/apps/todo--prod`                                        |
 | Logs         | `/platform/apps/todo/prod/{web,worker}`                            |
 | Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                  |
+| Stage key    | `/platform/apps/todo/prod/stage-key`                               |
 | Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`    |
 | Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`         |
 

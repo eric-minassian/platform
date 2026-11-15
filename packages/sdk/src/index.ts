@@ -11,6 +11,7 @@ export type { PlatformUser } from '@ericminassian/platform-core';
 export { type AppInfo, app } from './app.ts';
 export { type Auth, auth } from './auth/index.ts';
 export { setRoute } from './context.ts';
+export { InvalidCursorError } from './cursor.ts';
 export {
   type Collection,
   type CollectionOptions,

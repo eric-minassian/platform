@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { DescribeEventBusCommand } from '@aws-sdk/client-eventbridge';
 import { GetRoleCommand } from '@aws-sdk/client-iam';
 import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
@@ -46,7 +47,7 @@ import {
   listSchedules,
 } from './drivers/scheduler.ts';
 import { deleteQueue, ensureQueue, listQueues } from './drivers/sqs.ts';
-import { deleteParametersByPath } from './drivers/ssm.ts';
+import { deleteParameter, deleteParametersByPath, ensureParameterOnce } from './drivers/ssm.ts';
 import {
   createRevision,
   deleteWebFunction,
@@ -213,7 +214,18 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await deleteUserPoolClient(ctx, platform.userPoolId, names.userPoolClient(app, stage));
   }
 
-  // 7. Bindings.
+  // 7. Stage key. Created once and kept for the stage's life, so db cursors
+  // survive redeploys. It goes in the bindings instead of being read from SSM
+  // at runtime (no extra call or IAM grant) because it only guards SDK-issued
+  // tokens: a leaked key lets someone read or forge cursors, not read data.
+  const stageKey = await ensureParameterOnce(ctx, {
+    name: names.stageKeyParameter(app, stage),
+    secure: true,
+    description: `Stage key for ${app}/${stage} (SDK-sealed tokens such as db cursors)`,
+    generate: () => randomBytes(32).toString('base64url'),
+  });
+
+  // 8. Bindings.
   const bindings: Bindings = {
     v: 1,
     app,
@@ -241,6 +253,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     },
     ...(auth ? { auth } : {}),
     ...(hasWorker ? { worker: workerName } : {}),
+    stageKey,
   };
   const env = {
     [BINDINGS_ENV]: encodeBindings(bindings),
@@ -249,7 +262,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     ...input.extraEnv,
   };
 
-  // 8. Worker + its triggers.
+  // 9. Worker + its triggers.
   let workerFunction: DeployStageResult['workerFunction'];
   if (hasWorker && m.worker && input.artifacts.worker) {
     const fn = await ensureFunction(ctx, {
@@ -284,7 +297,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await removeWorker(ctx, app, stage);
   }
 
-  // 9. Static files (new prefix per deployment; the old one keeps serving until the route flips).
+  // 10. Static files (new prefix per deployment; the old one keeps serving until the route flips).
   let staticPrefix: string | undefined;
   if (input.artifacts.static) {
     staticPrefix = names.sitePrefix(app, stage, deploymentId);
@@ -296,7 +309,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     resources.push({ type: 'static', name: staticPrefix });
   }
 
-  // 10. Web Function revision → endpoint.
+  // 11. Web Function revision → endpoint.
   let webFunction: DeployStageResult['webFunction'];
   if (hasWeb && m.web && input.artifacts.server) {
     const fnName = names.webFunction(app, stage);
@@ -339,7 +352,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await deleteWebFunction(ctx, names.webFunction(app, stage));
   }
 
-  // 11. Route flip — the only step that changes what users see.
+  // 12. Route flip — the only step that changes what users see.
   let route: RouteRecord | undefined;
   if (webMode === 'function' && (webFunction || staticPrefix)) {
     route = {
@@ -360,7 +373,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     }
   }
 
-  // 12. Garbage-collect old static deployments.
+  // 13. Garbage-collect old static deployments.
   if (staticPrefix) {
     const prefixes = (await listChildPrefixes(ctx, platform.sitesBucket, `${app}/${stage}/`))
       .sort()
@@ -371,7 +384,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     }
   }
 
-  // 13. Queues removed from the manifest.
+  // 14. Queues removed from the manifest.
   const wantedQueues = new Set(
     Object.keys(m.queues).flatMap((k) => [names.queue(app, stage, k), names.deadLetterQueue(app, stage, k)]),
   );
@@ -515,6 +528,7 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   if (platform.userPoolId)
     await deleteUserPoolClient(ctx, platform.userPoolId, names.userPoolClient(app, stage));
   await deleteRole(ctx, names.role(app, stage));
+  await deleteParameter(ctx, names.stageKeyParameter(app, stage));
   for (const g of await listLogGroups(ctx, names.logGroupPrefix(app, stage))) await deleteLogGroup(ctx, g);
   await deletePrefix(ctx, platform.sitesBucket, `${app}/${stage}/`);
   await deletePrefix(ctx, platform.artifactsBucket, `${app}/${stage}/`);

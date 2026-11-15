@@ -23,6 +23,7 @@ import {
 import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
 import { currentContext, newContext, parseTraceparent, runWithContext } from './context.ts';
+import { InvalidCursorError } from './cursor.ts';
 import { createNodeServer, parseEndpoint } from './http.ts';
 import { emit, emitError, installConsoleCapture, installFetchInstrumentation, toError } from './telemetry.ts';
 
@@ -66,7 +67,8 @@ export function createPlatformFetch(handler: FetchHandlerLike): (request: Reques
           response = (await authGate(request)) ?? (await appFetch(request));
         }
       } catch (e) {
-        if (e instanceof Response) response = e;
+        const handled = e instanceof Response ? e : clientErrorResponse(e);
+        if (handled) response = handled;
         else {
           emitError(e, 'http', { route: ctx.route ?? matchRoute(request.method, url.pathname) });
           errorEmitted = true;
@@ -141,6 +143,15 @@ async function platformRoute(request: Request): Promise<Response> {
   return Response.json({ error: { code: 'not_found', message: 'Not found' } }, { status: 404 });
 }
 
+/**
+ * SDK errors caused by the caller's input (a bad query cursor) answer 4xx and
+ * record no error group: they aren't the app's bug.
+ */
+function clientErrorResponse(e: unknown): Response | undefined {
+  if (!(e instanceof InvalidCursorError)) return undefined;
+  return Response.json({ error: { code: e.code, message: e.message } }, { status: e.status });
+}
+
 function finalize(response: Response, trace: string, cookies: string[]): Response {
   const headers = new Headers(response.headers);
   headers.set(TRACE_HEADER, trace);
@@ -162,7 +173,9 @@ type ErrorHandler = (err: unknown, c: unknown) => Response | Promise<Response>;
  * Hono catches handler errors itself (default: plain-text 500). Hook its
  * onError so errors reach telemetry with their real stack, and so apps using
  * the default handler get the platform's JSON 500 with a trace id. A custom
- * onError the app installed keeps control of the response.
+ * onError the app installed keeps control of the response, except for SDK
+ * client errors: those answer 4xx before it runs, since an app's catch-all
+ * handler would usually turn them into a 500. Routes can still catch them.
  */
 function instrumentHonoErrors(handler: FetchHandlerLike): void {
   const h = handler as {
@@ -180,6 +193,8 @@ function instrumentHonoErrors(handler: FetchHandlerLike): void {
     if (err && typeof (err as { getResponse?: unknown }).getResponse === 'function') {
       return prev ? prev(err, c) : (err as { getResponse(): Response }).getResponse();
     }
+    const clientError = clientErrorResponse(err);
+    if (clientError) return clientError;
     const ctx = currentContext();
     if (ctx) ctx.error = err;
     if (prev && !prevIsDefault) return prev(err, c);
