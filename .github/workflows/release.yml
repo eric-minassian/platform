@@ -1,7 +1,8 @@
 # Publishes the public packages whose version isn't on npm yet, with trusted
 # publishing (OIDC, no NPM_TOKEN) and provenance. Re-running without a version
-# bump checks the trusted publisher setup and publishes nothing. One-time: add
-# this workflow as a trusted publisher for each package (docs/SETUP.md step 10).
+# bump checks that each package's trusted publisher matches this workflow and
+# publishes nothing. One-time: add this workflow as a trusted publisher that
+# allows `npm publish` for each package (docs/SETUP.md step 10).
 name: release
 
 on:
