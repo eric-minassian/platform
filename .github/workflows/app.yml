@@ -93,6 +93,7 @@ jobs:
       cancel-in-progress: true
     outputs:
       url: ${{ steps.deploy.outputs.url }}
+      deployment: ${{ steps.deploy.outputs.deployment }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -135,6 +136,7 @@ jobs:
       url: ${{ steps.deploy.outputs.url }}
     outputs:
       url: ${{ steps.deploy.outputs.url }}
+      deployment: ${{ steps.deploy.outputs.deployment }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -197,6 +199,22 @@ jobs:
         with:
           path: ~/.cache/ms-playwright
           key: ${{ steps.chromium.outputs.cache-primary-key }}
+      # `plat deploy` returned once its own runner was served the deployment;
+      # this runner can reach a different CloudFront edge, which may lag.
+      - name: Wait until this runner is served the deployment
+        env:
+          BASE_URL: ${{ needs.deploy-preview.outputs.url || needs.deploy-production.outputs.url }}
+          DEPLOYMENT: ${{ needs.deploy-preview.outputs.deployment || needs.deploy-production.outputs.deployment }}
+        run: |
+          deadline=$((SECONDS + 180))
+          until curl -fsS --max-time 10 "$BASE_URL/__platform/health" | jq -e --arg d "$DEPLOYMENT" '.revision == $d' > /dev/null; do
+            if (( SECONDS >= deadline )); then
+              echo "::error::$BASE_URL did not serve $DEPLOYMENT to this runner within 180s"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "served $DEPLOYMENT after ${SECONDS}s"
       - name: Browser tests
         env:
           BASE_URL: ${{ needs.deploy-preview.outputs.url || needs.deploy-production.outputs.url }}
