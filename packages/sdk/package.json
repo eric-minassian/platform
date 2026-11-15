@@ -65,9 +65,12 @@
     "@aws-sdk/client-s3": "^3.1169.0",
     "@aws-sdk/client-sqs": "^3.1169.0",
     "@aws-sdk/client-ssm": "^3.1169.0",
+    "@aws-sdk/credential-provider-node": "^3.972.97",
     "@aws-sdk/lib-dynamodb": "^3.1169.0",
     "@aws-sdk/s3-request-presigner": "^3.1169.0",
     "@ericminassian/platform-core": "workspace:*",
+    "@smithy/hash-node": "^4.5.2",
+    "@smithy/signature-v4": "^5.7.5",
     "jose": "^6.2.17"
   },
   "peerDependencies": {

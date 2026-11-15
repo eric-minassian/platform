@@ -112,6 +112,8 @@ export const names = {
   scheduleGroup: (app: string, stage: string) => `${app}--${stage}`,
   schedule: (cronKey: string) => cronKey,
   userPoolClient: (app: string, stage: string) => `${app}--${stage}`,
+  /** AppSync Events channel namespace; names are ≤ 50 chars, so long ones are hashed. */
+  realtimeNamespace: (app: string, stage: string) => fit(`${app}--${stage}`, 50),
   /**
    * A stage's log groups. Lambda also writes a Web Function's environments to
    * `<web group>.local`, so the engine creates that one too.
@@ -147,6 +149,12 @@ export const platformNames = {
   routerFunction: 'platform-router',
   userPool: 'platform-users',
   boundaryPolicy: 'platform-app-boundary',
+  /** The AppSync Event API every stage's channel namespace lives in. */
+  realtimeApi: 'platform-realtime',
+  /** Its Lambda authorizer (signed-in subscribe tokens). */
+  realtimeAuthorizer: 'platform-realtime-authorizer',
+  /** Description of the API's subscribe-only key for `public` stages (how the control plane finds it). */
+  realtimePublicKey: 'platform-public-subscribe',
   controlPlaneRole: 'platform-control-plane',
   ciRole: 'platform-ci',
   alertsTopic: 'platform-alerts',

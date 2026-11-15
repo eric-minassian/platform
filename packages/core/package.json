@@ -14,6 +14,7 @@
     "./auth": "./src/auth.ts",
     "./cloudfront-function": "./src/cloudfront-function.ts",
     "./platform-api": "./src/platform-api.ts",
+    "./realtime": "./src/realtime.ts",
     "./router/decide.js": "./src/router/decide.js"
   },
   "publishConfig": {
@@ -34,6 +35,10 @@
       "./platform-api": {
         "types": "./dist/platform-api.d.ts",
         "default": "./dist/platform-api.js"
+      },
+      "./realtime": {
+        "types": "./dist/realtime.d.ts",
+        "default": "./dist/realtime.js"
       },
       "./router/decide.js": "./dist/router/decide.js"
     }

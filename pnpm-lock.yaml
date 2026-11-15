@@ -212,6 +212,9 @@ importers:
       aws-cdk:
         specifier: ^2.1148.1
         version: 2.1148.1
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
 
   packages/cli:
     dependencies:
@@ -272,6 +275,9 @@ importers:
 
   packages/engine:
     dependencies:
+      '@aws-sdk/client-appsync':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-cloudfront-keyvaluestore':
         specifier: ^3.1169.0
         version: 3.1169.0
@@ -350,6 +356,9 @@ importers:
       '@aws-sdk/client-ssm':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/credential-provider-node':
+        specifier: ^3.972.97
+        version: 3.972.97
       '@aws-sdk/lib-dynamodb':
         specifier: ^3.1169.0
         version: 3.1169.0(@aws-sdk/client-dynamodb@3.1169.0)
@@ -359,6 +368,12 @@ importers:
       '@ericminassian/platform-core':
         specifier: workspace:*
         version: link:../core
+      '@smithy/hash-node':
+        specifier: ^4.5.2
+        version: 4.5.2
+      '@smithy/signature-v4':
+        specifier: ^5.7.5
+        version: 5.7.5
       jose:
         specifier: ^6.2.17
         version: 6.2.17
@@ -566,6 +581,10 @@ packages:
 
   '@aws-sdk/checksums@3.1002.5':
     resolution: {integrity: sha512-OHlfkNzDFjYnwNPABhwAkDTUi0HPjfsKUHJDR0bSMORpCXNzRpInPCNCIT08xKDhjaPlcLJ+2Av+Sk7hHnuC8A==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-appsync@3.1169.0':
+    resolution: {integrity: sha512-s/ymvZxqZr80Hk2my/6ontn3ByLKXwjGPmBADpI2uAHBdH1Pqw1NYAzEq4KdRFTeDwtoU0PLEjNgM+oylWRHpA==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-cloudformation@3.1169.0':
@@ -1196,6 +1215,10 @@ packages:
 
   '@smithy/fetch-http-handler@5.8.1':
     resolution: {integrity: sha512-h8BdMUrUBhMhMaeK7QqAdINRZezCGuYOCpcOZZ1ewxbHST9rdTd09xwNpvLTYfzDRehxQiReK4SKbdYZxBA+ew==}
+    engines: {node: '>=18.0.0'}
+
+  '@smithy/hash-node@4.5.2':
+    resolution: {integrity: sha512-OcD8fGClTkP0BWHVEAgUp1RZyCw8cKfqTPQ+DgrSF5jvR8zKkw2Aud79L4G/1Fu3QKLcsHExxRIPQCcKx7+xkg==}
     engines: {node: '>=18.0.0'}
 
   '@smithy/middleware-compression@4.6.2':
@@ -2034,6 +2057,17 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
+  '@aws-sdk/client-appsync@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
   '@aws-sdk/client-cloudformation@3.1169.0':
     dependencies:
       '@aws-sdk/core': 3.981.0
@@ -2749,6 +2783,11 @@ snapshots:
     dependencies:
       '@smithy/core': 3.40.0
       '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@smithy/hash-node@4.5.2':
+    dependencies:
+      '@smithy/core': 3.40.0
       tslib: 2.9.1
 
   '@smithy/middleware-compression@4.6.2':

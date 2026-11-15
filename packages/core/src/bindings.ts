@@ -25,6 +25,7 @@ export interface Bindings {
   storage?: { bucket: string; prefix: string; stores: readonly string[] };
   secrets: { path: string; sharedPath: string; names: readonly string[] };
   auth?: AuthBindings;
+  realtime?: RealtimeBindings;
   /** Worker function name, for direct `invoke` jobs. */
   worker?: string;
   /**
@@ -47,6 +48,16 @@ export interface AuthBindings {
   /** Hosted login origin, e.g. `https://login.platform.ericminassian.com`. */
   loginUrl: string;
   required: boolean;
+}
+
+export interface RealtimeBindings {
+  /** The stage's channel namespace. */
+  namespace: string;
+  /** AppSync's HTTP publish endpoint (`https://<domain>/event`; `http://127.0.0.1:<port>/event` locally). */
+  publishUrl: string;
+  subscribe: 'public' | 'signed-in';
+  /** Declared channel patterns (`board`, `boards/*`): the SDK publishes only to these. */
+  channels: readonly string[];
 }
 
 export function encodeBindings(b: Bindings): string {

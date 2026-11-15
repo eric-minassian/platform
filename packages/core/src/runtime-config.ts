@@ -1,3 +1,5 @@
+import { APPSYNC_PUBLISH_PATH, APPSYNC_REALTIME_PATH } from './realtime.ts';
+
 /**
  * What the foundation produced: shared resources every stage deploy needs.
  * Stored as JSON in SSM at `platformNames.runtimeConfigParameter` by the
@@ -36,6 +38,31 @@ export interface PlatformRuntimeConfig {
   alertsTopicArn?: string;
   /** Telemetry processor (account-level log subscription target). */
   telemetryFunctionArn?: string;
+  /** The AppSync Event API stages' channel namespaces live in (absent on platforms that predate it). */
+  realtime?: RealtimeRuntimeConfig;
+}
+
+export interface RealtimeRuntimeConfig {
+  apiId: string;
+  /** HTTP domain (`<id>.appsync-api.<region>.amazonaws.com`; `127.0.0.1:<port>` in the emulator). */
+  httpDomain: string;
+  /** Realtime (WebSocket) domain. */
+  realtimeDomain: string;
+}
+
+/**
+ * Where to publish and connect. AWS serves TLS; the emulator serves plain
+ * HTTP and WebSocket on local ports.
+ */
+export function realtimeEndpoints(
+  cfg: Pick<PlatformRuntimeConfig, 'target'>,
+  rt: RealtimeRuntimeConfig,
+): { publishUrl: string; websocketUrl: string } {
+  const tls = cfg.target === 'aws';
+  return {
+    publishUrl: `${tls ? 'https' : 'http'}://${rt.httpDomain}${APPSYNC_PUBLISH_PATH}`,
+    websocketUrl: `${tls ? 'wss' : 'ws'}://${rt.realtimeDomain}${APPSYNC_REALTIME_PATH}`,
+  };
 }
 
 export function cognitoIssuer(region: string, userPoolId: string): string {
