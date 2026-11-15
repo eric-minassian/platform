@@ -2,6 +2,7 @@ import { ResourceNotFoundException } from '@aws-sdk/client-dynamodb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { aws } from '../src/aws.ts';
 import { listCollections, listItems } from '../src/data.ts';
+import { ApiError } from '../src/errors.ts';
 
 function stubDdb(send: (cmd: { input: Record<string, unknown> }) => Promise<unknown>) {
   const fn = vi.fn(send);
@@ -17,18 +18,25 @@ afterEach(() => {
 });
 
 describe('data browser', () => {
-  it('shows a stage without a table as an empty database', async () => {
+  it('reports a stage without a table as having no database', async () => {
     const send = stubDdb(noTable);
-    expect(await listCollections('todo', 'prod')).toEqual([]);
-    expect(await listItems({ app: 'todo', stage: 'prod', collection: 'todos' })).toEqual({ items: [] });
-    expect(
-      await listItems({ app: 'todo', stage: 'prod', collection: 'todos', partition: 'userId=1' }),
-    ).toEqual({ items: [] });
-    expect(send.mock.calls.map(([cmd]) => cmd.input.TableName)).toEqual([
-      'todo--prod',
-      'todo--prod',
-      'todo--prod',
-    ]);
+    expect(await listCollections('todo', 'prod')).toEqual({ database: false, collections: [] });
+    expect(send.mock.calls[0]?.[0].input.TableName).toBe('todo--prod');
+  });
+
+  it('answers 404 for items on a stage without a table', async () => {
+    stubDdb(noTable);
+    for (const partition of [undefined, 'userId=1']) {
+      const err = await listItems({
+        app: 'todo',
+        stage: 'pr-3',
+        collection: 'todos',
+        ...(partition ? { partition } : {}),
+      }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err).toMatchObject({ status: 404, code: 'not_found' });
+      expect((err as ApiError).message).toContain('todo/pr-3 has no database');
+    }
   });
 
   it('still fails on other errors', async () => {
@@ -43,10 +51,18 @@ describe('data browser', () => {
         ? { Items: [{ _c: 'todos' }, {}], ScannedCount: 2 }
         : { Items: [{ _c: 'users' }, { _c: 'todos' }], ScannedCount: 2, LastEvaluatedKey: { pk: 'x' } },
     );
-    expect(await listCollections('todo', 'prod')).toEqual([
-      { name: '(untyped)', sampled: 1 },
-      { name: 'todos', sampled: 2 },
-      { name: 'users', sampled: 1 },
-    ]);
+    expect(await listCollections('todo', 'prod')).toEqual({
+      database: true,
+      collections: [
+        { name: '(untyped)', sampled: 1 },
+        { name: 'todos', sampled: 2 },
+        { name: 'users', sampled: 1 },
+      ],
+    });
+  });
+
+  it('shows an existing but empty table as an empty database', async () => {
+    stubDdb(async () => ({ Items: [], ScannedCount: 0 }));
+    expect(await listCollections('todo', 'prod')).toEqual({ database: true, collections: [] });
   });
 });

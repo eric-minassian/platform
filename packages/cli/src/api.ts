@@ -13,6 +13,7 @@ import {
   type CreateAppRequest,
   type CreateDeploymentRequest,
   type CreateDeploymentResponse,
+  type DataCollections,
   type DataPage,
   type DeploymentRecord,
   type ErrorGroup,
@@ -273,12 +274,8 @@ export class ApiClient {
   }
 
   // ------------------------------------------------------------- data
-  async collections(app: string, q: { stage: string }): Promise<string[]> {
-    const rows = list<string | { name: string }>(
-      await this.request('GET', `/v1/apps/${enc(app)}/data/collections`, { query: q }),
-      'collections',
-    );
-    return rows.map((r) => (typeof r === 'string' ? r : r.name));
+  collections(app: string, q: { stage: string }) {
+    return this.request<DataCollections>('GET', `/v1/apps/${enc(app)}/data/collections`, { query: q });
   }
   items(
     app: string,

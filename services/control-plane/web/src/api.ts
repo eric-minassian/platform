@@ -3,6 +3,7 @@ import type {
   AppRecord,
   AppSummary,
   CostResponse,
+  DataCollections,
   DataPage,
   DeploymentRecord,
   ErrorGroup,
@@ -132,7 +133,7 @@ export const api = {
   trace: (app: string, stage: string, trace: string) =>
     request<TraceResponse>(`${a(app)}/traces/${trace}${qs({ stage })}`),
   collections: (app: string, stage: string) =>
-    request<Array<{ name: string; sampled: number }>>(`${a(app)}/data/collections${qs({ stage })}`),
+    request<DataCollections>(`${a(app)}/data/collections${qs({ stage })}`),
   items: (app: string, stage: string, collection: string, partition?: string, cursor?: string) =>
     request<DataPage>(`${a(app)}/data/items${qs({ stage, collection, partition, cursor })}`),
   stores: (app: string, stage: string) => request<{ stores: string[] }>(`${a(app)}/storage${qs({ stage })}`),

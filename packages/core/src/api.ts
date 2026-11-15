@@ -240,6 +240,17 @@ export interface SecretInfo {
   updatedAt?: string;
 }
 
+/** `GET /v1/apps/:app/data/collections`. */
+export interface DataCollections {
+  /**
+   * Whether the stage has a table. False when `db` is off in plat.config.ts or
+   * the stage was never deployed; a table kept after turning `db` off counts.
+   */
+  database: boolean;
+  /** Item counts come from a bounded scan sample, so large collections are undercounted. */
+  collections: Array<{ name: string; sampled: number }>;
+}
+
 export interface DataPage {
   items: Record<string, unknown>[];
   cursor?: string;
