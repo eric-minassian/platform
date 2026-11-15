@@ -22,7 +22,8 @@ describe('openIssue', () => {
         return Response.json({ token: 'inst-token' });
       }
       if (url.endsWith('/repos/eric/shop/issues')) {
-        expect((init?.headers as Record<string, string>).authorization).toBe('Bearer inst-token');
+        const sent = (init?.headers ?? {}) as Record<string, string>;
+        expect(sent.authorization).toBe('Bearer inst-token');
         return Response.json({ html_url: 'https://github.com/eric/shop/issues/1' });
       }
       return new Response('unexpected', { status: 500 });
