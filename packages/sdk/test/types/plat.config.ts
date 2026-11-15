@@ -1,10 +1,20 @@
-import { defineApp, event, queue } from '@ericminassian/platform/config';
+import { channel, defineApp, event, queue } from '@ericminassian/platform/config';
 
 export interface EmailJob {
   to: string;
 }
 export interface TodoCreated {
   id: string;
+}
+export interface BoardEvent {
+  stroke: number[];
+}
+export interface Cursor {
+  x: number;
+  y: number;
+}
+export interface Notice {
+  text: string;
 }
 
 const app = defineApp({
@@ -14,6 +24,17 @@ const app = defineApp({
   crons: { cleanup: '0 3 * * *' },
   storage: ['uploads'],
   secrets: ['STRIPE_KEY'],
+  web: { server: 'src/server.ts' },
+  auth: true,
+  realtime: {
+    subscribe: 'signed-in',
+    channels: {
+      board: channel<BoardEvent>(),
+      'boards/*': channel<BoardEvent>(),
+      'boards/cursors/*': channel<Cursor>(),
+      'user/*': channel<Notice>(),
+    },
+  },
 });
 export default app;
 

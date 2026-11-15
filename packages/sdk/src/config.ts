@@ -10,12 +10,15 @@
 
 export {
   type AppConfig,
+  type ChannelConfig,
   type CronConfig,
+  channel,
   defineApp,
   type EventConfig,
   event,
   type QueueConfig,
   queue,
+  type RealtimeConfig,
   type WebConfig,
   type WorkerConfig,
 } from '@ericminassian/platform-core';

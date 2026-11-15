@@ -1,7 +1,7 @@
 {
   "name": "@ericminassian/platform",
   "version": "0.3.0",
-  "description": "Runtime SDK for apps on the platform, built on Effect: db, queues, events, storage, secrets, auth, metrics.",
+  "description": "Runtime SDK for apps on the platform, built on Effect: db, queues, events, storage, secrets, auth, realtime, metrics.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./api": "./src/api.ts",
+    "./client": "./src/client.ts",
     "./config": "./src/config.ts",
     "./server": "./src/runtime/server.ts",
     "./worker": "./src/runtime/worker.ts",
@@ -27,6 +28,10 @@
       "./api": {
         "types": "./dist/api.d.ts",
         "default": "./dist/api.js"
+      },
+      "./client": {
+        "types": "./dist/client.d.ts",
+        "default": "./dist/client.js"
       },
       "./config": {
         "types": "./dist/config.d.ts",

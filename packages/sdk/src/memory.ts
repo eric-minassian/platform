@@ -2,6 +2,7 @@ import { Context, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
 import { Db } from './db.ts';
+import { encodeRealtimeEvents, realtimeChannelError } from './runtime/realtime.ts';
 import { objectKey, type StoredObject } from './runtime/storage.ts';
 import {
   AppInfo,
@@ -11,6 +12,7 @@ import {
   Jobs,
   Metrics,
   Queues,
+  Realtime,
   Secrets,
   Storage,
   type Store,
@@ -25,6 +27,12 @@ export interface SentMessage {
 export interface PublishedEvent {
   readonly type: string;
   readonly detail: unknown;
+}
+
+/** A realtime event as subscribers would receive it (after a JSON round trip). */
+export interface RealtimePublish {
+  readonly channel: string;
+  readonly event: unknown;
 }
 
 export interface InvokedJob {
@@ -44,6 +52,7 @@ export class PlatformMemory extends Context.Service<
   {
     readonly sent: Effect.Effect<ReadonlyArray<SentMessage>>;
     readonly published: Effect.Effect<ReadonlyArray<PublishedEvent>>;
+    readonly realtime: Effect.Effect<ReadonlyArray<RealtimePublish>>;
     readonly metrics: Effect.Effect<ReadonlyArray<RecordedMetric>>;
     /** Jobs invoked with `Jobs.invoke`; nothing runs them. */
     readonly invoked: Effect.Effect<ReadonlyArray<InvokedJob>>;
@@ -58,18 +67,35 @@ export interface MemoryOptions {
   readonly users?: ReadonlyArray<User>;
   readonly secrets?: Readonly<Record<string, string>>;
   readonly app?: Partial<AppInfo['Service']>;
+  /**
+   * The app's `realtime.channels` patterns. With them, `Realtime` rejects
+   * undeclared channels like the deployed app does; without them it only
+   * checks that channel names are well formed.
+   */
+  readonly realtime?: { readonly channels: ReadonlyArray<string> };
 }
 
 /** Every platform service in memory, plus `PlatformMemory`. Each build starts empty. */
 export const layerMemory = (
   options: MemoryOptions = {},
-): Layer.Layer<AppInfo | Auth | Db | Events | Jobs | Metrics | Queues | Secrets | Storage | PlatformMemory> =>
+): Layer.Layer<
+  AppInfo | Auth | Db | Events | Jobs | Metrics | Queues | Realtime | Secrets | Storage | PlatformMemory
+> =>
   Layer.mergeAll(
     Db.layerMemory(),
     Layer.effectContext(
       Effect.sync(() => {
         const sent: SentMessage[] = [];
         const published: PublishedEvent[] = [];
+        const realtimeEvents: RealtimePublish[] = [];
+        // A throw inside Effect.sync is a defect, like a misnamed channel in the deployed app.
+        const publishRealtime = (channel: string, events: ReadonlyArray<unknown>) =>
+          Effect.sync(() => {
+            const problem = realtimeChannelError(channel, options.realtime?.channels ?? [channel]);
+            if (problem) throw new Error(problem);
+            for (const e of encodeRealtimeEvents(channel, events))
+              realtimeEvents.push({ channel, event: JSON.parse(e) });
+          });
         const recorded: RecordedMetric[] = [];
         const invoked: InvokedJob[] = [];
         const users = new Map((options.users ?? []).map((u) => [u.id, u]));
@@ -119,6 +145,13 @@ export const layerMemory = (
               publish: (type, detail) => Effect.sync(() => void published.push({ type, detail })),
             }),
           ),
+          Context.add(
+            Realtime,
+            Realtime.of({
+              publish: (channel, event) => publishRealtime(channel, [event]),
+              publishMany: (channel, events) => publishRealtime(channel, [...events]),
+            }),
+          ),
           Context.add(Storage, Storage.of({ store: memoryStores() })),
           Context.add(
             Secrets,
@@ -154,6 +187,7 @@ export const layerMemory = (
             PlatformMemory.of({
               sent: Effect.sync(() => [...sent]),
               published: Effect.sync(() => [...published]),
+              realtime: Effect.sync(() => [...realtimeEvents]),
               metrics: Effect.sync(() => [...recorded]),
               invoked: Effect.sync(() => [...invoked]),
             }),
