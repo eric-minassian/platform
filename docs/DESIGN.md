@@ -2,8 +2,9 @@
 
 A personal, AI-first PaaS on a single AWS account. An agent (or a person) can
 take an idea to `https://<app>.ericminassian.com` with auth, a database,
-queues, events, cron, file storage, CI/CD, preview environments and built-in
-observability, with no setup per app. Idle apps cost about nothing.
+queues, events, cron, file storage, live updates to browsers, CI/CD, preview
+environments and built-in observability, with no setup per app. Idle apps cost
+about nothing.
 
 Status: scaffold (November 2026). Decisions below were made with Eric; the
 "Decision log" at the end records why.
@@ -36,15 +37,17 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
                   ┌────────────────▼─────────────────┐
                   │ CloudFront distribution (router) │  one for all apps, wildcard cert
                   │  viewer-request CloudFront Fn ───┼──► KeyValueStore: host → route record
-                  └───────┬─────────────────┬────────┘
-              static      │                 │  server (OAC, always-amz-auth)
-                          ▼                 ▼
-         S3 sites bucket (per deploy)   Lambda Web Function  <app>--<stage>
-                                            │  (fetch handler, SDK wrapper)
-     ┌──────────────────────────────────────┼─────────────────────────────────────┐
-     │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  │
+                  └───────┬─────────────────┬──────┬─┘
+              static      │                 │      │  /__platform/realtime: WebSocket (no OAC)
+                          │                 │      └─────────────────────────────────┐
+                          │                 │  server (OAC, always-amz-auth)         ▼
+                          ▼                 ▼                              AppSync Event API (one;
+         S3 sites bucket (per deploy)   Lambda Web Function  <app>--<stage>  a namespace per stage)
+                                            │  (fetch handler, SDK wrapper)          ▲ publish (IAM)
+     ┌──────────────────────────────────────┼─────────────────────────────────────┐  │
+     │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  ├─┘
      │             group · worker Lambda (queues/events/crons) · Cognito client ·  │
-     │             IAM role (scoped, boundary) · log groups                        │
+     │             channel namespace · IAM role (scoped, boundary) · log groups    │
      └──────────────────────────────────────┬─────────────────────────────────────┘
                                             │ stdout JSON telemetry
                               CloudWatch Logs ──(account-level subscription)──► telemetry processor
@@ -62,7 +65,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 | `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                       |
 | `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                        |
 | `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                                           |
-| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, IAM) as one CDK stack, and the deploy that brings up the control plane on them.                                                     |
+| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, IAM) as one CDK stack, and the deploy that brings up the control plane on them.          |
 | `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                   |
 
 ## The app contract
@@ -70,8 +73,8 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 ### `plat.config.ts`
 
 ```ts
-import { defineApp, event, queue } from '@ericminassian/platform/config';
-import type { EmailJob, TodoCreated } from './src/domain.ts';
+import { channel, defineApp, event, queue } from '@ericminassian/platform/config';
+import type { EmailJob, TodoCreated, TodoChanged } from './src/domain.ts';
 
 const app = defineApp({
   name: 'todo',
@@ -91,6 +94,10 @@ const app = defineApp({
   storage: ['uploads'],
   secrets: ['STRIPE_KEY'],
   env: { FEATURE_X: 'on' },
+  realtime: {
+    subscribe: 'signed-in', // or 'public' (the default)
+    channels: { 'user/*': channel<TodoChanged>() }, // browsers subscribe; server and worker publish
+  },
 });
 export default app;
 
@@ -114,6 +121,9 @@ declare module '@ericminassian/platform/config' {
   `@ericminassian/platform/config`, the one SDK module every app imports.
   - Queue, event, store and secret names must be declared ones.
   - Bodies and details must match `queue<T>()` / `event<T>()`.
+  - Realtime channels must match a declared pattern (`board`, or `boards/*`
+    for every channel below it), and their events `channel<T>()`, both where
+    the server publishes and where the browser subscribes.
   - `defineWorker` must handle exactly the declared queues, events and crons.
 
 ### Code
@@ -133,6 +143,9 @@ declare module '@ericminassian/platform/config' {
   collection needs no deploy-time provisioning; documents are encoded and
   decoded with a schema. `@ericminassian/platform/api` holds the browser-safe
   pieces an `HttpApi` definition shares with its web client.
+- **Realtime**: the server and worker publish with the `Realtime` service; the
+  browser subscribes with `RealtimeClient` from `@ericminassian/platform/client`.
+  See [Realtime](#realtime).
 - **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
   `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
   against both it and DynamoDB in the emulator.
@@ -141,10 +154,11 @@ declare module '@ericminassian/platform/config' {
 
 The engine passes resource names to the runtime in one environment variable,
 `PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): table, queue URLs,
-bus, storage prefix, secrets paths, auth settings, worker name, public URL, and
-the stage key. The stage key is a random secret the engine creates once per stage
-in SSM. The SDK seals `db` query cursors with it, so cursors are opaque and
-can't be forged.
+bus, storage prefix, secrets paths, auth settings, realtime namespace and
+publish endpoint, worker name, public URL, and the stage key. The stage key is
+a random secret the engine creates once per stage in SSM. The SDK seals `db`
+query cursors and signs realtime subscribe tokens with keys derived from it, so
+cursors are opaque and neither can be forged.
 
 ## Naming: names are the state
 
@@ -162,6 +176,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                    |
 | Bus / rules  | `todo--prod` / `todo--prod--<event>`                               |
 | Schedules    | group `todo--prod`                                                 |
+| Channels     | namespace `todo--prod` in `platform-realtime` (hashed past 50)     |
 | Role         | `/platform/apps/todo--prod`                                        |
 | Logs         | `/platform/apps/todo/prod/{web,web.local,worker}`                  |
 | Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                  |
@@ -184,6 +199,10 @@ used by `plat dev`):
   origins.
 - Files go to the sites bucket under the live deployment's prefix. SPA paths
   get `index.html`.
+- `/__platform/realtime` belongs to the router when the stage has realtime
+  (the route record's `rt`). A WebSocket handshake goes to the AppSync
+  realtime endpoint (no OAC); a plain GET is answered with the browser's
+  connection settings. See [Realtime](#realtime).
 - A stage without a server has nothing to answer `/__platform/health`, so the
   function answers it from the route record (`revision` is the record's
   deployment id). Every routed stage reports which deployment it serves, for
@@ -198,6 +217,60 @@ Host). Hashed assets are immutable; `index.html` revalidates.
 A new app or preview is a single KVS entry: no DNS, certificate or
 distribution change. Rollback is pointing the entry back.
 
+## Realtime
+
+Live updates to browsers (shared boards, presence, notifications) on AWS
+AppSync Events: managed WebSocket pub/sub, $0 at rest. Lambda Web Functions
+don't take WebSocket upgrades, and holding server-sent event streams open
+bills memory and can't reach streams held by another environment.
+
+```
+browser  GET /__platform/realtime        → router answers RealtimeClientConfig from the route store
+         GET /__platform/realtime/token  → Web Function (SDK): a subscribe token   [signed-in stages]
+         WSS /__platform/realtime        → router → AppSync realtime endpoint (subscribe only)
+server, worker  Realtime.publish()       → SigV4 POST to AppSync /event with the stage role
+AppSync ──AWS_LAMBDA──► platform-realtime-authorizer (verifies tokens with the stage key)
+```
+
+- **One Event API** (`platform-realtime`, foundation stack) with API key, IAM
+  and Lambda auth. Each stage that declares `realtime` gets a channel
+  namespace; app channels `board` or `boards/b1` are `/<namespace>/<channel>`
+  in AppSync. Events aren't stored: a browser re-reads what it shows each time
+  it (re)connects.
+- **Browsers only subscribe.** Every namespace takes publishes from IAM alone,
+  and a stage's role may publish only to its own namespace. AppSync can't
+  rate-limit a client and each publish fans out to every subscriber, so a
+  client able to publish could run up the bill; anything a browser sends goes
+  through the app's server, throttled and batched there.
+- **`subscribe: 'public'`** namespaces accept the platform's subscribe-only API
+  key, served to browsers by the router. The control plane owns the key, not
+  the foundation stack, whose drift-reverting deploys would undo extensions.
+  Its daily `realtime-key` job (and any realtime deploy) extends the key to a
+  year out once it has less than 11 months left. The key and AppSync's domains
+  sit in one route-store entry (`REALTIME_KVS_KEY`), so a replaced key reaches
+  every app at once.
+- **`subscribe: 'signed-in'`** namespaces accept tokens from the Lambda
+  authorizer only. The session is an HttpOnly cookie that AppSync never sees,
+  and handing the Cognito token to page JavaScript would let any XSS steal the
+  session, so the SDK issues its own: `pt1.<claims>.<HMAC>` with app, stage,
+  user and a 15-minute expiry, keyed by HKDF of the stage key. The authorizer
+  reads the stage key from SSM, checks the namespace, and keeps `user/<id>/…`
+  channels to that user (a wildcard that could reach another user's channels
+  is refused); every other channel is open to any signed-in user of the app.
+  Subscriptions already open outlive the token.
+- **The endpoint is the app's own host.** AppSync requires the auth header's
+  `host` to be its HTTP domain, which the browser learns from the router's
+  config answer; the WebSocket itself is same-origin, so there's no extra DNS,
+  certificate or CORS. CloudFront drops `Upgrade` and `Connection` before
+  functions run, so the router recognizes a handshake by `Sec-WebSocket-Key`.
+- **The browser client** keeps one shared socket, resubscribes after
+  reconnecting with backoff (AppSync closes healthy connections now and then),
+  refreshes tokens before they expire, and closes the socket after five
+  minutes in a hidden tab.
+- **Lifecycle.** Deploy creates or updates the namespace before the route
+  flip; removing `realtime` deletes it after the flip; destroy deletes it.
+  Rolling back to a deployment without realtime only drops the route's `rt`.
+
 ## Deploy flow
 
 ```
@@ -205,9 +278,9 @@ app CI ── plat build ──► server.zip, worker.zip, static.zip, manifest.
        ── plat deploy ─► POST /v1/apps/:app/deployments   (GitHub Actions OIDC token)
                          ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
 control plane ─ worker job "deploy" ─ engine.deployStage():
-   role → log groups → table → queues/DLQs → bus/rules → Cognito client → worker Lambda
-   → ESMs/rules targets/schedules → static files → Web Function revision → the endpoint
-   the live route doesn't use → resource policy → KVS route (last step)
+   role → log groups → table → queues/DLQs → bus/rules → Cognito client → channel namespace
+   → worker Lambda → ESMs/rules targets/schedules → static files → Web Function revision
+   → the endpoint the live route doesn't use → resource policy → KVS route (last step)
 CI polls, streams events, waits until its nearest edge serves the deployment,
 comments the URL on the PR.
 ```
@@ -255,6 +328,9 @@ comments the URL on the PR.
    gets in `PLATFORM_DEV_WEB_PORT` (`web.dev.port` if that is free), so
    several apps run side by side.
 4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
+   Realtime runs on the emulator's Event API: the router answers the config
+   and tunnels `/__platform/realtime` WebSockets to the emulator's realtime
+   port.
 5. The worker runs as a local Node process with hot reload.
    - The engine still creates the real worker Lambda, queues, event source
      mappings and rules in the emulator, so provisioning is exercised.
@@ -269,17 +345,19 @@ comments the URL on the PR.
 `plat test` does the same with a throwaway stage and runs vitest, locally and
 in CI.
 
-Emulator coverage, tested against v1.0.385 on 2026-11-14:
+Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
+2026-11-15):
 
-| Works                                                                               | Missing, so the wrapper fills in                                                                   |
-| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server  |
-| SQS + DLQ; SQS → Lambda ESM (checks role permissions)                               | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally |
-| EventBridge → SQS/Lambda (checks resource policies)                                 | Scheduler never fires: local cron runner                                                           |
-| Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                       |
-| S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                      |
-| Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                   |
-|                                                                                     | In-memory only: re-provisioned on each start (seconds)                                             |
+| Works                                                                               | Missing, so the wrapper fills in                                                                    |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server   |
+| SQS + DLQ; SQS → Lambda ESM (checks role permissions)                               | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally  |
+| EventBridge → SQS/Lambda (checks resource policies)                                 | Scheduler never fires: local cron runner                                                            |
+| Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                        |
+| S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                       |
+| Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                    |
+| AppSync Events: Event APIs, namespaces, API keys, IAM publish, handlers, wildcards  | Lambda authorizer never invoked (any token passes): signed-in subscribe tokens go unchecked locally |
+|                                                                                     | In-memory only: re-provisioned on each start (seconds)                                              |
 
 As the emulator fills gaps (it releases several times a day), the wrapper
 drops each stand-in.
@@ -293,7 +371,7 @@ writing any instrumentation:
   - `req`: every request, with route pattern, status, latency, country and cold start
   - `err`: errors, with a fingerprint
   - `job`: every queue, event, cron or invoke run
-  - `span`: SDK calls and outgoing `fetch`
+  - `span`: SDK calls (including `realtime.publish`) and outgoing `fetch`
   - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
   - All carry `trace`. Traces propagate through queue message attributes and
     event detail.
@@ -315,6 +393,10 @@ writing any instrumentation:
     - Logs search plus live tail (CloudWatch Live Tail over SSE).
     - Trace waterfalls; grouped errors.
     - Jobs: queue depth, DLQ redrive, cron run-now.
+    - Realtime (stages that declare it): publishes, subscribes and errors,
+      from AppSync's per-namespace CloudWatch metrics. Deliveries and
+      connections are only reported for the whole API, so they aren't shown
+      per app.
     - Data browser for collections and files.
     - Deployments with rollback; secrets; settings; cost.
 - **Uptime.** One pinger checks every prod app every 5 minutes.
@@ -346,7 +428,8 @@ writing any instrumentation:
   - is scoped to that stage's table, queues, bus, storage prefix and secrets
     paths, and its own worker;
   - can't create log groups. The engine creates them, so logs still in
-    flight when a stage is destroyed can't bring its groups back.
+    flight when a stage is destroyed can't bring its groups back;
+  - publishes only to its own channel namespace. Browsers never publish.
 - Web Functions use `IamAuth` endpoints, and their resource policy trusts only
   the router distribution (`aws:SourceArn`).
 - CI tokens are bound to a repo and a stage (prod only from main).
@@ -372,16 +455,17 @@ The root zone `ericminassian.com` stays in Eric's management account
 
 ## Cost model
 
-| Item                                                | Monthly                                                                             |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Hosted zone (delegated)                             | $0.50                                                                               |
-| CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                |
-| Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                 |
-| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                        |
-| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle |
-| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                            |
-| Cognito                                             | free ≤ 10k MAU                                                                      |
-| Alarms / dashboards / custom metrics                | none per app                                                                        |
+| Item                                                | Monthly                                                                                 |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Hosted zone (delegated)                             | $0.50                                                                                   |
+| CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                    |
+| Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                     |
+| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                            |
+| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle     |
+| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                                |
+| Cognito                                             | free ≤ 10k MAU                                                                          |
+| Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50) |
+| Alarms / dashboards / custom metrics                | none per app                                                                            |
 
 Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
 the account.
@@ -418,7 +502,7 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 - **Web Function economics.** Idle environment lifetime isn't documented, and
   memory is billed while warm. Watch the cost page. A future `compute:
-  'event'` mode (Function URL origin with a shared-secret header) could serve
+'event'` mode (Function URL origin with a shared-secret header) could serve
   near-zero-traffic apps from the Lambda free tier.
 - **Verified on the first real deploy (2026-11-15).**
   - `updateRequestOrigin` switches from the default S3 origin to a Web
@@ -448,6 +532,21 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     synchronously (`services/control-plane/src/jobs/call.ts`).
   - Worth a closer look, or an AWS support case, if more code ever needs
     SigV4A from a Web Function.
+- **Realtime (AppSync Events), verified 2026-11-15 on throwaway resources.**
+  - The router's WebSocket switch works through CloudFront; it added no
+    measurable latency. A publish from a Lambda in us-east-1 took ~175 ms
+    (p50; min 28 ms), and reached a browser in the US West ~260 ms (p50)
+    after it was sent.
+  - 40 idle connections for 65 minutes got ~2,500 keep-alives (one a minute)
+    and AppSync metered none of them (no OutboundMessages, Requests or
+    TokensConsumed). CloudFront kept every routed connection open; AppSync
+    closed 2 of 20 direct ones after ~31 minutes, so clients reconnect.
+  - Fan-out cost grows with subscribers × events: live cursors need
+    throttling and batching on the server.
+  - 50 channel namespaces per Event API (adjustable), and previews count.
+    Raise "Event APIs - Channel namespaces per API" before apps run into it.
+  - 2,000 request tokens per second are shared by every Event API in the
+    account and region.
 - **Custom domains** (non-`ericminassian.com`) need their own certificate.
   The plan is a second, multi-tenant (SaaS Manager) distribution reusing the
   same function and KVS.
@@ -456,18 +555,20 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 ## Decision log
 
-| Decision                                                                              | Why                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                     |
-| App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories. |
-| Apps are written with Effect v4 (the template, the SDK's Effect API)                  | Eric's call (2026-11-15). One `HttpApi` definition gives the server, the typed web client and OpenAPI. Services and layers make every resource swappable, so unit tests run the whole app on an in-memory platform, and failures are typed instead of thrown `Response`s. The SDK is Effect-only, and so is every app (the control plane included).                              |
-| Foundation is one CDK stack; stages stay on the engine                                | Eric's call (2026-11-15). The shared resources are one fixed set that rarely changes and serves every app, which suits CloudFormation: `cdk diff`, rollback on failure, removal of resources dropped from code, drift-aware deploys. Stages keep the engine: many, short-lived, deployed in seconds. The engine's resources were imported into the stack, not recreated.         |
-| Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                       |
-| One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                        |
-| AWS Emulator for local dev (Eric's call)                                              | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                                                                                                                                                                                       |
-| Moving an app out is a runbook, not tooling (Eric's call)                             | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                                                                                                                                                                                                 |
-| No MCP; CLI only                                                                      | Eric's call. Agents use `plat … --json`.                                                                                                                                                                                                                                                                                                                                         |
-| Members = GitHub usernames in config                                                  | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                                                                                                                                                                                        |
-| Shared Cognito pool for app users                                                     | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                                                                                                                                                                                           |
-| `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                       |
-| us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                  |
+| Decision                                                                              | Why                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                                                                  |
+| App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories.                                              |
+| Apps are written with Effect v4 (the template, the SDK's Effect API)                  | Eric's call (2026-11-15). One `HttpApi` definition gives the server, the typed web client and OpenAPI. Services and layers make every resource swappable, so unit tests run the whole app on an in-memory platform, and failures are typed instead of thrown `Response`s. The SDK is Effect-only, and so is every app (the control plane included).                                                                           |
+| Foundation is one CDK stack; stages stay on the engine                                | Eric's call (2026-11-15). The shared resources are one fixed set that rarely changes and serves every app, which suits CloudFormation: `cdk diff`, rollback on failure, removal of resources dropped from code, drift-aware deploys. Stages keep the engine: many, short-lived, deployed in seconds. The engine's resources were imported into the stack, not recreated.                                                      |
+| Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                                                                    |
+| One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                                                                     |
+| AWS Emulator for local dev (Eric's call)                                              | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                                                                                                                                                                                                                                    |
+| Moving an app out is a runbook, not tooling (Eric's call)                             | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                                                                                                                                                                                                                                              |
+| No MCP; CLI only                                                                      | Eric's call. Agents use `plat … --json`.                                                                                                                                                                                                                                                                                                                                                                                      |
+| Members = GitHub usernames in config                                                  | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                                                                                                                                                                                                                                     |
+| Shared Cognito pool for app users                                                     | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                                                                                                                                                                                                                                        |
+| `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                                                                    |
+| Realtime on AppSync Events, same-origin through the router                            | Managed WebSocket pub/sub at $0 at rest, with no connection table or fan-out to run. API Gateway WebSocket APIs cost ~5× as much for always-on users and need a connection table and one PostToConnection per subscriber; SSE from Web Functions bills held memory and needs a backplane; IoT Core fits auth and naming poorly. Routing `/__platform/realtime` through the existing router avoids DNS, certificates and CORS. |
+| Browsers subscribe with platform tokens, never publish                                | The session cookie is HttpOnly and AppSync can't see it; exposing Cognito tokens to page JavaScript would let XSS steal sessions. AppSync can't rate-limit a client, so browser publishing could run up the fan-out bill. Channels under `user/<id>` are private to that user; finer access rules belong in the app's API.                                                                                                    |
+| us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |
