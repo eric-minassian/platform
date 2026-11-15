@@ -193,13 +193,12 @@ exists, so:
    ```
 
    On npmjs.com this is "npm publish" under Allowed actions, which is off by
-   default: a publisher that only allows `npm stage publish` passes the
-   workflow's token check and then fails the publish with "OIDC permission
-   denied for this action". A publisher can't be edited; `npm trust revoke`
-   it and add it again.
+   default; without it the workflow fails with "OIDC permission denied for
+   this action". A publisher can't be edited: `npm trust revoke` it and add it
+   again.
 3. Release within 2 days of adding the publishers, or npm expires them: bump
    the package versions, merge, then run the `release` workflow. It publishes
-   only versions that aren't on npm yet (`scripts/release.ts`).
+   only versions that aren't on npm yet.
 
 ## 11. Smoke test
 
