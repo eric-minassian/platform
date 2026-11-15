@@ -1,6 +1,6 @@
 import { gzipSync } from 'node:zlib';
 import { UNAUTHORIZED_BODY } from '@ericminassian/platform-core';
-import { Effect, Layer, Option, Redacted, Schema } from 'effect';
+import { Cause, Effect, Exit, Layer, Option, Redacted, Schema } from 'effect';
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/http-api';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -25,7 +25,7 @@ import {
   resetPlatform,
   useTestBindings,
 } from '../src/testing.ts';
-import { dbContract } from './effect-db-contract.ts';
+import { batchContract, dbContract, transactContract } from './effect-db-contract.ts';
 
 let telemetry: ReturnType<typeof captureTelemetry>;
 beforeEach(() => {
@@ -40,6 +40,54 @@ const ofType = (t: string) => telemetry.events.filter((e) => e.t === t);
 describe('Db in memory', () => {
   it('behaves like DynamoDB', () =>
     Effect.runPromise(dbContract('notes').pipe(Effect.provide(Db.layerMemory()))));
+  it('writes batches like DynamoDB', () =>
+    Effect.runPromise(batchContract('notes').pipe(Effect.provide(Db.layerMemory()))));
+  it('runs transactions like DynamoDB', () =>
+    Effect.runPromise(transactContract('notes').pipe(Effect.provide(Db.layerMemory()))));
+
+  it('a transaction whose row fails to build writes nothing', () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const db = yield* Db;
+        const Doc = Schema.Struct({ id: Schema.String, group: Schema.Boolean, title: Schema.String });
+        const plain = db.collection('docs', { schema: Doc, partition: 'id' });
+        // Another handle indexes a field the stored document holds as a boolean, which no key can be.
+        const indexed = db.collection('docs', {
+          schema: Doc,
+          partition: 'id',
+          indexes: { byGroup: { slot: 1, partition: 'group' } },
+        });
+        yield* plain.put({ id: 'a', group: true, title: 'old' });
+        const exit = yield* Effect.exit(
+          db.transact([
+            plain.tx.put({ id: 'b', group: false, title: 'new' }),
+            indexed.tx.update({ id: 'a' }, { title: 'new' }),
+          ]),
+        );
+        expect(Exit.hasDies(exit)).toBe(true);
+        expect(yield* plain.get({ id: 'b' })).toEqual(Option.none());
+        expect(Option.map(yield* plain.get({ id: 'a' }), (d) => d.title)).toEqual(Option.some('old'));
+      }).pipe(Effect.provide(Db.layerMemory())),
+    ));
+
+  it('transact refuses writes made by another Db', async () => {
+    const Doc = Schema.Struct({ id: Schema.String });
+    const writeElsewhere = Effect.gen(function* () {
+      const db = yield* Db;
+      return db.collection('docs', { schema: Doc, partition: 'id' }).tx.put({ id: 'a' });
+    });
+    const write = await Effect.runPromise(writeElsewhere.pipe(Effect.provide(Db.layerMemory())));
+    const exit = await Effect.runPromiseExit(
+      Effect.gen(function* () {
+        const db = yield* Db;
+        yield* db.transact([write]);
+      }).pipe(Effect.provide(Db.layerMemory())),
+    );
+    expect(Exit.hasDies(exit)).toBe(true);
+    expect(String(Cause.squash((exit as Exit.Failure<void, never>).cause))).toMatch(
+      /writes from this database/,
+    );
+  });
 });
 
 describe('toFetchHandler', () => {

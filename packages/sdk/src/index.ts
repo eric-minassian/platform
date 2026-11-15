@@ -40,6 +40,9 @@ export {
   type Page,
   type QueryAllOptions,
   type QueryOptions,
+  TransactionCanceled,
+  type TransactWrite,
+  type TransactWrites,
 } from './db.ts';
 export { AuthenticationLayer, toFetchHandler } from './http.ts';
 export { observability } from './observability.ts';
