@@ -76,8 +76,21 @@ export function initApp(opts: InitOptions): InitResult {
   const files = copyTree(src, dir, (rel, content) =>
     rel === 'package.json' ? rewritePackageJson(content, name, range) : replaceAppName(content, name),
   );
+  writeFileSync(join(dir, 'pnpm-workspace.yaml'), PNPM_WORKSPACE);
+  files.push('pnpm-workspace.yaml');
   return { dir, name, files: files.sort() };
 }
+
+/**
+ * pnpm 10+ refuses to install (ERR_PNPM_IGNORED_BUILDS) until a dependency's
+ * install script is allowed, and esbuild (used by `plat build`) has one. It's
+ * written here rather than shipped in templates/app: a pnpm-workspace.yaml
+ * there would make that folder its own workspace inside this monorepo.
+ */
+export const PNPM_WORKSPACE = `# esbuild (used by \`plat build\`) installs its native binary with a build script.
+allowBuilds:
+  esbuild: true
+`;
 
 export function replaceAppName(content: string, name: string): string {
   return content.split(TEMPLATE_APP_NAME).join(name);

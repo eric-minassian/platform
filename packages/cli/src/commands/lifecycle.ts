@@ -28,10 +28,11 @@ export function registerLifecycle(program: Command): void {
           '',
           '  next:',
           rel === '.' ? '' : `    cd ${rel}`,
-          '    pnpm install',
+          '    pnpm install                               # creates the lockfile CI installs from',
           '    pnpm dev                                   # local, on the AWS Emulator',
-          `    gh repo create <owner>/${v.name} --private --source . --push`,
-          `    plat apps create ${v.name} --repo <owner>/${v.name}`,
+          `    plat apps create ${v.name} --repo <owner>/${v.name}   # register before the first push`,
+          `    git init && git add -A && git commit -m "Initial commit"`,
+          `    gh repo create <owner>/${v.name} --private --source . --push   # CI deploys https://${v.name}.<domain>`,
         ]
           .filter(Boolean)
           .join('\n'),

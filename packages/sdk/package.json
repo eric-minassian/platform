@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/platform",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Runtime SDK for apps on the platform: db, queues, events, storage, secrets, auth, metrics.",
   "type": "module",
   "license": "MIT",

@@ -181,9 +181,12 @@ exists, so:
 ## 11. Smoke test
 
 ```sh
+npm install -g @ericminassian/plat
 plat login
 plat apps create hello --repo eric-minassian/hello
 plat init hello && cd hello
+pnpm install                       # creates the lockfile CI installs from
+git init && git add -A && git commit -m "Initial commit"
 gh repo create eric-minassian/hello --private --source . --push
 gh run watch                       # app CI deploys prod
 curl -s https://hello.ericminassian.com/__platform/health
