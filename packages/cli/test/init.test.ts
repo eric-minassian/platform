@@ -21,6 +21,9 @@ describe('plat init', () => {
     expect(pkg.devDependencies['@ericminassian/plat']).toBe(`^${cliVersion()}`);
     expect(pkg.packageManager).toMatch(/^pnpm@/);
     expect(JSON.stringify(pkg)).not.toContain('workspace:');
+    // pnpm 10+ fails the install unless esbuild's build script is allowed.
+    expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toMatch(/allowBuilds:\n {2}esbuild: true/);
+    expect(r.files).toContain('pnpm-workspace.yaml');
 
     for (const f of r.files) {
       if (/\.(png|ico)$/.test(f)) continue;
