@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { platformNames } from '@ericminassian/platform-core';
+import { platformNames, REALTIME_TOKEN_PATTERN } from '@ericminassian/platform-core';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
@@ -51,6 +51,82 @@ describe('foundation stack', () => {
       template.hasResourceProperties('AWS::IAM::Role', { RoleName: role, Path: '/platform/' });
     template.hasResourceProperties('AWS::SNS::Topic', { TopicName: platformNames.alertsTopic });
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: platformNames.runtimeConfigParameter });
+    template.hasResourceProperties('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: platformNames.realtimeAuthorizer,
+    });
+  });
+
+  describe('realtime', () => {
+    const api = () => logicalId('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
+    const authorizer = () =>
+      logicalId('AWS::Lambda::Function', { FunctionName: platformNames.realtimeAuthorizer });
+
+    it('lets only IAM publish and subscribers in with the API key or a checked token', () => {
+      template.hasResourceProperties('AWS::AppSync::Api', {
+        Name: platformNames.realtimeApi,
+        EventConfig: {
+          AuthProviders: [
+            { AuthType: 'API_KEY' },
+            { AuthType: 'AWS_IAM' },
+            {
+              AuthType: 'AWS_LAMBDA',
+              LambdaAuthorizerConfig: {
+                AuthorizerUri: { 'Fn::GetAtt': [authorizer(), 'Arn'] },
+                AuthorizerResultTtlInSeconds: 300,
+                IdentityValidationExpression: REALTIME_TOKEN_PATTERN,
+              },
+            },
+          ],
+          ConnectionAuthModes: [{ AuthType: 'API_KEY' }, { AuthType: 'AWS_LAMBDA' }],
+          DefaultPublishAuthModes: [{ AuthType: 'AWS_IAM' }],
+          DefaultSubscribeAuthModes: [{ AuthType: 'AWS_LAMBDA' }],
+        },
+      });
+      // The control plane owns the key (nightly extension); a stack copy would be reverted.
+      template.resourceCountIs('AWS::AppSync::ApiKey', 0);
+    });
+
+    it('runs the authorizer on Node 24 and lets only this API invoke it', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: platformNames.realtimeAuthorizer,
+        Runtime: 'nodejs24.x',
+        Architectures: ['arm64'],
+        Handler: 'index.handler',
+      });
+      template.hasResourceProperties('AWS::Lambda::Permission', {
+        FunctionName: { 'Fn::GetAtt': [authorizer(), 'Arn'] },
+        Principal: 'appsync.amazonaws.com',
+        SourceArn: { 'Fn::GetAtt': [api(), 'ApiArn'] },
+      });
+    });
+
+    it('lets the authorizer read stage keys and nothing else', () => {
+      const policies = template.findResources('AWS::IAM::Policy');
+      const statements = Object.values(policies)
+        .filter((p) =>
+          (p.Properties.Roles as Array<{ Ref?: string }>).some((r) =>
+            r.Ref?.startsWith('RealtimeAuthorizer'),
+          ),
+        )
+        .flatMap(
+          (p) => p.Properties.PolicyDocument.Statement as Array<{ Action: string; Resource: unknown }>,
+        );
+      expect(statements.map((s) => s.Action).sort()).toEqual(['kms:Decrypt', 'ssm:GetParameter']);
+      const ssm = statements.find((s) => s.Action === 'ssm:GetParameter');
+      expect(JSON.stringify(ssm?.Resource)).toContain(':parameter/platform/apps/*/*/stage-key');
+    });
+
+    it('bounds stage roles to publishing in stage namespaces', () => {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
+        ManagedPolicyName: platformNames.boundaryPolicy,
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({ Sid: 'StageRealtime', Action: 'appsync:EventPublish' }),
+          ]),
+        }),
+      });
+    });
   });
 
   it('retains everything that holds data or routes traffic', () => {
@@ -61,9 +137,10 @@ describe('foundation stack', () => {
       ...Object.keys(template.findResources('AWS::CloudFront::KeyValueStore')),
       ...Object.keys(template.findResources('AWS::Cognito::UserPool')),
       ...Object.keys(template.findResources('Custom::CrossAccountZoneDelegation')),
+      ...Object.keys(template.findResources('AWS::AppSync::Api')),
     ];
     const resources = template.toJSON().Resources as Record<string, { DeletionPolicy?: string }>;
-    expect(retained).toHaveLength(9);
+    expect(retained).toHaveLength(10);
     for (const id of retained) expect(resources[id]?.DeletionPolicy, id).toBe('Retain');
   });
 
@@ -160,6 +237,10 @@ describe('foundation stack', () => {
     const literal = parts.filter((p) => typeof p === 'string').join('');
     for (const key of ['artifactsBucket', 'kvsArn', 'distributionArn', 'userPoolId', 'boundaryPolicyArn'])
       expect(literal).toContain(`"${key}":"`);
+    expect(literal).toContain('"realtime":{"apiId":"');
+    const api = logicalId('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
+    for (const attr of ['ApiId', 'Dns.Http', 'Dns.Realtime'])
+      expect(parts).toContainEqual({ 'Fn::GetAtt': [api, attr] });
     expect(literal).toContain(
       `"telemetryFunctionArn":"arn:aws:lambda:${config.region}:${account}:function:platform--prod--worker"`,
     );

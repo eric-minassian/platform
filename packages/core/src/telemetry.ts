@@ -6,6 +6,7 @@
  * (search, traces) on demand. No CloudWatch custom metrics are ever created.
  */
 import { Schema } from 'effect';
+import { fingerprint } from './fingerprint.ts';
 
 export const TelemetryKind = Schema.Literals(['req', 'err', 'job', 'span', 'log', 'metric', 'env']);
 export type TelemetryKind = typeof TelemetryKind.Type;
@@ -224,15 +225,7 @@ export function topFrame(stack: string | undefined): string {
   return '';
 }
 
-/** Stable short hash (FNV-1a 32-bit, hex) — no crypto dependency so the SDK stays tiny. */
-export function fingerprint(parts: readonly string[]): string {
-  let h = 0x811c9dc5;
-  for (const ch of parts.join('|')) {
-    h ^= ch.codePointAt(0)!;
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h.toString(16).padStart(8, '0');
-}
+export { fingerprint } from './fingerprint.ts';
 
 export function errorFingerprint(name: string, message: string, stack?: string): string {
   return fingerprint([name, normalizeErrorMessage(message), topFrame(stack)]);

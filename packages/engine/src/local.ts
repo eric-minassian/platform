@@ -1,8 +1,19 @@
-import { type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
+import { CreateApiCommand } from '@aws-sdk/client-appsync';
+import { CreateFunctionCommand, GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
+import {
+  NODE_RUNTIME,
+  type PlatformRuntimeConfig,
+  platformNames,
+  type RealtimeRuntimeConfig,
+} from '@ericminassian/platform-core';
+import { strToU8, zipSync } from 'fflate';
+import { findEventApi } from './drivers/appsync.ts';
 import { ensureUserPool } from './drivers/cognito.ts';
 import { ensureTable } from './drivers/dynamodb.ts';
+import { ensureRole } from './drivers/iam.ts';
 import { ensureBucket } from './drivers/s3.ts';
-import { type EngineContext, platformTags } from './util.ts';
+import { serviceTrustPolicy } from './policy.ts';
+import { type EngineContext, ignoreNotFound, platformTags, waitFor } from './util.ts';
 
 /**
  * Inside a fresh AWS Emulator, create the shared resources a stage deploy
@@ -54,6 +65,7 @@ export async function ensureLocal(
     tags,
   });
   const userPoolId = await ensureUserPool(ctx, { name: platformNames.userPool, tags });
+  const realtime = await ensureLocalRealtime(ctx, tags);
 
   return {
     v: 1,
@@ -71,5 +83,82 @@ export async function ensureLocal(
     userPoolId,
     loginUrl: `http://localhost:${opts.port}`,
     jwksBaseUrl: opts.jwksBaseUrl,
+    realtime,
   };
+}
+
+/**
+ * The emulator never invokes an Event API's Lambda authorizer (it accepts any
+ * token), but the API still needs one to accept the AWS_LAMBDA mode signed-in
+ * namespaces use. So this one only satisfies the API's configuration.
+ */
+const STUB_AUTHORIZER = `// plat dev: the AWS Emulator doesn't invoke Event API authorizers, so subscribe tokens
+// aren't checked locally. The platform's real authorizer runs in AWS.
+export const handler = async () => ({ isAuthorized: true });
+`;
+
+/**
+ * The platform's Event API inside the emulator, configured like the
+ * foundation's (same auth providers and defaults). The emulator serves its
+ * HTTP and realtime endpoints on local ports (`dns` is `127.0.0.1:<port>`).
+ */
+async function ensureLocalRealtime(
+  ctx: EngineContext,
+  tags: Record<string, string>,
+): Promise<RealtimeRuntimeConfig> {
+  let api = await findEventApi(ctx, platformNames.realtimeApi);
+  if (!api) {
+    const authorizerArn = await ensureStubAuthorizer(ctx, tags);
+    const res = await ctx.clients.appsync.send(
+      new CreateApiCommand({
+        name: platformNames.realtimeApi,
+        tags,
+        eventConfig: {
+          authProviders: [
+            { authType: 'API_KEY' },
+            { authType: 'AWS_IAM' },
+            { authType: 'AWS_LAMBDA', lambdaAuthorizerConfig: { authorizerUri: authorizerArn } },
+          ],
+          connectionAuthModes: [{ authType: 'API_KEY' }, { authType: 'AWS_LAMBDA' }],
+          defaultPublishAuthModes: [{ authType: 'AWS_IAM' }],
+          defaultSubscribeAuthModes: [{ authType: 'AWS_LAMBDA' }],
+        },
+      }),
+    );
+    api = res.api;
+  }
+  const httpDomain = api?.dns?.HTTP;
+  const realtimeDomain = api?.dns?.REALTIME;
+  if (!api?.apiId || !httpDomain || !realtimeDomain)
+    throw new Error('the AWS Emulator returned an Event API without endpoints');
+  return { apiId: api.apiId, httpDomain, realtimeDomain };
+}
+
+async function ensureStubAuthorizer(ctx: EngineContext, tags: Record<string, string>): Promise<string> {
+  const name = platformNames.realtimeAuthorizer;
+  const existing = await ignoreNotFound(
+    ctx.clients.lambda.send(new GetFunctionConfigurationCommand({ FunctionName: name })),
+  );
+  if (existing?.FunctionArn) return existing.FunctionArn;
+  const role = await ensureRole(ctx, {
+    name,
+    trust: serviceTrustPolicy('lambda.amazonaws.com'),
+    description: 'plat dev stub realtime authorizer',
+    tags,
+  });
+  const res = await ctx.clients.lambda.send(
+    new CreateFunctionCommand({
+      FunctionName: name,
+      Role: role.arn,
+      Runtime: NODE_RUNTIME,
+      Handler: 'index.handler',
+      Code: { ZipFile: zipSync({ 'index.mjs': strToU8(STUB_AUTHORIZER) }) },
+      Tags: tags,
+    }),
+  );
+  await waitFor(`${name} to become active`, async () => {
+    const c = await ctx.clients.lambda.send(new GetFunctionConfigurationCommand({ FunctionName: name }));
+    return c.State === 'Active';
+  });
+  return res.FunctionArn!;
 }

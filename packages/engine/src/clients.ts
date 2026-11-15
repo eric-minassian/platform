@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { Agent } from 'node:https';
+import { AppSyncClient } from '@aws-sdk/client-appsync';
 import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyvaluestore';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
@@ -32,6 +33,7 @@ export interface ClientOptions {
 
 export interface AwsClients {
   readonly region: string;
+  readonly appsync: AppSyncClient;
   readonly iam: IAMClient;
   readonly sts: STSClient;
   readonly dynamodb: DynamoDBClient;
@@ -69,6 +71,9 @@ export function createClients(opts: ClientOptions): AwsClients {
 
   return {
     region: opts.region,
+    get appsync() {
+      return lazy('appsync', () => new AppSyncClient(base));
+    },
     get iam() {
       return lazy('iam', () => new IAMClient(base));
     },

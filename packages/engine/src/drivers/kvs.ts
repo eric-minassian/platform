@@ -19,16 +19,7 @@ export async function putRoute(
   host: string,
   record: RouteRecord,
 ): Promise<void> {
-  const value = encodeRouteRecord(record);
-  await retry(
-    async () => {
-      const d = await ctx.clients.kvs.send(new DescribeKeyValueStoreCommand({ KvsARN: kvsArn }));
-      await ctx.clients.kvs.send(
-        new PutKeyCommand({ KvsARN: kvsArn, Key: host, Value: value, IfMatch: d.ETag }),
-      );
-    },
-    { when: isConflict, attempts: 8, delayMs: 300 },
-  );
+  await putKey(ctx, kvsArn, host, encodeRouteRecord(record));
   ctx.log('info', `route ${host} → ${record.d}`, `route ${host}`);
 }
 
@@ -37,8 +28,26 @@ export async function getRoute(
   kvsArn: string,
   host: string,
 ): Promise<RouteRecord | undefined> {
-  const res = await ignoreNotFound(ctx.clients.kvs.send(new GetKeyCommand({ KvsARN: kvsArn, Key: host })));
-  return res?.Value ? (JSON.parse(res.Value) as RouteRecord) : undefined;
+  const value = await getKey(ctx, kvsArn, host);
+  return value ? (JSON.parse(value) as RouteRecord) : undefined;
+}
+
+/** Any key's raw value (route records, and the platform's own entries such as realtime's). */
+export async function getKey(ctx: EngineContext, kvsArn: string, key: string): Promise<string | undefined> {
+  const res = await ignoreNotFound(ctx.clients.kvs.send(new GetKeyCommand({ KvsARN: kvsArn, Key: key })));
+  return res?.Value || undefined;
+}
+
+export async function putKey(ctx: EngineContext, kvsArn: string, key: string, value: string): Promise<void> {
+  await retry(
+    async () => {
+      const d = await ctx.clients.kvs.send(new DescribeKeyValueStoreCommand({ KvsARN: kvsArn }));
+      await ctx.clients.kvs.send(
+        new PutKeyCommand({ KvsARN: kvsArn, Key: key, Value: value, IfMatch: d.ETag }),
+      );
+    },
+    { when: isConflict, attempts: 8, delayMs: 300 },
+  );
 }
 
 export async function deleteRoute(ctx: EngineContext, kvsArn: string, host: string): Promise<void> {

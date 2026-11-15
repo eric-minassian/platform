@@ -1,5 +1,5 @@
 import { PROD_STAGE } from './constants.ts';
-import { fingerprint } from './telemetry.ts';
+import { fingerprint } from './fingerprint.ts';
 
 /**
  * App names: 3-30 chars, lowercase letters/digits/single hyphens, starting with

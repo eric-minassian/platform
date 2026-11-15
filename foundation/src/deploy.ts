@@ -4,7 +4,8 @@
  *  1. foundation     the platform-foundation stack (CDK), plus the session
  *                    key, a generated secret CloudFormation can't hold
  *  2. control-plane  services/control-plane as the `platform` app, through
- *                    the engine like any other app
+ *                    the engine like any other app; then realtime's public
+ *                    subscribe key and route-store entry
  *  3. telemetry      the account-level log subscription, which targets the
  *                    control plane's worker and so comes after it
  *
@@ -117,15 +118,20 @@ async function main(): Promise<void> {
 
   if (phases.includes('control-plane')) {
     console.log(`▸ control-plane: app "${CONTROL_PLANE_APP}" (stage ${PROD_STAGE})`);
+    const runtime = await runtimeConfig(ctx);
     const result = await deployControlPlane({
       engine,
       ctx,
       config,
-      runtime: await runtimeConfig(ctx),
+      runtime,
       roleArn: await stackOutput('ControlPlaneRoleArn'),
       repoRoot,
     });
     console.log(`    control plane ${result.deploymentId} → ${result.url}`);
+    // The public subscribe key and the router's realtime entry live outside the stack (the
+    // control plane extends the key nightly); make sure both exist as soon as the API does.
+    if (await engine.ensureRealtimePlatform(runtime))
+      console.log('    realtime: key and route entry current');
   }
 
   if (phases.includes('telemetry')) {
