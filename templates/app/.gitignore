@@ -1,0 +1,8 @@
+node_modules/
+.plat/
+dist/
+web/dist/
+coverage/
+.env.local
+*.log
+.DS_Store

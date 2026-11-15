@@ -1,0 +1,42 @@
+import { getBindings } from './bindings.ts';
+import { client } from './clients.ts';
+import { currentTrace } from './context.ts';
+import { span } from './telemetry.ts';
+
+export interface Events {
+  publish<T = unknown>(type: string, detail: T): Promise<void>;
+}
+
+/** Envelope inside EventBridge `detail`, so the trace survives the hop. */
+export interface EventEnvelope<T = unknown> {
+  data: T;
+  trace: string;
+}
+
+export const events: Events = {
+  publish: (type, detail) =>
+    span('events.publish', type, async () => {
+      const b = getBindings();
+      if (!b.bus) throw new Error('This app has no event bus. Add an "events" entry to platform.json.');
+      const envelope: EventEnvelope = { data: detail, trace: currentTrace() };
+      const { PutEventsCommand } = await import('@aws-sdk/client-eventbridge');
+      const out = await (await client('events')).send(
+        new PutEventsCommand({
+          Entries: [
+            {
+              EventBusName: b.bus.name,
+              Source: `platform.${b.app}`,
+              DetailType: type,
+              Detail: JSON.stringify(envelope),
+            },
+          ],
+        }),
+      );
+      if (out.FailedEntryCount) {
+        const e = out.Entries?.find((x) => x.ErrorCode);
+        throw new Error(
+          `events.publish("${type}") failed: ${e?.ErrorCode ?? 'unknown'} ${e?.ErrorMessage ?? ''}`.trim(),
+        );
+      }
+    }),
+};

@@ -1,0 +1,41 @@
+/**
+ * Platform-wide constants. These are the only values baked into published
+ * packages; everything account-specific (account ID, bucket names, ARNs)
+ * comes from the deployed platform at runtime, because this repo is public.
+ */
+export const PLATFORM_DEFAULTS = {
+  /** Apps are served at `<app>.<domain>`; previews at `<app>--<stage>.<domain>`. */
+  domain: 'ericminassian.com',
+  region: 'us-east-1',
+  /** Control plane: console + API. */
+  apiUrl: 'https://platform.ericminassian.com',
+  /** Audience the API expects in GitHub Actions OIDC tokens. */
+  oidcAudience: 'https://platform.ericminassian.com',
+  /** Local dev router. Apps are served at `http://<app>.localhost:<port>`. */
+  localDomain: 'localhost',
+  localPort: 3000,
+} as const;
+
+/** Prefix for every platform-owned path (auth, health) on every app host. */
+export const PLATFORM_PATH_PREFIX = '/__platform/';
+export const HEALTH_PATH = '/__platform/health';
+
+/** Header the router sets so apps (and the cache key) see the public host. */
+export const HOST_HEADER = 'x-platform-host';
+/** Trace propagation header (W3C traceparent is also honored). */
+export const TRACE_HEADER = 'x-platform-trace';
+
+/** Tags on every AWS resource the engine creates. */
+export const TAGS = {
+  managed: 'platform:managed',
+  app: 'platform:app',
+  stage: 'platform:stage',
+} as const;
+
+/** The production stage. Its host has no stage suffix. */
+export const PROD_STAGE = 'prod';
+/** Stage name used by `plat dev` against the AWS Emulator. */
+export const LOCAL_STAGE = 'local';
+
+/** Lambda runtime for both Web Functions and worker (Event) Functions. */
+export const NODE_RUNTIME = 'nodejs24.x';

@@ -1,0 +1,67 @@
+{
+  "name": "@eric-minassian/platform",
+  "version": "0.1.0",
+  "description": "Runtime SDK for apps on the platform: db, queues, events, storage, secrets, auth, metrics.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eric-minassian/platform.git",
+    "directory": "packages/sdk"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts",
+    "./worker": "./src/worker.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./server": {
+        "types": "./dist/server.d.ts",
+        "default": "./dist/server.js"
+      },
+      "./worker": {
+        "types": "./dist/worker.d.ts",
+        "default": "./dist/worker.js"
+      },
+      "./testing": {
+        "types": "./dist/testing.d.ts",
+        "default": "./dist/testing.js"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
+    "@aws-sdk/client-dynamodb": "^3.1169.0",
+    "@aws-sdk/client-eventbridge": "^3.1169.0",
+    "@aws-sdk/client-lambda": "^3.1169.0",
+    "@aws-sdk/client-s3": "^3.1169.0",
+    "@aws-sdk/client-sqs": "^3.1169.0",
+    "@aws-sdk/client-ssm": "^3.1169.0",
+    "@aws-sdk/lib-dynamodb": "^3.1169.0",
+    "@aws-sdk/s3-request-presigner": "^3.1169.0",
+    "@eric-minassian/platform-core": "workspace:*",
+    "jose": "^6.2.17"
+  },
+  "devDependencies": {
+    "@eric-minassian/platform-engine": "workspace:*",
+    "@types/aws-lambda": "^8.10.164",
+    "hono": "^4.13.18"
+  }
+}

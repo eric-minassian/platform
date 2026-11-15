@@ -1,0 +1,26 @@
+{
+  "name": "platform-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.11.2",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "pnpm -r --parallel typecheck",
+    "test": "pnpm -r test",
+    "test:integration": "pnpm -r test:integration",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "build": "pnpm -r build",
+    "plat": "node packages/cli/src/bin.ts",
+    "platform:deploy": "pnpm --filter @eric-minassian/platform-foundation deploy:platform"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.7",
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0",
+    "@eric-minassian/platform-core": "workspace:*"
+  }
+}

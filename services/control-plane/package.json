@@ -1,0 +1,59 @@
+{
+  "name": "@eric-minassian/platform-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The platform's control plane: API, console, deployer and telemetry, deployed as a platform app.",
+  "type": "module",
+  "exports": {
+    "./records": "./src/records.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "test": "vitest run",
+    "build": "plat build",
+    "dev": "plat dev",
+    "web:dev": "vite --config web/vite.config.ts",
+    "web:build": "vite build --config web/vite.config.ts",
+    "api:dev": "node src/dev.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudwatch": "^3.1169.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1169.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
+    "@aws-sdk/client-cost-explorer": "^3.1169.0",
+    "@aws-sdk/client-dynamodb": "^3.1169.0",
+    "@aws-sdk/client-lambda": "^3.1169.0",
+    "@aws-sdk/client-lambda-web": "^3.1169.0",
+    "@aws-sdk/client-s3": "^3.1169.0",
+    "@aws-sdk/client-scheduler": "^3.1169.0",
+    "@aws-sdk/client-sns": "^3.1169.0",
+    "@aws-sdk/client-sqs": "^3.1169.0",
+    "@aws-sdk/client-ssm": "^3.1169.0",
+    "@aws-sdk/lib-dynamodb": "^3.1169.0",
+    "@aws-sdk/s3-presigned-post": "^3.1169.0",
+    "@aws-sdk/s3-request-presigner": "^3.1169.0",
+    "@aws/durable-execution-sdk-js": "^3.0.0",
+    "@eric-minassian/platform": "workspace:*",
+    "@eric-minassian/platform-core": "workspace:*",
+    "@eric-minassian/platform-engine": "workspace:*",
+    "@hono/node-server": "^2.1.8",
+    "fflate": "^0.8.3",
+    "hono": "^4.13.18",
+    "jose": "^6.2.17"
+  },
+  "devDependencies": {
+    "@eric-minassian/plat": "workspace:*",
+    "@tailwindcss/vite": "^4.3.5",
+    "@tanstack/react-query": "^5.107.1",
+    "@types/aws-lambda": "^8.10.164",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-router": "^8.5.1",
+    "recharts": "^3.10.1",
+    "tailwindcss": "^4.3.5",
+    "vite": "^8.3.8"
+  }
+}

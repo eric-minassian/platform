@@ -1,0 +1,31 @@
+{
+  "name": "platform-app-template",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "plat dev",
+    "build": "plat build",
+    "deploy": "plat deploy",
+    "test": "vitest run",
+    "test:integration": "plat test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json"
+  },
+  "dependencies": {
+    "@eric-minassian/platform": "workspace:*",
+    "hono": "^4.13.18",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eric-minassian/plat": "workspace:*",
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}

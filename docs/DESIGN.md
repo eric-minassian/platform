@@ -1,0 +1,402 @@
+# Platform design
+
+A personal, AI-first PaaS on a single AWS account. An agent (or a person) can
+take an idea to `https://<app>.ericminassian.com` with auth, a database,
+queues, events, cron, file storage, CI/CD, preview environments and built-in
+observability, with no setup per app. Idle apps cost about nothing.
+
+Status: scaffold (November 2026). Decisions below were made with Eric; the
+"Decision log" at the end records why.
+
+## Goals and constraints
+
+- **Zero setup per app.** Creating an app needs no DNS change, no
+  certificate, no AWS credentials, no infrastructure code.
+- **Apps never own infrastructure.** An app repo contains code plus a small,
+  cloud-neutral `platform.json`. No CloudFormation, CDK or AWS SDK calls in
+  apps; the platform's control plane provisions everything with direct AWS API
+  calls. Apps stay portable.
+- **Cheap at rest.** Everything scales to zero. No VPCs, NAT gateways, load
+  balancers, customer-managed KMS keys or Secrets Manager by default.
+- **Single AWS account** (`platform-prod` in Eric's existing organization; no
+  per-app accounts). DynamoDB only for now.
+- **Observability built in.** Every request, job and error is instrumented by
+  the platform; `platform.ericminassian.com` shows it.
+- **Invite-only.** Members are GitHub accounts listed in `platform.config.ts`.
+- **CLI-first for AI.** `plat` is the interface for agents (everything has
+  `--json`). No MCP server.
+- **Graduation stays possible.** A successful app can move to its own account
+  without code changes.
+
+## Architecture
+
+```
+                        *.ericminassian.com  (root zone, eric-minassian/aws: `*` CNAME → edge.platform…)
+                                   │
+                  ┌────────────────▼─────────────────┐
+                  │ CloudFront distribution (router) │  one for all apps, wildcard cert
+                  │  viewer-request CloudFront Fn ───┼──► KeyValueStore: host → route record
+                  └───────┬─────────────────┬────────┘
+              static      │                 │  server (OAC, always-amz-auth)
+                          ▼                 ▼
+         S3 sites bucket (per deploy)   Lambda Web Function  <app>--<stage>
+                                            │  (fetch handler, SDK wrapper)
+     ┌──────────────────────────────────────┼─────────────────────────────────────┐
+     │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  │
+     │             group · worker Lambda (queues/events/crons) · Cognito client ·  │
+     │             IAM role (scoped, boundary) · log groups                        │
+     └──────────────────────────────────────┬─────────────────────────────────────┘
+                                            │ stdout JSON telemetry
+                              CloudWatch Logs ──(account-level subscription)──► telemetry processor
+                                                                                   │ rollups, error groups
+     platform.ericminassian.com  (the control plane, itself a platform app)       ▼
+       API /v1 + console · deployer · pinger · cost · reaper ◄────────── telemetry + state tables
+```
+
+### Components
+
+| Component                                   | What it is                                                                                                                                                                                     |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`                             | Contracts shared by everything: naming, `platform.json` schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                            |
+| `packages/sdk` (`@eric-minassian/platform`) | What app code imports: `db`, `queue`, `events`, `storage`, `secrets`, `auth`, `metrics`, `log`, `app`. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
+| `packages/engine`                           | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                            |
+| `packages/cli` (`@eric-minassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                             |
+| `services/control-plane`                    | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                |
+| `foundation/`                               | The platform's shared resources (router, buckets, tables, Cognito, IAM, DNS), applied by the same engine.                                                                                      |
+| `templates/app`                             | What `plat init` copies: a Hono API + React SPA with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                         |
+
+## The app contract
+
+### `platform.json`
+
+```jsonc
+{
+  "name": "todo",
+  "web": {
+    "server": "src/server.ts",
+    "static": "web/dist",
+    "build": "pnpm --dir web build",
+    "dev": { "command": "pnpm --dir web dev", "port": 5173 },
+    "spa": true,
+    "serverRoutes": ["/api/"]
+  },
+  "auth": true, // or { "required": true }
+  "db": true, // one document DB per stage; collections are declared in code
+  "queues": { "emails": { "batchSize": 10 } },
+  "events": ["todo.created"], // event types the worker subscribes to
+  "crons": { "cleanup": "0 3 * * *" }, // 5-field UTC cron or rate(...)
+  "storage": ["uploads"],
+  "secrets": ["STRIPE_KEY"],
+  "env": { "FEATURE_X": "on" }
+}
+```
+
+The schema lives in `packages/core/src/manifest.ts` (JSON Schema:
+`packages/core/platform.schema.json`). Keep it small: every field is a promise
+the platform keeps on any cloud.
+
+### Code
+
+- **Server**: the default export of `web.server` is any web-standard fetch
+  handler (a Hono app, `{ fetch }`, or a function). The SDK wraps it and
+  listens on `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract.
+- **Worker**: `export default defineWorker({ queues, events, crons })`. One
+  Lambda per stage handles all of them; the wrapper dispatches on event shape
+  and reports partial SQS batch failures.
+- **Resources**: only through `@eric-minassian/platform`. `db.collection()`
+  maps typed collections onto the stage's single table (partition/sort keys,
+  up to three pinned index slots, TTL), so adding a collection needs no
+  deploy-time provisioning.
+
+### Bindings
+
+The engine passes resource names to the runtime in one environment variable,
+`PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): table, queue URLs,
+bus, storage prefix, secrets paths, auth settings, worker name, public URL.
+
+## Naming: names are the state
+
+Everything for a stage shares the base `<app>--<stage>` (`--` cannot appear in
+app or stage names), so the engine can always rediscover what it owns from
+names plus `platform:app` / `platform:stage` tags. There is no state file to
+lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
+
+| Resource     | Name                                                               |
+| ------------ | ------------------------------------------------------------------ |
+| Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com` |
+| Web Function | `todo--prod` (endpoint `live`)                                     |
+| Worker       | `todo--prod--worker`                                               |
+| Table        | `todo--prod`                                                       |
+| Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                    |
+| Bus / rules  | `todo--prod` / `todo--prod--<event>`                               |
+| Schedules    | group `todo--prod`                                                 |
+| Role         | `/platform/apps/todo--prod`                                        |
+| Logs         | `/platform/apps/todo/prod/{web,worker}`                            |
+| Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                  |
+| Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`    |
+| Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`         |
+
+## Routing
+
+One CloudFront distribution serves `*.ericminassian.com` with one wildcard
+certificate. A viewer-request CloudFront Function (JS runtime 2.0) looks up the
+`Host` in a CloudFront KeyValueStore and applies `decide()`
+(`packages/core/src/router/decide.js`; the same file is inlined at the edge and
+used by `plat dev`):
+
+- `/__platform/*` and server routes (`/api/` by default) go to the stage's Web
+  Function. The function calls `cf.updateRequestOrigin()` with OAC (origin type
+  `lambda`, signing `always-amz-auth`). That signing mode sends bodies as
+  `UNSIGNED-PAYLOAD`, so browsers can POST without hashing, unlike Function URL
+  origins.
+- Files go to the sites bucket under the live deployment's prefix. SPA paths
+  get `index.html`.
+- Unknown hosts get a 404.
+
+The cache key includes the rewritten URI (static keys contain the deployment
+id) plus `x-platform-host`, so apps never share cache entries. The origin
+request policy is `AllViewerExceptHostHeader` (Web Functions 404 on a foreign
+Host). Hashed assets are immutable; `index.html` revalidates.
+
+A new app or preview is a single KVS entry: no DNS, certificate or
+distribution change. Rollback is pointing the entry back.
+
+## Deploy flow
+
+```
+app CI ── plat build ──► server.zip, worker.zip, static.zip, manifest.json
+       ── plat deploy ─► POST /v1/apps/:app/deployments   (GitHub Actions OIDC token)
+                         ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
+control plane ─ worker job "deploy" ─ engine.deployStage():
+   role → log groups → table → queues/DLQs → bus/rules → Cognito client → worker Lambda
+   → ESMs/rules targets/schedules → static files → Web Function revision → endpoint weights
+   → resource policy → KVS route (last step)
+CI polls, streams events, comments the URL on the PR.
+```
+
+- The API accepts a deploy from CI only if the token's `repository` matches
+  the registered app's repo and its owner is a member.
+- `prod` deploys only from `refs/heads/main`; `pr-N` only from that PR.
+- A failure before the route flip leaves the live version untouched. Rollback
+  routes traffic to the previous Web Function revision and static prefix.
+- Stages: `main` → `prod`. Each PR → `pr-<n>`, destroyed when the PR closes.
+  A nightly reaper removes previews idle for `previewTtlDays`.
+- App repos hold no AWS credentials. They call a reusable workflow in this
+  repo (`.github/workflows/app.yml`), so pipeline changes reach every app.
+
+## Local development: the AWS Emulator
+
+`plat dev` wraps the [AWS Emulator](https://docs.aws.amazon.com/emulator/)
+(one local HTTPS endpoint for many AWS APIs, in-memory state):
+
+1. Start the emulator on a free port (telemetry off), read its endpoint, CA
+   and generated credentials.
+2. Run `ensureLocalPlatform` and `engine.deployStage({ stage: 'local',
+   webMode: 'external' })`. The same engine that provisions AWS provisions the
+   emulator, so every local run exercises it.
+3. Run the server like a Web Function would (`AWS_LAMBDA_HTTP_ENDPOINT`, same
+   bindings) with hot reload, plus the frontend dev server.
+4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
+5. The worker runs as a local Node process with hot reload.
+   - The engine still creates the real worker Lambda, queues, event source
+     mappings and rules in the emulator, so provisioning is exercised.
+   - The emulator's `nodejs24.x` Lambda is a restricted JS sandbox (no
+     `node:http`, `https`, `net`, `tls`, `async_hooks` or `fetch`), so a
+     worker that calls AWS can't run inside it.
+   - `plat dev` therefore disables the emulator's mappings, polls the SQS
+     queues itself and redirects event rules to a queue it polls.
+   - Crons run from a local scheduler. `invokeJob` posts to the local worker
+     (`PLATFORM_LOCAL_WORKER_URL`).
+
+`plat test` does the same with a throwaway stage and runs vitest, locally and
+in CI.
+
+Emulator coverage, tested against v1.0.385 on 2026-11-14:
+
+| Works                                                                               | Missing, so the wrapper fills in                                                                   |
+| ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server  |
+| SQS + DLQ; SQS → Lambda ESM (checks role permissions)                               | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally |
+| EventBridge → SQS/Lambda (checks resource policies)                                 | Scheduler never fires: local cron runner                                                           |
+| Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                       |
+| S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                      |
+| Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                   |
+|                                                                                     | In-memory only: re-provisioned on each start (seconds)                                             |
+
+As the emulator fills gaps (it releases several times a day), the wrapper
+drops each stand-in.
+
+## Observability (built in, ~$0 per app)
+
+The SDK owns the process entry points, so every app gets telemetry without
+writing any instrumentation:
+
+- **Lines.** JSON lines on stdout (`packages/core/src/telemetry.ts`):
+  - `req`: every request, with route pattern, status, latency, country and cold start
+  - `err`: errors, with a fingerprint
+  - `job`: every queue, event, cron or invoke run
+  - `span`: SDK calls and outgoing `fetch`
+  - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
+  - All carry `trace`. Traces propagate through queue message attributes and
+    event detail.
+- **Pipeline.** One account-level CloudWatch Logs subscription filter (one per
+  account and region; destination is the control plane worker) forwards
+  `req|err|job|metric|env` lines to the telemetry processor. It writes:
+  - per-minute, per-hour and per-day rollups to `platform-telemetry`: request
+    counts by status class, a fixed-bucket latency histogram (so DynamoDB
+    `ADD` works), per-route, per-job and custom-metric series, with TTL;
+  - Sentry-style error groups. A new group sends an alert and can open a
+    GitHub issue in the app repo.
+- **No CloudWatch custom metrics, alarms or dashboards per app.** These are
+  the costs that scale with app count. Infrastructure metrics (Web Function
+  environments and throttles, queue age) are read from CloudWatch on demand.
+- **Console** (`platform.ericminassian.com`):
+  - **Home:** every app with status, traffic, error rate, p95, cost and last deploy.
+  - **Per app:**
+    - Overview graphs and per-route stats.
+    - Logs search plus live tail (CloudWatch Live Tail over SSE).
+    - Trace waterfalls; grouped errors.
+    - Jobs: queue depth, DLQ redrive, cron run-now.
+    - Data browser for collections and files.
+    - Deployments with rollback; secrets; settings; cost.
+- **Uptime.** One pinger checks every prod app every 5 minutes.
+- **Cost.** A daily Cost Explorer pull grouped by the `platform:app` tag.
+- **CLI.** `plat logs|metrics|errors|traces|data --json` gives agents the same views.
+
+## Identity
+
+- **Members** (people who create and run apps) are GitHub accounts in the
+  `members` list of `platform.config.ts`.
+  - **Console:** "Sign in with GitHub" through a GitHub App.
+  - **CLI:** `plat login` exchanges the local `gh` token for a platform token.
+  - **CI:** GitHub OIDC, no secrets.
+  - Inviting someone is a PR plus a platform deploy.
+- **App end users** use one shared Cognito user pool (Essentials tier: 10k MAU
+  free, managed login, passkeys) at `login.platform.ericminassian.com`.
+  - Each app stage gets its own public app client.
+  - The SDK implements `/__platform/auth/{login,callback,logout,me}`: PKCE,
+    HttpOnly cookies on the app's own host, and refresh.
+  - The result is one account across all of Eric's apps.
+  - An app can graduate to a dedicated pool; Cognito's lazy-migration trigger
+    moves users as they sign in.
+
+## Isolation and security
+
+- App repos have no AWS access. Only the control plane provisions.
+- Each stage's runtime role:
+  - lives under `/platform/apps/` with the platform permission boundary;
+  - is scoped to that stage's table, queues, bus, storage prefix and secrets
+    paths, and its own worker.
+- Web Functions use `IamAuth` endpoints, and their resource policy trusts only
+  the router distribution (`aws:SourceArn`).
+- CI tokens are bound to a repo and a stage (prod only from main).
+- The platform's own CI role trusts only `eric-minassian/platform` on `main`.
+- This repo is public: no account ids, ARNs or emails are committed. They
+  come from GitHub Actions variables and SSM.
+
+## DNS
+
+The root zone `ericminassian.com` stays in Eric's management account
+(github.com/eric-minassian/aws).
+
+- The `platform-prod` account is delegated `platform.ericminassian.com` through
+  the existing scoped delegation role. That zone holds:
+  - the console;
+  - `edge.platform.ericminassian.com`, an alias to the distribution;
+  - `login.platform.ericminassian.com` for Cognito.
+- The root zone has one static `*` CNAME to `edge.platform.ericminassian.com`,
+  plus the ACM validation record for the `*.ericminassian.com` certificate.
+- Explicit records and delegated siblings (orbit, forma, …) beat the wildcard.
+  Those names are listed in `reservedAppNames`.
+- App creation also checks DNS, so it never shadows an existing name.
+
+## Cost model
+
+| Item                                                | Monthly                                                                             |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Hosted zone (delegated)                             | $0.50                                                                               |
+| CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                |
+| Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                 |
+| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                        |
+| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle |
+| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                            |
+| Cognito                                             | free ≤ 10k MAU                                                                      |
+| Alarms / dashboards / custom metrics                | none per app                                                                        |
+
+Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
+the account.
+
+## Graduation
+
+Nothing in an app mentions AWS. Moving an app out is:
+
+1. Deploy a second platform instance (same foundation) in a new account.
+2. `plat app move` (planned) provisions the app there, copies DynamoDB
+   (export/import), storage objects and secrets, migrates users lazily, and
+   switches DNS.
+
+For a team that wants standard infrastructure code, `plat app export`
+(planned) generates Terraform for that app's resources from the same naming
+rules.
+
+## Repo layout
+
+```
+platform.config.ts       domain, region, members, reserved names, limits
+packages/core            contracts (naming, manifest, bindings, telemetry, router, API types)
+packages/sdk             runtime SDK + server/worker wrappers (@eric-minassian/platform)
+packages/engine          AWS SDK drivers + AWS Emulator wrapper
+packages/cli             plat CLI (@eric-minassian/plat)
+services/control-plane   API, console, deployer, telemetry, pinger, cost, reaper
+foundation               shared platform resources (applied by the engine)
+templates/app            app template + AGENTS.md/CLAUDE.md
+.github/workflows        ci, release, deploy-platform, reusable app.yml
+docs                     DESIGN.md (this), SETUP.md (one-time runbook)
+```
+
+## Risks and open items
+
+- **Web Function economics.** Idle environment lifetime isn't documented, and
+  memory is billed while warm. Watch the cost page. A future `compute:
+  'event'` mode (Function URL origin with a shared-secret header) could serve
+  near-zero-traffic apps from the Lambda free tier.
+- **Verified on the first real deploy (2026-11-15).**
+  - `updateRequestOrigin` switches from the default S3 origin to a Web
+    Function with OAC, and POST bodies arrive unsigned.
+  - The `x-platform-host` cache key keeps two hosts' responses apart.
+  - KVS route changes reach the edge in roughly 5–15 s. The deployer waits
+    for `/__platform/health` to report the new revision before calling a
+    deployment live.
+  - Measured on the template app: first deploy ~25 s, redeploy ~14 s,
+    rollback ~8 s at the edge. A Web Function cold start took ~0.4 s, peaking
+    at 182 MB.
+- **KVS writes from a Web Function.**
+  - `PutKey` (SigV4A-signed) failed with "Authentication failed" when called
+    from the API's Web Function. The same call works from the worker (an Event
+    Function).
+  - So every engine operation that writes the KVS (deploy, rollback,
+    destroy) runs in the control plane's worker. The API calls rollback
+    synchronously (`services/control-plane/src/jobs/call.ts`).
+  - Worth a closer look, or an AWS support case, if more code ever needs
+    SigV4A from a Web Function.
+- **Custom domains** (non-`ericminassian.com`) need their own certificate.
+  The plan is a second, multi-tenant (SaaS Manager) distribution reusing the
+  same function and KVS.
+- **Workflows.** Lambda durable functions (`app.workflow()`) are not wired yet.
+  The deployer is a plain async job with idempotent steps.
+- **`plat app move` and `plat app export`** are planned, not built.
+
+## Decision log
+
+| Decision                                                                             | Why                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane provisions with direct AWS SDK calls; apps ship code + `platform.json` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                               |
+| Same engine for the foundation                                                       | One mental model, no second IaC tool. Terraform's AWS provider may not support Web Functions yet.                                                                                                          |
+| Lambda Web Functions for HTTP                                                        | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here. |
+| One router distribution + KVS                                                        | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                  |
+| AWS Emulator for local dev (Eric's call)                                             | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                 |
+| No MCP; CLI only                                                                     | Eric's call. Agents use `plat … --json`.                                                                                                                                                                   |
+| Members = GitHub usernames in config                                                 | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                  |
+| Shared Cognito pool for app users                                                    | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                     |
+| `<app>--<stage>` hosts                                                               | Stays one DNS label under the single wildcard certificate.                                                                                                                                                 |
+| us-east-1                                                                            | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                            |

@@ -1,0 +1,147 @@
+# Reusable pipeline for every app on the platform. App repos call it from a
+# ~20-line workflow (templates/app/.github/workflows/platform.yml):
+#
+#   jobs:
+#     platform:
+#       uses: eric-minassian/platform/.github/workflows/app.yml@main
+#
+# Pull requests → test, deploy a preview (pr-<n>), comment the URL.
+# Closed PRs   → destroy the preview.
+# Push to main → test, deploy prod (GitHub environment `production`).
+#
+# No AWS credentials anywhere: `plat` exchanges GitHub's OIDC token with the
+# platform API, which checks the repo is registered for the app.
+name: app
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js version for builds and tests
+        type: string
+        default: "24"
+      working-directory:
+        description: Directory containing platform.json
+        type: string
+        default: "."
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - name: Enable pnpm (corepack)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm run --if-present typecheck
+      - name: Unit tests
+        run: pnpm run --if-present test
+      - name: Look for integration tests
+        id: integration
+        run: |
+          if find . -name '*.integration.test.ts' -not -path '*/node_modules/*' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the AWS Emulator
+        if: steps.integration.outputs.present == 'true'
+        run: |
+          curl -fsSLo /tmp/aws-emulator.deb https://downloads.aws.com/aws-emulator/packages/aws-emulator/LTS/latest/aws-emulator_amd64.deb
+          sudo apt-get install -y /tmp/aws-emulator.deb
+          aws-emulator -v
+      - name: Integration tests (AWS Emulator)
+        if: steps.integration.outputs.present == 'true'
+        run: pnpm exec plat test
+
+  deploy-preview:
+    if: github.event_name == 'pull_request' && github.event.action != 'closed'
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    timeout-minutes: 20
+    concurrency:
+      group: preview-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy preview
+        id: deploy
+        run: pnpm exec plat deploy
+      - name: Comment the preview URL
+        uses: actions/github-script@v9
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const marker = '<!-- platform-preview -->';
+            const body = `${marker}\n**Preview:** ${process.env.URL}\n\nDeployed \`${process.env.SHA.slice(0, 7)}\`. Removed when this PR closes.`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.body?.includes(marker));
+            if (existing) await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    timeout-minutes: 20
+    concurrency:
+      group: production-${{ github.repository }}
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Deploy prod
+        id: deploy
+        run: pnpm exec plat deploy --stage prod
+
+  cleanup-preview:
+    if: github.event_name == 'pull_request' && github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Destroy preview
+        run: pnpm exec plat destroy --stage pr-${{ github.event.pull_request.number }} --yes

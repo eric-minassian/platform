@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/eric-minassian/platform/main/packages/core/platform.schema.json",
+  "name": "template-app",
+  "description": "A todo app on the platform",
+  "web": {
+    "server": "src/server.ts",
+    "static": "web/dist",
+    "build": "vite build --config web/vite.config.ts",
+    "dev": { "command": "vite --config web/vite.config.ts", "port": 5173 },
+    "spa": true
+  },
+  "auth": true,
+  "db": true,
+  "queues": { "emails": {} },
+  "events": ["todo.created"],
+  "crons": { "cleanup": "0 3 * * *" },
+  "storage": ["uploads"]
+}

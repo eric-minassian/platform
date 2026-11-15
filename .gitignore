@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+.plat/
+*.tsbuildinfo
+.env
+.env.local
+.DS_Store
