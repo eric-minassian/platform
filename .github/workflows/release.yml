@@ -1,6 +1,7 @@
-# Publishes the four public packages to npm with trusted publishing (OIDC, no
-# NPM_TOKEN) and provenance. One-time: add this workflow as a trusted publisher
-# for each package on npmjs.com (see docs/SETUP.md).
+# Publishes the public packages whose version isn't on npm yet, with trusted
+# publishing (OIDC, no NPM_TOKEN) and provenance. Re-running without a version
+# bump checks the trusted publisher setup and publishes nothing. One-time: add
+# this workflow as a trusted publisher for each package (docs/SETUP.md step 10).
 name: release
 
 on:
@@ -31,9 +32,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Typecheck and test
         run: pnpm typecheck && pnpm test
-      - name: Build packages
-        run: pnpm -r --filter './packages/*' build
-      - name: Publish
-        env:
-          NPM_CONFIG_PROVENANCE: "true"
-        run: pnpm -r --filter './packages/*' publish --access public --no-git-checks
+      # Trusted publishing needs npm >= 11.5.1; the npm CLI publishes (see scripts/release.ts).
+      - name: Update npm
+        run: npm install -g npm@11
+      - name: Publish new versions
+        run: node scripts/release.ts

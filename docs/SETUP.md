@@ -174,7 +174,9 @@ exists, so:
    `pnpm -r --filter './packages/*' publish --access public`.
 2. On npmjs.com, add a trusted publisher to each package: GitHub Actions,
    repository `eric-minassian/platform`, workflow `release.yml`.
-3. Later releases go through the `release` workflow with no tokens.
+3. Later releases: bump the package versions, merge, then run the `release`
+   workflow. It publishes only versions that aren't on npm yet, and checks
+   trusted publishing for every package first (`scripts/release.ts`).
 
 ## 11. Smoke test
 

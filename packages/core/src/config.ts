@@ -20,7 +20,13 @@ export interface PlatformConfig {
   edgeHost: string;
   /** Cognito managed login custom domain for app end users. */
   loginHost: string;
-  github: { owner: string; repo: string };
+  /**
+   * `ownerId`/`repoId` are the numeric GitHub ids (public). Repos created with
+   * GitHub's immutable OIDC subject claims sign tokens as
+   * `repo:<owner>@<ownerId>/<repo>@<repoId>:...`, so roles that trust GitHub
+   * Actions need them (see `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`).
+   */
+  github: { owner: string; repo: string; ownerId: number; repoId: number };
   members: Member[];
   /** Names that already exist in the root zone (delegated or static records). */
   reservedAppNames: string[];
