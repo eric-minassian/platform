@@ -8,6 +8,7 @@ export * from './lambda.ts';
 export * from './logs.ts';
 export * from './s3.ts';
 export * from './scheduler.ts';
+export * from './ses.ts';
 export * from './sqs.ts';
 export * from './ssm.ts';
 export * from './web-function.ts';

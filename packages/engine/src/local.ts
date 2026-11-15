@@ -1,6 +1,7 @@
 import { CreateApiCommand } from '@aws-sdk/client-appsync';
 import { CreateFunctionCommand, GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
 import {
+  emailDomain,
   NODE_RUNTIME,
   type PlatformRuntimeConfig,
   platformNames,
@@ -12,6 +13,7 @@ import { ensureUserPool } from './drivers/cognito.ts';
 import { ensureTable } from './drivers/dynamodb.ts';
 import { ensureRole } from './drivers/iam.ts';
 import { ensureBucket } from './drivers/s3.ts';
+import { ensureEmailIdentity } from './drivers/ses.ts';
 import { serviceTrustPolicy } from './policy.ts';
 import { type EngineContext, ignoreNotFound, platformTags, waitFor } from './util.ts';
 
@@ -31,6 +33,7 @@ export async function ensureLocal(
   const artifactsBucket = platformNames.artifactsBucket(accountId, region);
   const sitesBucket = platformNames.sitesBucket(accountId, region);
   const storageBucket = platformNames.storageBucket(accountId, region);
+  const domain = opts.domain ?? 'localhost';
 
   await ensureBucket(ctx, { name: artifactsBucket, versioned: true, tags });
   await ensureBucket(ctx, { name: sitesBucket, tags });
@@ -39,10 +42,7 @@ export async function ensureLocal(
     tags,
     cors: [
       {
-        AllowedOrigins: [
-          `http://*.${opts.domain ?? 'localhost'}:${opts.port}`,
-          `http://localhost:${opts.port}`,
-        ],
+        AllowedOrigins: [`http://*.${domain}:${opts.port}`, `http://localhost:${opts.port}`],
         AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
         AllowedHeaders: ['*'],
         ExposeHeaders: ['ETag'],
@@ -66,13 +66,17 @@ export async function ensureLocal(
   });
   const userPoolId = await ensureUserPool(ctx, { name: platformNames.userPool, tags });
   const realtime = await ensureLocalRealtime(ctx, tags);
+  // Stages get real tenants and configuration sets in the emulator, so the domain they're
+  // associated with must exist. It never verifies and nothing is sent: local stages hand
+  // their mail to the CLI (`email.mode: 'local'`).
+  const mail = await ensureEmailIdentity(ctx, { domain: emailDomain(domain), tags });
 
   return {
     v: 1,
     target: 'emulator',
     accountId,
     region,
-    domain: opts.domain ?? 'localhost',
+    domain,
     publicScheme: 'http',
     publicPort: opts.port,
     artifactsBucket,
@@ -84,6 +88,7 @@ export async function ensureLocal(
     loginUrl: `http://localhost:${opts.port}`,
     jwksBaseUrl: opts.jwksBaseUrl,
     realtime,
+    email: { domain: mail.domain, identityArn: mail.arn },
   };
 }
 

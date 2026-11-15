@@ -1,9 +1,12 @@
 import {
+  type EmailRuntimeConfig,
+  emailFromAddress,
   IAM_APP_PATH,
   names,
   type PlatformRuntimeConfig,
   platformNames,
   type ResolvedManifest,
+  telemetryKeys,
 } from '@ericminassian/platform-core';
 import { type PolicyDocument, type PolicyStatement, policy } from './util.ts';
 
@@ -13,7 +16,7 @@ export interface StagePolicyInput {
   region: string;
   accountId: string;
   manifest: ResolvedManifest;
-  platform: Pick<PlatformRuntimeConfig, 'storageBucket' | 'realtime'>;
+  platform: Pick<PlatformRuntimeConfig, 'storageBucket' | 'telemetryTable' | 'realtime' | 'email'>;
 }
 
 /** A channel namespace's ARN in the platform's Event API. */
@@ -24,6 +27,16 @@ export function channelNamespaceArn(
   namespace: string,
 ): string {
   return `arn:aws:appsync:${region}:${accountId}:apis/${apiId}/channelNamespace/${namespace}`;
+}
+
+/** An SES configuration set's ARN (each stage's is `names.emailTenant`). */
+export function configurationSetArn(region: string, accountId: string, name: string): string {
+  return `arn:aws:ses:${region}:${accountId}:configuration-set/${name}`;
+}
+
+/** An SES identity's ARN (the platform's is its mail domain). */
+export function emailIdentityArn(region: string, accountId: string, identity: string): string {
+  return `arn:aws:ses:${region}:${accountId}:identity/${identity}`;
 }
 
 /** Trust for per-stage roles: the worker and Web Function (Lambda) and schedules (Scheduler). */
@@ -152,6 +165,42 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
     });
   }
 
+  // Sending only as this stage: its address, its tenant (whose reputation policy can pause it, a
+  // backstop app code can't get around) and its configuration set. SES v1 shares the action
+  // name, so `ses:ApiVersion` keeps the grant to SESv2, the API the SDK sends with. The SDK names
+  // the tenant and the configuration set on every send; IAM checks the identity and the
+  // configuration set as resources.
+  const email = input.platform.email;
+  if (manifest.email && email) {
+    const tenant = names.emailTenant(app, stage);
+    statements.push(
+      {
+        Sid: 'Email',
+        Effect: 'Allow',
+        Action: 'ses:SendEmail',
+        Resource: [email.identityArn, configurationSetArn(region, acct, tenant)],
+        Condition: {
+          StringEquals: {
+            'ses:FromAddress': emailFromAddress(app, stage, email.domain),
+            'ses:TenantName': tenant,
+            'ses:ApiVersion': '2',
+          },
+        },
+      },
+      {
+        // The daily limit's counter: one row per UTC day in the platform's telemetry table,
+        // under this stage's own partition key only.
+        Sid: 'EmailUsage',
+        Effect: 'Allow',
+        Action: 'dynamodb:UpdateItem',
+        Resource: `arn:aws:dynamodb:${region}:${acct}:table/${input.platform.telemetryTable}`,
+        Condition: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [telemetryKeys.email(app, stage)] },
+        },
+      },
+    );
+  }
+
   if (manifest.worker) {
     statements.push({
       Sid: 'InvokeWorker',
@@ -176,8 +225,34 @@ export function boundaryPolicy(input: {
   storageBucket: string;
   /** The platform's Event API; stage roles may publish to its stage namespaces. */
   realtimeApiId?: string;
+  /**
+   * The platform's mail domain and the table holding usage counters; stage roles may send as
+   * a stage tenant and count what they send.
+   */
+  email?: { identityArn: string; usageTable: string };
 }): PolicyDocument {
   const { region, accountId: acct } = input;
+  const email: PolicyStatement[] = input.email
+    ? [
+        {
+          Sid: 'StageEmail',
+          Effect: 'Allow',
+          Action: 'ses:SendEmail',
+          // Tenants and their configuration sets are `<app>--<stage>`.
+          Resource: [input.email.identityArn, configurationSetArn(region, acct, '*--*')],
+          Condition: { StringLike: { 'ses:TenantName': '*--*' } },
+        },
+        {
+          Sid: 'StageEmailUsage',
+          Effect: 'Allow',
+          Action: 'dynamodb:UpdateItem',
+          Resource: `arn:aws:dynamodb:${region}:${acct}:table/${input.email.usageTable}`,
+          Condition: {
+            'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': [telemetryKeys.email('*', '*')] },
+          },
+        },
+      ]
+    : [];
   const realtime: PolicyStatement[] = input.realtimeApiId
     ? [
         {
@@ -247,6 +322,7 @@ export function boundaryPolicy(input: {
       Resource: `arn:aws:lambda:${region}:${acct}:function:*--*--worker`,
     },
     ...realtime,
+    ...email,
   );
 }
 
@@ -267,7 +343,10 @@ export function controlPlanePolicy(input: {
     | 'userPoolId'
     | 'boundaryPolicyArn'
     | 'alertsTopicArn'
-  > & { realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'> };
+  > & {
+    realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'>;
+    email?: Pick<EmailRuntimeConfig, 'identityArn'>;
+  };
 }): PolicyDocument {
   const { region, accountId: acct, runtime } = input;
   const appRoles = `arn:aws:iam::${acct}:role${IAM_APP_PATH}*`;
@@ -425,6 +504,46 @@ export function controlPlanePolicy(input: {
       Action: 'appsync:ListApis',
       Resource: '*',
     });
+  }
+  if (runtime.email) {
+    const ses = `arn:aws:ses:${region}:${acct}`;
+    statements.push(
+      {
+        // Stage tenants and their configuration sets: the engine creates, associates and deletes
+        // them; the control plane reads their status, pauses and resumes sending, and manages
+        // their suppression lists. Tenant ARNs are `tenant/<name>/<id>`, so `*--*` covers both.
+        Sid: 'Email',
+        Effect: 'Allow',
+        Action: [
+          'ses:CreateConfigurationSet',
+          'ses:GetConfigurationSet',
+          'ses:DeleteConfigurationSet',
+          'ses:PutConfigurationSetReputationOptions',
+          'ses:CreateTenant',
+          'ses:GetTenant',
+          'ses:DeleteTenant',
+          'ses:PutTenantSuppressionAttributes',
+          'ses:CreateTenantResourceAssociation',
+          'ses:DeleteTenantResourceAssociation',
+          'ses:ListTenantResources',
+          'ses:TagResource',
+          'ses:ListTagsForResource',
+          'ses:GetReputationEntity',
+          'ses:UpdateReputationEntityCustomerManagedStatus',
+          'ses:ListSuppressedDestinations',
+          'ses:GetSuppressedDestination',
+          'ses:DeleteSuppressedDestination',
+        ],
+        Resource: [`${ses}:tenant/*--*`, `${ses}:configuration-set/*--*`],
+      },
+      {
+        // An association is authorized against the associated resource too: here, the domain.
+        Sid: 'EmailDomain',
+        Effect: 'Allow',
+        Action: ['ses:CreateTenantResourceAssociation', 'ses:DeleteTenantResourceAssociation'],
+        Resource: runtime.email.identityArn,
+      },
+    );
   }
   if (runtime.alertsTopicArn) {
     statements.push({

@@ -85,7 +85,7 @@ export interface DeployStageInput {
 }
 
 export interface ResourceRef {
-  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `route`, `static` */
+  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `email-tenant`, `configuration-set`, `route`, `static` */
   type: string;
   name: string;
   arn?: string;
@@ -184,7 +184,8 @@ function createContext(opts: EngineOptions): EngineContext {
 
 /**
  * Shared resources `plat dev` needs inside a fresh emulator (buckets, tables,
- * user pool) and the matching runtime config (`target: 'emulator'`).
+ * user pool, realtime API, mail domain) and the matching runtime config
+ * (`target: 'emulator'`).
  */
 export async function ensureLocalPlatform(
   engine: Engine,

@@ -1,10 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { platformNames, REALTIME_TOKEN_PATTERN } from '@ericminassian/platform-core';
+import {
+  emailDomain,
+  emailMailFromDomain,
+  platformNames,
+  REALTIME_TOKEN_PATTERN,
+} from '@ericminassian/platform-core';
 import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import config from '../../platform.config.ts';
-import { FOUNDATION_STACK, FoundationStack } from '../src/stack.ts';
+import { FOUNDATION_STACK, FoundationStack, type FoundationStackProps } from '../src/stack.ts';
 
 const account = '123456789012';
 const delegationRole = 'arn:aws:iam::210987654321:role/route53-delegation-platform-ericminassian-com';
@@ -13,17 +18,21 @@ const { context } = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.u
   context: Record<string, unknown>;
 };
 
-function synth(alertEmail?: string): Template {
+function synth(
+  opts: { alertEmail?: string; userPoolEmail?: FoundationStackProps['userPoolEmail'] } = {},
+): Template {
   const stack = new FoundationStack(new App({ context }), FOUNDATION_STACK, {
     env: { account, region: config.region },
     config,
     dnsDelegationRoleArn: delegationRole,
-    ...(alertEmail ? { alertEmail } : {}),
+    ...(opts.alertEmail ? { alertEmail: opts.alertEmail } : {}),
+    userPoolEmail: opts.userPoolEmail ?? 'cognito',
   });
   return Template.fromStack(stack);
 }
 
-const template = synth('alerts@example.com');
+const template = synth({ alertEmail: 'alerts@example.com' });
+const mailDomain = emailDomain(config.zone);
 
 /** Logical id of the one resource of `type` whose properties match `props`. */
 function logicalId(type: string, props: Record<string, unknown>): string {
@@ -57,6 +66,7 @@ describe('foundation stack', () => {
     template.hasResourceProperties('AWS::Lambda::Function', {
       FunctionName: platformNames.realtimeAuthorizer,
     });
+    template.hasResourceProperties('AWS::SES::EmailIdentity', { EmailIdentity: mailDomain });
   });
 
   describe('realtime', () => {
@@ -133,6 +143,114 @@ describe('foundation stack', () => {
     });
   });
 
+  describe('email', () => {
+    const identity = () => logicalId('AWS::SES::EmailIdentity', { EmailIdentity: mailDomain });
+    const zone = () => logicalId('AWS::Route53::HostedZone', { Name: `${config.zone}.` });
+    const records = (type: string) =>
+      Object.values(template.findResources('AWS::Route53::RecordSet', { Properties: { Type: type } })).map(
+        (r) => r.Properties as { Name: unknown; ResourceRecords: unknown[]; HostedZoneId: unknown },
+      );
+
+    it('verifies mail.<zone> with 2048-bit Easy DKIM and its own MAIL FROM domain', () => {
+      template.resourceCountIs('AWS::SES::EmailIdentity', 1);
+      template.hasResourceProperties('AWS::SES::EmailIdentity', {
+        EmailIdentity: 'mail.platform.ericminassian.com',
+        DkimSigningAttributes: { NextSigningKeyLength: 'RSA_2048_BIT' },
+        MailFromAttributes: {
+          MailFromDomain: emailMailFromDomain(mailDomain),
+          BehaviorOnMxFailure: 'USE_DEFAULT_VALUE',
+        },
+        Tags: Match.arrayWith([{ Key: 'platform:component', Value: 'email' }]),
+      });
+    });
+
+    it('publishes its DKIM, MAIL FROM and DMARC records in the platform zone, not at its apex', () => {
+      const dkim = records('CNAME');
+      expect(dkim.map((r) => r.Name)).toEqual(
+        [1, 2, 3].map((n) => ({ 'Fn::GetAtt': [identity(), `DkimDNSTokenName${n}`] })),
+      );
+      expect(dkim.map((r) => r.ResourceRecords)).toEqual(
+        [1, 2, 3].map((n) => [{ 'Fn::GetAtt': [identity(), `DkimDNSTokenValue${n}`] }]),
+      );
+      for (const r of dkim) expect(r.HostedZoneId).toEqual({ Ref: zone() });
+      const bounce = `${emailMailFromDomain(mailDomain)}.`;
+      expect(records('MX')).toEqual([
+        expect.objectContaining({
+          Name: bounce,
+          ResourceRecords: [`10 feedback-smtp.${config.region}.amazonses.com`],
+          HostedZoneId: { Ref: zone() },
+        }),
+      ]);
+      const txt = Object.fromEntries(records('TXT').map((r) => [r.Name as string, r.ResourceRecords]));
+      expect(txt).toEqual({
+        [bounce]: ['"v=spf1 include:amazonses.com ~all"'],
+        [`_dmarc.${mailDomain}.`]: ['"v=DMARC1; p=quarantine; adkim=r; aspf=r"'],
+      });
+    });
+
+    it('bounds stage roles to sending as a stage tenant and counting their own sends', () => {
+      template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
+        ManagedPolicyName: platformNames.boundaryPolicy,
+        PolicyDocument: Match.objectLike({
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Sid: 'StageEmail',
+              Action: 'ses:SendEmail',
+              Condition: { StringLike: { 'ses:TenantName': '*--*' } },
+            }),
+            Match.objectLike({
+              Sid: 'StageEmailUsage',
+              Action: 'dynamodb:UpdateItem',
+              Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['mail#*#*'] } },
+            }),
+          ]),
+        }),
+      });
+    });
+
+    it('lets the control plane manage stage tenants and associate them with the domain', () => {
+      template.hasResourceProperties('AWS::IAM::Role', {
+        RoleName: platformNames.controlPlaneRole,
+        Policies: [
+          {
+            PolicyName: 'control',
+            PolicyDocument: Match.objectLike({
+              Statement: Match.arrayWith([
+                Match.objectLike({ Sid: 'Email', Action: Match.arrayWith(['ses:CreateTenant']) }),
+                Match.objectLike({
+                  Sid: 'EmailDomain',
+                  Action: ['ses:CreateTenantResourceAssociation', 'ses:DeleteTenantResourceAssociation'],
+                }),
+              ]),
+            }),
+          },
+        ],
+      });
+    });
+
+    it("keeps Cognito's sender until SES can deliver to anyone", () => {
+      const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0]!;
+      expect(pool.Properties.EmailConfiguration).toBeUndefined();
+      expect(pool.DependsOn).toBeUndefined();
+    });
+
+    it('then sends sign-up mail from login@ the mail domain through SES', () => {
+      const ses = synth({ userPoolEmail: 'ses' });
+      const pools = ses.findResources('AWS::Cognito::UserPool');
+      const [id, pool] = Object.entries(pools)[0]!;
+      expect(pool.Properties.EmailConfiguration).toEqual({
+        EmailSendingAccount: 'DEVELOPER',
+        From: `"${config.domain}" <login@${mailDomain}>`,
+        SourceArn: `arn:aws:ses:${config.region}:${account}:identity/${mailDomain}`,
+      });
+      // The ARN is a literal, so only this makes the identity come first.
+      const identityId = Object.keys(ses.findResources('AWS::SES::EmailIdentity'))[0];
+      expect(pool.DependsOn).toEqual([identityId]);
+      // The same pool either way: switching updates it in place.
+      expect(id).toBe(Object.keys(template.findResources('AWS::Cognito::UserPool'))[0]);
+    });
+  });
+
   it('retains everything that holds data or routes traffic', () => {
     const retained = [
       logicalId('AWS::Route53::HostedZone', { Name: `${config.zone}.` }),
@@ -142,9 +260,10 @@ describe('foundation stack', () => {
       ...Object.keys(template.findResources('AWS::Cognito::UserPool')),
       ...Object.keys(template.findResources('Custom::CrossAccountZoneDelegation')),
       ...Object.keys(template.findResources('AWS::AppSync::Api')),
+      ...Object.keys(template.findResources('AWS::SES::EmailIdentity')),
     ];
     const resources = template.toJSON().Resources as Record<string, { DeletionPolicy?: string }>;
-    expect(retained).toHaveLength(10);
+    expect(retained).toHaveLength(11);
     for (const id of retained) expect(resources[id]?.DeletionPolicy, id).toBe('Retain');
   });
 
@@ -249,6 +368,10 @@ describe('foundation stack', () => {
     const api = logicalId('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
     for (const attr of ['ApiId', 'Dns.Http', 'Dns.Realtime'])
       expect(parts).toContainEqual({ 'Fn::GetAtt': [api, attr] });
+    expect(literal).toContain(`"email":{"domain":"${mailDomain}","identityArn":"arn:`);
+    expect(parts).toContainEqual({
+      Ref: logicalId('AWS::SES::EmailIdentity', { EmailIdentity: mailDomain }),
+    });
     expect(literal).toContain(
       `"telemetryFunctionArn":"arn:aws:lambda:${config.region}:${account}:function:platform--prod--worker"`,
     );
