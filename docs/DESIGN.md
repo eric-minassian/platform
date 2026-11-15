@@ -211,6 +211,12 @@ CI polls, streams events, comments the URL on the PR.
   A nightly reaper removes previews idle for `previewTtlDays`.
 - App repos hold no AWS credentials. They call a reusable workflow in this
   repo (`.github/workflows/app.yml`), so pipeline changes reach every app.
+- An app with a `test:e2e` script (Playwright) gets a browser check against
+  each preview, and the same suite runs as a smoke check after each prod
+  deploy, with the stage's URL in `BASE_URL`. Unit and emulator tests can't
+  see what only a browser shows. A failing smoke check marks the commit red
+  but doesn't roll back, since the change already passed the suite on its
+  preview.
 
 ## Local development: the AWS Emulator
 

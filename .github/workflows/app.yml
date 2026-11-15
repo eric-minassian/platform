@@ -5,9 +5,14 @@
 #     platform:
 #       uses: eric-minassian/platform/.github/workflows/app.yml@main
 #
-# Pull requests → test, deploy a preview (pr-<n>), comment the URL.
+# Pull requests → test, deploy a preview (pr-<n>), comment the URL, run the
+#                browser tests against it.
 # Closed PRs   → destroy the preview.
-# Push to main → test, deploy prod (GitHub environment `production`).
+# Push to main → test, deploy prod (GitHub environment `production`), run the
+#                browser tests against it as a smoke check.
+#
+# Browser tests run when package.json has a `test:e2e` script: a Playwright
+# suite that reads the stage's URL from BASE_URL.
 #
 # No AWS credentials anywhere: `plat` exchanges GitHub's OIDC token with the
 # platform API, which checks the repo is registered for the app.
@@ -38,6 +43,8 @@ jobs:
       run:
         working-directory: ${{ inputs.working-directory }}
     timeout-minutes: 20
+    outputs:
+      e2e: ${{ steps.e2e.outputs.present }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -66,6 +73,12 @@ jobs:
       - name: Integration tests (AWS Emulator)
         if: steps.integration.outputs.present == 'true'
         run: pnpm exec plat test
+      - name: Look for browser tests
+        id: e2e
+        run: |
+          if jq -e '.scripts["test:e2e"]' package.json > /dev/null; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
   deploy-preview:
     if: github.event_name == 'pull_request' && github.event.action != 'closed'
@@ -78,6 +91,8 @@ jobs:
     concurrency:
       group: preview-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: true
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -118,6 +133,8 @@ jobs:
     environment:
       name: production
       url: ${{ steps.deploy.outputs.url }}
+    outputs:
+      url: ${{ steps.deploy.outputs.url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -128,6 +145,73 @@ jobs:
       - name: Deploy prod
         id: deploy
         run: pnpm exec plat deploy --stage prod
+
+  # Browser tests against whichever stage this run deployed. They join that
+  # stage's concurrency group, so they always test the deployment they follow:
+  # a newer preview deploy cancels them, and the next prod deploy waits.
+  e2e:
+    needs: [check, deploy-preview, deploy-production]
+    if: >-
+      !cancelled() && needs.check.outputs.e2e == 'true' &&
+      (needs.deploy-preview.result == 'success' || needs.deploy-production.result == 'success')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    timeout-minutes: 20
+    concurrency:
+      group: >-
+        ${{ github.event_name == 'pull_request'
+        && format('preview-{0}-{1}', github.repository, github.event.pull_request.number)
+        || format('production-{0}', github.repository) }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Find Playwright
+        id: playwright
+        run: |
+          if ! version=$(pnpm exec playwright --version 2>/dev/null); then
+            echo "::error::package.json has a test:e2e script, but Playwright isn't installed: add @playwright/test to devDependencies."
+            exit 1
+          fi
+          echo "version=${version#Version }" >> "$GITHUB_OUTPUT"
+      - name: Restore Chromium
+        id: chromium
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright.outputs.version }}
+      # Skips the download when the cache restored this version; the system
+      # libraries aren't cached, so it installs those every run.
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+      # Saved here rather than at the end of the job, which a failing test would skip.
+      - name: Save Chromium
+        if: steps.chromium.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.chromium.outputs.cache-primary-key }}
+      - name: Browser tests
+        env:
+          BASE_URL: ${{ needs.deploy-preview.outputs.url || needs.deploy-production.outputs.url }}
+        run: pnpm run test:e2e
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: |
+            ${{ inputs.working-directory }}/test-results/
+            ${{ inputs.working-directory }}/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
 
   cleanup-preview:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'

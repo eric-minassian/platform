@@ -16,7 +16,7 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 3. **Never commit secrets.** Use `plat secrets set NAME` for deployed stages and `.env.local` (git-ignored)
    for `plat dev`. Declare each name under `secrets`.
 4. **Run `pnpm typecheck && pnpm test` before you push.** CI runs the same checks, plus `plat test` when
-   `*.integration.test.ts` files exist.
+   `*.integration.test.ts` files exist. After deploying, it runs `pnpm test:e2e` against the stage.
 
 ## Layout
 
@@ -29,6 +29,7 @@ the app; the platform provisions, deploys, routes, signs users in and monitors i
 | `web/`                       | React SPA (Vite), built into `web/dist`, served from the edge                          |
 | `test/*.test.ts`             | Unit tests with a mocked SDK (`pnpm test`)                                             |
 | `test/*.integration.test.ts` | Real SDK against the AWS Emulator (`plat test`)                                        |
+| `e2e/*.spec.ts`              | Browser tests (Playwright) against a running stage (`pnpm test:e2e`)                   |
 
 Requests for `/api/*` and `/__platform/*` go to the server; files go to `web/dist`. Any other path
 serves `index.html`, which is how client-side routing works. Change the server prefixes with
@@ -104,6 +105,15 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 - **Plain config.** Use `env: { FEATURE_X: 'on' }`, read via `process.env.FEATURE_X`. Not for secrets.
 - **Custom metric.** Use `metrics.count('name')` or `metrics.value('name', n)`. It appears in the console
   and in `plat metrics`.
+- **Browser test.** Add a test to `e2e/`. Use it for what only a browser shows: rendering, styles, focus,
+  client-side state.
+  - CI runs the suite against the PR's preview and, after each deploy, production, with the stage's URL in
+    `BASE_URL`. A failure in production doesn't roll back; fix forward or run `plat rollback`.
+  - Tests share those stages' data, so leave nothing behind: only read, or remove what a test writes. Keep
+    each test's data apart, for example under a random id, so tests can run in parallel.
+  - Deployed stages sign in through the real user pool, so tests there run signed out.
+  - When it fails, the run's `playwright-traces` artifact has a trace per failed test:
+    `pnpm exec playwright show-trace <trace.zip>`.
 
 ## Local loop
 
@@ -112,6 +122,7 @@ pnpm install
 pnpm dev                     # whole app on the AWS Emulator: http://template-app.localhost:3000
 pnpm test                    # unit tests (mocked SDK)
 pnpm test:integration        # plat test: real SDK against a throwaway emulator
+pnpm test:e2e                # browser tests against plat dev (started if needed), or BASE_URL=<url>
 plat dev run-cron cleanup    # fire a cron in the running `plat dev`
 ```
 
@@ -124,11 +135,15 @@ plat dev run-cron cleanup    # fire a cron in the running `plat dev`
 - State is in memory and is gone when it stops.
 - It needs the `aws-emulator` binary (see the hint it prints).
 
+Browser tests need Chromium once: `pnpm exec playwright install chromium`.
+
 ## Deploying
 
-- **Pull request:** deploys a preview to `https://template-app--pr-<n>.ericminassian.com`. The URL is
-  commented on the PR, and the preview is destroyed when the PR closes.
-- **Merge to `main`:** deploys `https://template-app.ericminassian.com`.
+- **Pull request:** deploys a preview to `https://template-app--pr-<n>.ericminassian.com`, then runs the
+  browser tests against it as their own check. The URL is commented on the PR, and the preview is
+  destroyed when the PR closes.
+- **Merge to `main`:** deploys `https://template-app.ericminassian.com`, then runs the browser tests
+  against it.
 - Deploys take seconds. A failed deploy never goes live. Roll back with `plat rollback`.
 - One-time per app: `plat apps create template-app --repo <owner>/<repo>` registers the repo with the
   platform. Without it, CI deploys are rejected.

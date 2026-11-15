@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const pkgRoot = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const src = resolve(pkgRoot, '..', '..', 'templates', 'app');
 const dest = join(pkgRoot, 'template');
-const skip = new Set(['node_modules', '.plat', 'dist', 'coverage']);
+const skip = new Set(['node_modules', '.plat', 'dist', 'coverage', 'test-results', 'playwright-report']);
 
 rmSync(dest, { recursive: true, force: true });
 cpSync(src, dest, {

@@ -18,7 +18,15 @@ export const TEMPLATE_PACKAGE_NAME = 'platform-app-template';
 /** Written into new apps so CI's corepack uses the same pnpm as the platform. */
 export const PACKAGE_MANAGER = 'pnpm@12.11.2';
 
-const SKIP = new Set(['node_modules', '.plat', 'dist', 'coverage', '.turbo']);
+const SKIP = new Set([
+  'node_modules',
+  '.plat',
+  'dist',
+  'coverage',
+  '.turbo',
+  'test-results',
+  'playwright-report',
+]);
 const TEXT_EXT = new Set([
   '.ts',
   '.tsx',

@@ -37,8 +37,24 @@ describe('plat init', () => {
     expect(readFileSync(join(dir, 'AGENTS.md'), 'utf8')).toContain('my-notes--pr-<n>.ericminassian.com');
     expect(existsSync(join(dir, '.gitignore'))).toBe(true);
     expect(existsSync(join(dir, '.github/workflows/platform.yml'))).toBe(true);
+    expect(r.files).toEqual(expect.arrayContaining(['playwright.config.ts', 'e2e/home.spec.ts']));
     expect(r.files.some((f) => f.startsWith('node_modules/'))).toBe(false);
     expect(r.files).not.toContain('web/dist/index.html');
+  });
+
+  it('leaves out local build and test output', () => {
+    const template = tempDir();
+    for (const f of [
+      'plat.config.ts',
+      'test-results/trace.zip',
+      'playwright-report/index.html',
+      'web/dist/a.js',
+    ]) {
+      mkdirSync(join(template, f, '..'), { recursive: true });
+      writeFileSync(join(template, f), '');
+    }
+    const r = initApp({ dir: join(tempDir(), 'clean-app'), template });
+    expect(r.files).toEqual(['plat.config.ts', 'pnpm-workspace.yaml']);
   });
 
   it('uses --name over the directory name', () => {
