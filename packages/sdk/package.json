@@ -1,7 +1,7 @@
 {
   "name": "@ericminassian/platform",
   "version": "0.3.0",
-  "description": "Runtime SDK for apps on the platform, built on Effect: db, queues, events, storage, secrets, auth, realtime, metrics.",
+  "description": "Runtime SDK for apps on the platform, built on Effect: db, queues, events, storage, secrets, auth, realtime, email, metrics.",
   "license": "MIT",
   "repository": {
     "type": "git",

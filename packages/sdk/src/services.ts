@@ -1,4 +1,5 @@
-import { Context, Duration, Effect, Layer, Option, Redacted } from 'effect';
+import type { EmailMessage } from '@ericminassian/platform-core';
+import { Context, Data, Duration, Effect, Layer, Option, Redacted, Schema } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
 import type {
@@ -13,6 +14,7 @@ import type {
 } from './register.ts';
 import { app } from './runtime/app.ts';
 import { getUser } from './runtime/auth/index.ts';
+import { EmailRefused, sendEmail } from './runtime/email.ts';
 import { events } from './runtime/events.ts';
 import { queue } from './runtime/queue.ts';
 import { realtime } from './runtime/realtime.ts';
@@ -128,6 +130,64 @@ export class Realtime extends Context.Service<
     Realtime.of({
       publish: (channel, event) => Effect.promise(() => realtime.publish(channel, event)),
       publishMany: (channel, batch) => Effect.promise(() => realtime.publishMany(channel, batch)),
+    }),
+  );
+}
+
+/**
+ * Why `Email.send` didn't send:
+ * - `daily-limit`: the stage's recipients today would pass `email.dailyLimit`.
+ * - `paused`: SES paused the stage's sending (its bounce or complaint rate,
+ *   the owner in the console, or AWS). It stays paused until resumed.
+ * - `rejected`: the message is invalid, or SES refused it.
+ *
+ * In a queue handler, letting it fail the job retries the message and then
+ * dead-letters it.
+ */
+export class EmailNotSent extends Schema.TaggedError<EmailNotSent, { readonly brand: unique symbol }>()(
+  'EmailNotSent',
+  { reason: Schema.Literals(['daily-limit', 'paused', 'rejected']), message: Schema.String },
+) {}
+
+export type { EmailMessage } from '@ericminassian/platform-core';
+
+/** Any other failure of a send; becomes a defect. */
+class EmailFailure extends Data.TaggedError('EmailFailure')<{ readonly cause: unknown }> {}
+
+/**
+ * Transactional email (`email` in `plat.config.ts`) from the stage's own
+ * address: `<app>@mail.platform.ericminassian.com` in prod,
+ * `<app>--<stage>@…` elsewhere, with `email.name` as the display name. The
+ * address takes no mail, so set `replyTo` where replies should go.
+ *
+ * - Every recipient counts against `email.dailyLimit` per UTC day (previews
+ *   and `plat dev` get at most 50).
+ * - Deployed stages skip recipients at reserved test domains (`example.com`,
+ *   `*.test`, …) with a log line: they can never receive mail.
+ * - Under `plat dev` and `plat test` nothing is sent: messages appear in the
+ *   local inbox at `/__platform/mail`.
+ *
+ * Send from a queue handler where you can, so a failure retries instead of
+ * failing a request.
+ */
+export class Email extends Context.Service<
+  Email,
+  {
+    /** Sends one message. `id` is SES's message id (a generated one locally, or when every recipient was skipped). */
+    send(message: EmailMessage): Effect.Effect<{ readonly id: string }, EmailNotSent>;
+  }
+>()('@ericminassian/platform/Email') {
+  static readonly layer: Layer.Layer<Email> = Layer.succeed(
+    Email,
+    Email.of({
+      send: (message) =>
+        Effect.tryPromise({
+          try: () => sendEmail(message),
+          catch: (cause) =>
+            cause instanceof EmailRefused
+              ? new EmailNotSent({ reason: cause.reason, message: cause.message })
+              : new EmailFailure({ cause }),
+        }).pipe(Effect.catchTag('EmailFailure', (e) => Effect.die(e.cause))),
     }),
   );
 }

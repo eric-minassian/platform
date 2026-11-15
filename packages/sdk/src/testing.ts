@@ -8,6 +8,9 @@
  */
 import {
   type Bindings,
+  type CapturedEmail,
+  EMAIL_INBOX_PATH,
+  LOCAL_MAIL_URL_ENV,
   type TelemetryEvent,
   VIEWER_ADDRESS_HEADER,
   VIEWER_COUNTRY_HEADER,
@@ -15,10 +18,12 @@ import {
 import { clientInfoFromHeaders } from './client-info.ts';
 import { setBindings } from './runtime/bindings.ts';
 import { resetClients, type SendClient, setClient } from './runtime/clients.ts';
+import { setEmailCapture } from './runtime/email.ts';
 import { setRealtimeTransport } from './runtime/realtime.ts';
 import { clearSecretsCache } from './runtime/secrets.ts';
 import { setTelemetrySink, uninstallInstrumentation } from './runtime/telemetry.ts';
 
+export type { CapturedEmail } from '@ericminassian/platform-core';
 export type { SendClient } from './runtime/clients.ts';
 export { createPlatformFetch } from './runtime/server.ts';
 export { createWorkerHandler } from './runtime/worker.ts';
@@ -66,7 +71,7 @@ export function clientHeaders(ip: string, options: { country?: string } = {}): R
 
 /** Replace an AWS client with a fake `{ send(command) }`. */
 export function mockClient(
-  name: 'ddb' | 'sqs' | 'events' | 's3' | 'ssm' | 'lambda' | 'cognito',
+  name: 'ddb' | 'sqs' | 'events' | 's3' | 'ssm' | 'lambda' | 'cognito' | 'sesv2',
   send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => unknown,
 ): SendClient {
   const fake: SendClient = {
@@ -104,10 +109,65 @@ export function captureRealtime(): { published: CapturedRealtimeEvent[]; stop():
   return { published, stop: () => setRealtimeTransport(undefined) };
 }
 
-/** Reset all SDK module state (bindings, clients, caches, telemetry sink, realtime capture). */
+/**
+ * Record what `Email.send` sends instead of delivering it: no SES, no local
+ * inbox and no daily count (`Platform.layerMemory({ email })` tests the limit).
+ * Messages are still checked, and the bindings need `email`, as deployed.
+ * Call `stop()` to restore.
+ */
+export function captureEmails(): { sent: CapturedEmail[]; stop(): void } {
+  const sent: CapturedEmail[] = [];
+  setEmailCapture((mail) => void sent.push(mail));
+  return { sent, stop: () => setEmailCapture(undefined) };
+}
+
+/** The `plat test` / `plat dev` inbox's message list (`GET` on `PLATFORM_LOCAL_MAIL_URL`). */
+export interface LocalInboxList {
+  /** Newest first. */
+  messages: CapturedEmail[];
+}
+
+function localMailUrl(): string {
+  const url = process.env[LOCAL_MAIL_URL_ENV];
+  if (!url)
+    throw new Error(
+      `${LOCAL_MAIL_URL_ENV} is not set: the local inbox (${EMAIL_INBOX_PATH}) exists under \`plat test\` and \`plat dev\`.`,
+    );
+  return url;
+}
+
+/** What `Email.send` delivered under `plat test` (or `plat dev`), newest first. */
+export async function localInbox(): Promise<CapturedEmail[]> {
+  const url = localMailUrl();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`the local inbox at ${url} answered ${res.status}`);
+  return ((await res.json()) as LocalInboxList).messages;
+}
+
+/**
+ * The newest message in the local inbox that `match` accepts, waiting for one
+ * to arrive (mail sent by the worker gets there a moment after the request).
+ */
+export async function waitForEmail(
+  match: (mail: CapturedEmail) => boolean,
+  options: { readonly timeoutMs?: number } = {},
+): Promise<CapturedEmail> {
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = (await localInbox()).find(match);
+    if (found) return found;
+    if (Date.now() >= deadline)
+      throw new Error(`no matching message reached the local inbox within ${timeoutMs} ms`);
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/** Reset all SDK module state (bindings, clients, caches, telemetry sink, realtime and email capture). */
 export function resetPlatform(): void {
   setBindings(undefined);
   setRealtimeTransport(undefined);
+  setEmailCapture(undefined);
   resetClients();
   clearSecretsCache();
   setTelemetrySink(null);

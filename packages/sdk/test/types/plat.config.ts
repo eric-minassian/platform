@@ -26,6 +26,7 @@ const app = defineApp({
   secrets: ['STRIPE_KEY'],
   web: { server: 'src/server.ts' },
   auth: true,
+  email: { name: 'Todo', dailyLimit: 500 },
   realtime: {
     subscribe: 'signed-in',
     channels: {
