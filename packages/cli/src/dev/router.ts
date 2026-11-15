@@ -8,7 +8,16 @@ import {
 } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import { extname, join, normalize, sep } from 'node:path';
-import { decide, type HealthResponse, HOST_HEADER, type RouteRecord } from '@ericminassian/platform-core';
+import {
+  APPSYNC_REALTIME_PATH,
+  decide,
+  type HealthResponse,
+  HOST_HEADER,
+  type RealtimeClientConfig,
+  type RealtimeEdgeEntry,
+  type RealtimeSubscribe,
+  type RouteRecord,
+} from '@ericminassian/platform-core';
 
 /**
  * `plat dev`'s stand-in for the CloudFront router: the same `decide()` the
@@ -21,6 +30,15 @@ export interface Target {
   port: number;
 }
 
+/**
+ * The stage's realtime, as the edge serves it: the config browsers read at
+ * `REALTIME_PATH`, and the emulator's realtime endpoint WebSockets go to.
+ */
+export interface LocalRealtime {
+  config: RealtimeClientConfig;
+  target: Target;
+}
+
 export interface LocalRouterState {
   record: RouteRecord;
   server?: Target;
@@ -28,6 +46,7 @@ export interface LocalRouterState {
   /** A frontend dev server is configured but not accepting connections yet. */
   webDevStarting?: boolean;
   staticDir?: string;
+  realtime?: LocalRealtime;
 }
 
 export type LocalDecision =
@@ -35,6 +54,7 @@ export type LocalDecision =
   | { kind: 'webdev'; target: Target }
   | { kind: 'file'; path: string }
   | { kind: 'health'; body: HealthResponse }
+  | { kind: 'realtime'; realtime: LocalRealtime }
   | { kind: 'unavailable'; reason: string }
   | { kind: 'notfound' };
 
@@ -46,6 +66,11 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
   if (d.t === 'health') {
     const { app, stage, d: revision } = state.record;
     return { kind: 'health', body: { ok: true, app, stage, revision } };
+  }
+  if (d.t === 'realtime') {
+    return state.realtime
+      ? { kind: 'realtime', realtime: state.realtime }
+      : { kind: 'unavailable', reason: 'realtime is not set up in the emulator' };
   }
   if (d.t === 'server') {
     return state.server
@@ -71,6 +96,7 @@ export function localRouteRecord(opts: {
   hasStatic: boolean;
   serverRoutes: readonly string[];
   spa: boolean;
+  realtime?: { namespace: string; subscribe: RealtimeSubscribe };
 }): RouteRecord {
   return {
     v: 1,
@@ -81,7 +107,35 @@ export function localRouteRecord(opts: {
     ...(opts.hasStatic ? { s: 'local' } : {}),
     ...(opts.hasServer && opts.hasStatic ? { r: opts.serverRoutes } : {}),
     spa: opts.spa ? 1 : 0,
+    ...(opts.realtime
+      ? { rt: { n: opts.realtime.namespace, m: opts.realtime.subscribe === 'signed-in' ? 's' : 'p' } }
+      : {}),
   };
+}
+
+/**
+ * The stage's local realtime from the platform's realtime entry (what the
+ * edge reads from its route store): the config it answers, and where the
+ * emulator's realtime endpoint (`host:port`) listens.
+ */
+export function localRealtime(
+  entry: RealtimeEdgeEntry,
+  stage: { namespace: string; subscribe: RealtimeSubscribe },
+): LocalRealtime {
+  const config: RealtimeClientConfig = {
+    v: 1,
+    host: entry.h,
+    namespace: stage.namespace,
+    subscribe: stage.subscribe,
+    // Like the edge: signed-in stages never hand out the key.
+    ...(stage.subscribe === 'public' ? { apiKey: entry.k } : {}),
+  };
+  return { config, target: parseHostPort(entry.o) };
+}
+
+function parseHostPort(domain: string): Target {
+  const url = new URL(`http://${domain}`);
+  return { host: url.hostname, port: url.port ? Number(url.port) : 80 };
 }
 
 export type Interceptor = (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<boolean> | boolean;
@@ -123,6 +177,10 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
         case 'health':
           res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
           return res.end(JSON.stringify(d.body));
+        case 'realtime':
+          // A WebSocket arrives as an `upgrade` (below); anything else reads the config.
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+          return res.end(JSON.stringify(d.realtime.config));
         case 'unavailable':
           return text(res, 503, `${d.reason}\n`);
         case 'notfound':
@@ -136,12 +194,18 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
 
   server.on('upgrade', (req, socket, head) => {
     const d = localDecision(opts.state(), req.url ?? '/');
-    // Web Functions don't do WebSockets; only the frontend dev server (HMR) gets upgrades.
-    if (d.kind !== 'webdev') {
-      socket.end('HTTP/1.1 501 Not Implemented\r\n\r\n');
-      return;
+    // Web Functions don't do WebSockets: upgrades go to the frontend dev server (HMR), or to
+    // AppSync for realtime, rewritten like the edge does (AppSync's path and host, no cookies).
+    if (d.kind === 'webdev') return tunnel(req, socket as Socket, head, d.target);
+    if (d.kind === 'realtime') {
+      const { target } = d.realtime;
+      return tunnel(req, socket as Socket, head, target, {
+        path: APPSYNC_REALTIME_PATH,
+        host: `${target.host}:${target.port}`,
+        drop: ['cookie', 'authorization'],
+      });
     }
-    tunnel(req, socket as Socket, head, d.target);
+    socket.end('HTTP/1.1 501 Not Implemented\r\n\r\n');
   });
 
   return new Promise((resolve, reject) => {
@@ -190,11 +254,29 @@ function proxy(req: IncomingMessage, res: ServerResponse, target: Target, toServ
   });
 }
 
-function tunnel(req: IncomingMessage, socket: Socket, head: Buffer, target: Target): void {
+/** Request rewrites for a tunneled upgrade: another path and Host, minus some headers. */
+interface TunnelRewrite {
+  path?: string;
+  host?: string;
+  /** Lowercase header names. */
+  drop?: readonly string[];
+}
+
+function tunnel(
+  req: IncomingMessage,
+  socket: Socket,
+  head: Buffer,
+  target: Target,
+  rewrite: TunnelRewrite = {},
+): void {
   const up = connect(target.port, target.host, () => {
-    const lines = [`${req.method} ${req.url} HTTP/${req.httpVersion}`];
-    for (let i = 0; i < req.rawHeaders.length; i += 2)
-      lines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+    const lines = [`${req.method} ${rewrite.path ?? req.url} HTTP/${req.httpVersion}`];
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      const name = req.rawHeaders[i]!;
+      const lower = name.toLowerCase();
+      if (rewrite.drop?.includes(lower)) continue;
+      lines.push(`${name}: ${rewrite.host && lower === 'host' ? rewrite.host : req.rawHeaders[i + 1]}`);
+    }
     up.write(`${lines.join('\r\n')}\r\n\r\n`);
     if (head.length) up.write(head);
     up.pipe(socket);

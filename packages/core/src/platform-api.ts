@@ -41,6 +41,7 @@ import {
   MetricsResponse,
   PutSecretRequest,
   QueueStats,
+  RealtimeStatsResponse,
   RedriveResponse,
   RollbackRequest,
   RollbackResponse,
@@ -353,6 +354,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       params: app,
       query: stageQuery,
       success: Schema.Array(QueueStats),
+      error: errors,
+    }),
+    /** AppSync Events activity of the stage's channel namespace, from CloudWatch. */
+    HttpApiEndpoint.get('realtime', '/apps/:app/realtime', {
+      params: app,
+      query: rangeQuery,
+      success: RealtimeStatsResponse,
       error: errors,
     }),
     HttpApiEndpoint.get('errors', '/apps/:app/errors', {

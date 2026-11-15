@@ -286,6 +286,43 @@ export const QueueStats = Schema.Struct({
 });
 export type QueueStats = typeof QueueStats.Type;
 
+/** Per-namespace AppSync Events counts in one bucket (CloudWatch `Sum`s). */
+export const RealtimePoint = Schema.Struct({
+  ts: Schema.String,
+  /** Events published (`InboundMessages`; each 5 KB counts once). */
+  events: Schema.Finite,
+  /** Successful publish requests (up to 5 events each). */
+  publishes: Schema.Finite,
+  /** Successful subscribes. */
+  subscribes: Schema.Finite,
+  /** Publishes and subscribes refused or failed (client and server errors). */
+  errors: Schema.Finite,
+});
+export type RealtimePoint = typeof RealtimePoint.Type;
+
+/**
+ * A stage's realtime activity. AppSync reports deliveries (`OutboundMessages`)
+ * and connections only for the whole Event API, not per namespace, so they
+ * can't be shown per app.
+ */
+export const RealtimeStatsResponse = Schema.Struct({
+  app: Schema.String,
+  stage: Schema.String,
+  /** False when the live deployment declares no `realtime`; the rest is then empty. */
+  enabled: Schema.Boolean,
+  subscribe: optional(Schema.Literals(['public', 'signed-in'])),
+  channels: Schema.Array(Schema.String),
+  res: Resolution,
+  totals: Schema.Struct({
+    events: Schema.Finite,
+    publishes: Schema.Finite,
+    subscribes: Schema.Finite,
+    errors: Schema.Finite,
+  }),
+  points: Schema.Array(RealtimePoint),
+});
+export type RealtimeStatsResponse = typeof RealtimeStatsResponse.Type;
+
 export const ErrorStatus = Schema.Literals(['open', 'resolved', 'ignored']);
 export type ErrorStatus = typeof ErrorStatus.Type;
 

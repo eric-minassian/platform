@@ -15,6 +15,11 @@ const metricsAtom = Atom.family(({ app, stage, range }: Scope & { app: string })
 const uptimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
   fresh(ApiClient.query('observe', 'uptime', { params: { app }, query: { stage, range }, timeToLive })),
 );
+const realtimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'realtime', { params: { app }, query: { stage, range }, timeToLive }), {
+    every: '60 seconds',
+  }),
+);
 
 export function OverviewTab() {
   const { app, scope } = useApp();
@@ -93,9 +98,58 @@ export function OverviewTab() {
                 />
               </Card>
             </div>
+            <RealtimeSection app={app} scope={scope} />
           </div>
         );
       }}
     </Loaded>
+  );
+}
+
+/**
+ * The stage's AppSync Events activity, shown only when its live deployment
+ * declares `realtime`. AppSync counts deliveries and connections only for the
+ * whole platform, so there's no per-app figure for either.
+ */
+function RealtimeSection({ app, scope }: { app: string; scope: Scope }) {
+  const result = useAtomValue(realtimeAtom({ app, ...scope }));
+  const r = Option.getOrUndefined(AsyncResult.value(result));
+  if (!r?.enabled) return null;
+  return (
+    <Card
+      title="Realtime"
+      actions={
+        <span className="text-[11px] text-muted">
+          {r.subscribe === 'signed-in' ? 'signed-in' : 'public'} · {r.channels.join(', ')}
+        </span>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-3 gap-3">
+          <Stat
+            label="Events published"
+            value={fmtNum(r.totals.events)}
+            hint={`${fmtNum(r.totals.publishes)} publish requests`}
+          />
+          <Stat label="Subscribes" value={fmtNum(r.totals.subscribes)} />
+          <Stat
+            label="Errors"
+            value={fmtNum(r.totals.errors)}
+            tone={r.totals.errors > 0 ? 'warn' : 'muted'}
+            hint="refused or failed"
+          />
+        </div>
+        <Lines
+          data={[...r.points]}
+          range={scope.range}
+          format={fmtNum}
+          series={[
+            { key: 'events', label: 'events', color: SERIES_COLORS.value },
+            { key: 'subscribes', label: 'subscribes', color: SERIES_COLORS.p50 },
+            { key: 'errors', label: 'errors', color: SERIES_COLORS.s5xx },
+          ]}
+        />
+      </div>
+    </Card>
   );
 }

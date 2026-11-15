@@ -1,10 +1,21 @@
-import type { ChildProcess } from 'node:child_process';
+import { type ChildProcess, execFile } from 'node:child_process';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import {
+  APPSYNC_SUBPROTOCOL,
+  channelPath,
+  REALTIME_PATH,
+  type RealtimeClientConfig,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { findEmulatorBinary } from '@ericminassian/platform-engine';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { spawnWebServer } from '../src/dev/index.ts';
-import { emulatorClientConfig, type LocalStage, startLocalStage } from '../src/dev/local-stage.ts';
+import { emulatorClientConfig, type LocalStage, localEnv, startLocalStage } from '../src/dev/local-stage.ts';
+import { localRouteRecord, startLocalRouter } from '../src/dev/router.ts';
 import {
   type Dispatcher,
   type LocalWorker,
@@ -83,5 +94,92 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
     expect(await res.text()).toBe('hello from basic-app /hello');
     const health = await fetch(`http://127.0.0.1:${spawned.port}/__platform/health`);
     expect(health.status).toBe(200);
+  });
+});
+
+// Realtime the way a browser meets it under `plat dev`: the config and the
+// WebSocket through the local router, events published by the SDK with the
+// stage's IAM credentials into the emulator's Event API.
+describe.skipIf(!findEmulatorBinary())('local realtime on the AWS Emulator', () => {
+  const realtimeManifest: ResolvedManifest = {
+    ...manifest,
+    realtime: { subscribe: 'public', channels: ['board', 'boards/*'] },
+  };
+  let stage: LocalStage;
+  let router: Server;
+  let base: string;
+
+  beforeAll(async () => {
+    stage = await startLocalStage({ root, manifest: realtimeManifest, stage: 'test', port: 3998 });
+    const realtime = stage.realtime!;
+    const record = localRouteRecord({
+      app: realtimeManifest.name,
+      stage: 'test',
+      deploymentId: stage.deploymentId,
+      hasServer: false,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+      realtime: { namespace: realtime.config.namespace, subscribe: realtime.config.subscribe },
+    });
+    router = await startLocalRouter({ port: 0, state: () => ({ record, staticDir: root, realtime }) });
+    base = `127.0.0.1:${(router.address() as AddressInfo).port}`;
+  });
+
+  afterAll(async () => {
+    router?.close();
+    await stage?.stop();
+  });
+
+  /** One publish through the SDK, in a process with the stage's environment, like the server. */
+  const publish = (channel: string, event: unknown) =>
+    promisify(execFile)(
+      process.execPath,
+      [join(FIXTURES, 'realtime-publish.ts'), channel, JSON.stringify(event)],
+      { env: localEnv(stage, realtimeManifest), cwd: root },
+    );
+
+  it('serves the stage’s config at the realtime path', async () => {
+    const config = (await (await fetch(`http://${base}${REALTIME_PATH}`)).json()) as RealtimeClientConfig;
+    expect(config).toEqual(stage.realtime!.config);
+    expect(config.namespace).toBe(stage.bindings.realtime?.namespace);
+    expect(config.subscribe).toBe('public');
+    expect(config.apiKey).toBeTruthy();
+  });
+
+  it('delivers an event published by the SDK to a WebSocket subscribed through the router', async () => {
+    const config = stage.realtime!.config;
+    const auth = { host: config.host, 'x-api-key': config.apiKey! };
+    const header = Buffer.from(JSON.stringify(auth)).toString('base64url');
+    const ws = new WebSocket(`ws://${base}${REALTIME_PATH}`, [APPSYNC_SUBPROTOCOL, `header-${header}`]);
+    const received = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no event within 20 s')), 20_000);
+      ws.onerror = () => reject(new Error('WebSocket error'));
+      ws.onopen = () => ws.send(JSON.stringify({ type: 'connection_init' }));
+      ws.onmessage = (m) => {
+        const msg = JSON.parse(String(m.data)) as { type: string; event?: string };
+        if (msg.type === 'connection_ack')
+          ws.send(
+            JSON.stringify({
+              type: 'subscribe',
+              id: 's1',
+              channel: channelPath(config.namespace, 'boards/*'),
+              authorization: auth,
+            }),
+          );
+        else if (msg.type === 'subscribe_success')
+          publish('boards/b1', { stroke: 1 }).catch((err: Error) => reject(err));
+        else if (msg.type === 'data') {
+          clearTimeout(timer);
+          // AppSync carries each event as one JSON string.
+          resolve(JSON.parse(msg.event!));
+        } else if (msg.type.endsWith('error')) reject(new Error(String(m.data)));
+      };
+    });
+    try {
+      expect(await received).toEqual({ stroke: 1 });
+    } finally {
+      ws.close();
+    }
   });
 });

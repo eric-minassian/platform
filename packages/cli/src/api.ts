@@ -24,6 +24,7 @@ import {
   type MetricsResponse,
   PLATFORM_DEFAULTS,
   type QueueStats,
+  type RealtimeStatsResponse,
   type Resolution,
   type RollbackRequest,
   type RollbackResponse,
@@ -248,6 +249,9 @@ export class ApiClient {
       this.request<QueueStats[]>('GET', `/v1/apps/${enc(app)}/queues`, { query: { stage: q.stage } }),
     ]);
     return { jobs: body?.jobs ?? [], queues: Array.isArray(queues) ? queues : [] };
+  }
+  realtime(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
+    return this.request<RealtimeStatsResponse>('GET', `/v1/apps/${enc(app)}/realtime`, { query: q });
   }
   async errors(app: string, q: { stage: string }): Promise<ErrorGroup[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/errors`, { query: q }), 'errors');

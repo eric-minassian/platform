@@ -10,6 +10,7 @@ import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
 import { CostCollector } from './jobs/cost.ts';
 import { Pinger } from './jobs/pinger.ts';
+import { RealtimeKey } from './jobs/realtime.ts';
 import { Reaper } from './jobs/reaper.ts';
 import { Watchdog } from './jobs/watchdog.ts';
 import { BaseLive } from './layers.ts';
@@ -20,6 +21,7 @@ const WorkerLive = Layer.mergeAll(
   CostCollector.layer,
   Deployer.layer,
   Pinger.layer,
+  RealtimeKey.layer,
   Reaper.layer,
   TelemetryWriter.layer,
   Watchdog.layer,
@@ -55,6 +57,7 @@ export default defineWorker({
     watchdog: () => Watchdog.use((w) => w.run),
     cost: () => CostCollector.use((c) => c.run()),
     reaper: () => Reaper.use((r) => r.run),
+    'realtime-key': () => RealtimeKey.use((k) => k.run),
   },
   logs: (batch) =>
     Effect.gen(function* () {
