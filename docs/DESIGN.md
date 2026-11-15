@@ -165,7 +165,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Bus / rules  | `todo--prod` / `todo--prod--<event>`                               |
 | Schedules    | group `todo--prod`                                                 |
 | Role         | `/platform/apps/todo--prod`                                        |
-| Logs         | `/platform/apps/todo/prod/{web,worker}`                            |
+| Logs         | `/platform/apps/todo/prod/{web,web.local,worker}`                  |
 | Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                  |
 | Stage key    | `/platform/apps/todo/prod/stage-key`                               |
 | Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`    |
@@ -346,7 +346,9 @@ writing any instrumentation:
 - Each stage's runtime role:
   - lives under `/platform/apps/` with the platform permission boundary;
   - is scoped to that stage's table, queues, bus, storage prefix and secrets
-    paths, and its own worker.
+    paths, and its own worker;
+  - can't create log groups. The engine creates them, so logs still in
+    flight when a stage is destroyed can't bring its groups back.
 - Web Functions use `IamAuth` endpoints, and their resource policy trusts only
   the router distribution (`aws:SourceArn`).
 - CI tokens are bound to a repo and a stage (prod only from main).
