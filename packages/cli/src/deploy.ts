@@ -88,7 +88,8 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
     );
   }
   const url = deployment.url;
-  if (url) await confirmServedHere(url, id, edge, { timeoutMs: opts.edgeTimeoutMs ?? 60_000 });
+  if (url)
+    await confirmServedHere(url, id, edge, opts.edgeTimeoutMs ? { timeoutMs: opts.edgeTimeoutMs } : {});
   success(`deployed ${app} to ${stage}${url ? `: ${pc.underline(url)}` : ''}`);
   if (isGitHubActions()) {
     if (url) setOutput('url', url);

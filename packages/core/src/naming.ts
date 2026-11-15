@@ -94,7 +94,12 @@ export const names = {
   base: (app: string, stage: string) => `${app}--${stage}`,
   table: (app: string, stage: string) => `${app}--${stage}`,
   webFunction: (app: string, stage: string) => `${app}--${stage}`,
-  webEndpoint: () => 'live',
+  /**
+   * The Web Function's two endpoints, each pinned to one revision. Neither
+   * name means "current": a deploy uses whichever the live route doesn't
+   * (`live` predates the second one).
+   */
+  webEndpoints: () => ['live', 'live-b'] as const,
   workerFunction: (app: string, stage: string) => `${app}--${stage}--worker`,
   /** IAM role name; created under {@link IAM_APP_PATH}. */
   role: (app: string, stage: string) => `${app}--${stage}`,

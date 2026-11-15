@@ -51,13 +51,10 @@ import { deleteParameter, deleteParametersByPath, ensureParameterOnce } from './
 import {
   createRevision,
   deleteWebFunction,
-  ensureEndpoint,
-  ensureRouterAccess,
+  endpointForRevision,
   ensureWebFunction,
-  getEndpoint,
   getRevisionState,
   pruneRevisions,
-  setEndpointRevision,
 } from './drivers/web-function.ts';
 import type {
   DeployStageInput,
@@ -69,8 +66,11 @@ import type {
 import { stageRolePolicy, stageTrustPolicy } from './policy.ts';
 import { type EngineContext, ignoreNotFound, stageTags } from './util.ts';
 
-/** Static deployments kept per stage (current + previous ones for rollback). */
-const STATIC_DEPLOYMENTS_KEPT = 3;
+/**
+ * Deployments whose static files and server revision are kept per stage (the
+ * newest ones, plus whatever the routes still use), so rollback can reach them.
+ */
+const DEPLOYMENTS_KEPT = 3;
 
 /**
  * Public host of a stage. Under `plat dev` the `local` stage is simply
@@ -298,6 +298,11 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await removeWorker(ctx, app, stage);
   }
 
+  // The route the edge serves now. The new revision goes on the endpoint it doesn't use, and GC keeps
+  // its static files: edges keep serving it until they pick up the new route.
+  const liveRoute =
+    webMode === 'function' && platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
+
   // 10. Static files (new prefix per deployment; the old one keeps serving until the route flips).
   let staticPrefix: string | undefined;
   if (input.artifacts.static) {
@@ -310,7 +315,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     resources.push({ type: 'static', name: staticPrefix });
   }
 
-  // 11. Web Function revision → endpoint.
+  // 11. Web Function revision → an endpoint the live route doesn't use.
   let webFunction: DeployStageResult['webFunction'];
   if (hasWeb && m.web && input.artifacts.server) {
     const fnName = names.webFunction(app, stage);
@@ -325,28 +330,22 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       logGroup: webLogGroup,
       description: deploymentId,
     };
-    const before = await getEndpoint(ctx, fnName, names.webEndpoint());
-    const previous = (before?.revisionWeights ?? []).map((w) => w.revisionId!).filter(Boolean);
     const fn = await ensureWebFunction(ctx, {
       name: fnName,
       tags,
-      initial: { revision, endpointName: names.webEndpoint() },
+      initial: { revision, endpointName: names.webEndpoints()[0] },
     });
     const fnArn = fn.arn;
     const revisionId = fn.initialRevisionId ?? (await createRevision(ctx, revision));
-    const endpoint = await ensureEndpoint(ctx, {
+    const endpoint = await endpointForRevision(ctx, {
       functionName: fnName,
-      endpointName: names.webEndpoint(),
+      functionArn: fnArn,
+      endpointNames: names.webEndpoints(),
       revisionId,
+      ...(liveRoute?.o ? { liveDomain: liveRoute.o } : {}),
+      ...(platform.distributionArn ? { distributionArn: platform.distributionArn } : {}),
     });
-    if (platform.distributionArn) {
-      await ensureRouterAccess(ctx, {
-        functionArn: fnArn,
-        endpointArn: endpoint.arn,
-        distributionArn: platform.distributionArn,
-      });
-    }
-    await pruneRevisions(ctx, fnName, { keepNewest: 2, keep: [revisionId, ...previous] });
+    await pruneRevisions(ctx, fnName, { keepNewest: DEPLOYMENTS_KEPT, keep: endpoint.pinned });
     webFunction = { name: fnName, endpointDomain: endpoint.domainName, revisionId };
     resources.push({ type: 'web-function', name: fnName, arn: fnArn });
   } else if (webMode === 'function') {
@@ -355,7 +354,6 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
 
   // 12. Route flip — the only step that changes what users see.
   let route: RouteRecord | undefined;
-  let previousRoute: RouteRecord | undefined;
   if (webMode === 'function' && (webFunction || staticPrefix)) {
     route = {
       v: 1,
@@ -368,7 +366,6 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       ...(staticPrefix ? { spa: m.web?.spa === false ? (0 as const) : (1 as const) } : {}),
     };
     if (platform.kvsArn) {
-      previousRoute = await getRoute(ctx, platform.kvsArn, host);
       await putRoute(ctx, platform.kvsArn, host, route);
       resources.push({ type: 'route', name: host });
     } else {
@@ -379,7 +376,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   // 13. Garbage-collect old static deployments.
   if (staticPrefix) {
     const prefixes = await listChildPrefixes(ctx, platform.sitesBucket, `${app}/${stage}/`);
-    for (const p of staleStaticPrefixes(prefixes, [staticPrefix, previousRoute?.s])) {
+    for (const p of staleStaticPrefixes(prefixes, [staticPrefix, liveRoute?.s])) {
       await deletePrefix(ctx, platform.sitesBucket, p);
     }
   }
@@ -514,7 +511,7 @@ export function staleStaticPrefixes(prefixes: string[], keep: Array<string | und
   return [...prefixes]
     .sort()
     .reverse()
-    .slice(STATIC_DEPLOYMENTS_KEPT)
+    .slice(DEPLOYMENTS_KEPT)
     .filter((p) => !kept.has(p));
 }
 
@@ -536,18 +533,35 @@ async function assertCanRollBack(ctx: EngineContext, input: RollbackStageInput):
   }
 }
 
-export async function rollbackStage(ctx: EngineContext, input: RollbackStageInput): Promise<void> {
+/**
+ * Point the stage back at an earlier deployment. Its revision usually still
+ * has an endpoint pinned to it (always for the previous deployment), so the
+ * route write is the whole switch; otherwise the endpoint the live route
+ * doesn't use is pointed at it first. Returns the route written: its
+ * endpoint can differ from the one recorded at deploy time.
+ */
+export async function rollbackStage(ctx: EngineContext, input: RollbackStageInput): Promise<RouteRecord> {
   const { app, stage, platform } = input;
   await assertCanRollBack(ctx, input);
-  if (input.revisionId) {
-    await setEndpointRevision(ctx, {
-      functionName: names.webFunction(app, stage),
-      endpointName: names.webEndpoint(),
+  const host = hostFor(platform, app, stage);
+  let route = input.route;
+  if (input.revisionId && route.o) {
+    const functionName = names.webFunction(app, stage);
+    const fn = await ctx.clients.lambdaWeb.send(new GetWebFunctionCommand({ functionName }));
+    const live = platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
+    const endpoint = await endpointForRevision(ctx, {
+      functionName,
+      functionArn: fn.functionArn!,
+      endpointNames: names.webEndpoints(),
       revisionId: input.revisionId,
+      ...(live?.o ? { liveDomain: live.o } : {}),
+      ...(platform.distributionArn ? { distributionArn: platform.distributionArn } : {}),
     });
+    route = { ...route, o: endpoint.domainName };
   }
-  if (platform.kvsArn) await putRoute(ctx, platform.kvsArn, hostFor(platform, app, stage), input.route);
-  ctx.log('info', `rolled back ${app}/${stage} to ${input.route.d}`);
+  if (platform.kvsArn) await putRoute(ctx, platform.kvsArn, host, route);
+  ctx.log('info', `rolled back ${app}/${stage} to ${route.d}`);
+  return route;
 }
 
 /** Remove a stage. Order: stop traffic, stop triggers, compute, messaging, identity, then (optionally) data. */

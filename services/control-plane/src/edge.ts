@@ -7,13 +7,16 @@
  */
 import { HEALTH_PATH, type HealthResponse } from '@ericminassian/platform-core';
 
+/** Route changes have taken 5–55 s to reach a given edge (docs/DESIGN.md, "Risks"). */
+export const EDGE_TIMEOUT_MS = 180_000;
+
 export async function waitForEdge(
   url: string,
   deploymentId: string,
   opts: { timeoutMs?: number; intervalMs?: number; fetch?: typeof fetch } = {},
 ): Promise<boolean> {
   const doFetch = opts.fetch ?? fetch;
-  const deadline = Date.now() + (opts.timeoutMs ?? 90_000);
+  const deadline = Date.now() + (opts.timeoutMs ?? EDGE_TIMEOUT_MS);
   for (;;) {
     try {
       const res = await doFetch(`${url}${HEALTH_PATH}`, {
