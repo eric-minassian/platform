@@ -1,16 +1,21 @@
 import type { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
-import { type Duration, Effect, Layer, Option } from 'effect';
+import type { EmailSending, ResolvedManifest } from '@ericminassian/platform-core';
+import { type Duration, Effect, Layer, Option, Ref } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 import { describe, expect, it } from 'vitest';
+import { AwsError } from '../src/aws.ts';
+import { cloudWatchRange } from '../src/cloudwatch.ts';
 import { DeployFailed, StageEngine } from '../src/deploy.ts';
 import { Dns, type Resolver } from '../src/dns.ts';
 import { waitForEdge } from '../src/edge.ts';
+import { AppEmail } from '../src/email.ts';
 import { PLATFORM_COST_KEY, parseCostResults, TOTAL_COST_KEY } from '../src/jobs/cost.ts';
-import { nextUptimeState, Pinger } from '../src/jobs/pinger.ts';
+import { emailAlert, nextEmailState, nextUptimeState, Pinger } from '../src/jobs/pinger.ts';
 import {
   AppRealtime,
-  cloudWatchRange,
   REALTIME_METRICS,
   RealtimeKey,
   realtimeQueries,
@@ -19,7 +24,7 @@ import {
 import { stalePreviews } from '../src/jobs/reaper.ts';
 import { STUCK_AFTER_MS, stuckDeployments, suspectStages } from '../src/jobs/watchdog.ts';
 import { describe as describeEvent, runtimeRecord, toFilterPattern, toLogLine } from '../src/logs.ts';
-import type { DeploymentItem, StageItem } from '../src/store.ts';
+import { type DeploymentItem, type StageItem, Store } from '../src/store.ts';
 import { awsLayer, memoryStore, runtime, settingsLayer } from './support.ts';
 
 /** Effect's HTTP client over a fake `fetch`. */
@@ -255,10 +260,61 @@ describe('edge wait', () => {
   );
 });
 
+describe('email state', () => {
+  const paused: EmailSending = { status: 'paused', pausedBy: 'policy', cause: 'Bounce finding' };
+  it('alerts once on a pause and once on the resume', () => {
+    expect(nextEmailState(undefined, { status: 'enabled' })).toEqual({ paused: false, transition: null });
+    // A stage first seen paused alerts too.
+    expect(nextEmailState(undefined, paused)).toEqual({ paused: true, transition: 'paused' });
+    expect(nextEmailState(false, paused)).toEqual({ paused: true, transition: 'paused' });
+    expect(nextEmailState(true, paused)).toEqual({ paused: true, transition: null });
+    expect(nextEmailState(true, { status: 'enabled' })).toEqual({ paused: false, transition: 'resumed' });
+  });
+
+  it('says who paused it and what to do next', () => {
+    const stage = { app: 'shop', stage: 'prod' };
+    const policy = emailAlert(
+      stage,
+      { ...paused, since: '2026-11-15T10:00:00.000Z' },
+      'https://p.example.com',
+    );
+    expect(policy.subject).toBe('[platform] shop email is PAUSED');
+    expect(policy.message).toBe(
+      [
+        "The reputation policy paused shop's email (prod) at 2026-11-15T10:00:00.000Z.",
+        'Cause: Bounce finding',
+        'Once the cause is fixed, resume with `plat email resume --app shop` or in the console.',
+        '',
+        'https://p.example.com/apps/shop/email',
+      ].join('\n'),
+    );
+    expect(emailAlert(stage, { status: 'paused', pausedBy: 'aws' }, 'https://p').message).toMatch(
+      /^AWS paused shop's email \(prod\)\.\nOnly AWS Support can lift this pause/,
+    );
+    expect(emailAlert(stage, { status: 'enabled' }, 'https://p').subject).toBe(
+      '[platform] shop email is sending again',
+    );
+  });
+});
+
 describe('pinger', () => {
-  const pinger = (fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) =>
+  const pinger = (
+    fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+    options: {
+      readonly aws?: Parameters<typeof awsLayer>[0];
+      readonly store?: Layer.Layer<Store>;
+      readonly email?: Partial<AppEmail['Service']>;
+    } = {},
+  ) =>
     Pinger.layer.pipe(
-      Layer.provide([awsLayer({}), settingsLayer(), memoryStore()]),
+      Layer.provideMerge(
+        Layer.mergeAll(
+          awsLayer(options.aws ?? {}),
+          settingsLayer({ runtime: Effect.succeed({ ...runtime, alertsTopicArn: 'arn:alerts' }) }),
+          options.store ?? memoryStore(),
+          Layer.mock(AppEmail, options.email ?? {}),
+        ),
+      ),
       Layer.provideMerge(fetchLayer(fetch)),
     );
 
@@ -282,6 +338,149 @@ describe('pinger', () => {
         ],
       );
       assert.deepStrictEqual(seen, ['manual', 'manual', 'manual']);
+    }),
+  );
+
+  const manifest = (email?: ResolvedManifest['email']): ResolvedManifest => ({
+    name: 'shop',
+    auth: { enabled: false, required: false },
+    db: false,
+    queues: {},
+    events: [],
+    crons: {},
+    storage: [],
+    secrets: [],
+    env: {},
+    ...(email ? { email } : {}),
+  });
+  const deployment = (app: string, id: string, m: ResolvedManifest): DeploymentItem => ({
+    id,
+    app,
+    stage: 'prod',
+    status: 'succeeded',
+    actor: 'bob',
+    events: [],
+    createdAt: '2026-11-01T00:00:00.000Z',
+    manifest: m,
+  });
+  const prod = (app: string, over: Partial<StageItem> = {}): StageItem => ({
+    app,
+    stage: 'prod',
+    host: `${app}.example.com`,
+    url: `https://${app}.example.com`,
+    status: 'active',
+    preview: false,
+    currentDeployment: `${app}-d1`,
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    up: true,
+    ...over,
+  });
+  const store = () =>
+    memoryStore({
+      stages: [prod('shop'), prod('blog', { emailPaused: true })],
+      deployments: [
+        deployment('shop', 'shop-d1', manifest({ dailyLimit: 200 })),
+        // blog stopped sending email since its last pause.
+        deployment('blog', 'blog-d1', manifest()),
+      ],
+    });
+  const fakeAws = (published: PublishCommandInput[]) => ({
+    ddb: () => ({ send: async () => ({}) }) as unknown as DynamoDBDocumentClient,
+    sns: () =>
+      ({
+        send: async (command: { input: PublishCommandInput }) => {
+          published.push(command.input);
+          return {};
+        },
+      }) as unknown as SNSClient,
+  });
+
+  effect.live('alerts when SES pauses or resumes a prod stage’s email', () =>
+    Effect.gen(function* () {
+      const published: PublishCommandInput[] = [];
+      const statuses: EmailSending[] = [
+        { status: 'enabled' },
+        { status: 'paused', pausedBy: 'policy', cause: 'Bounce finding', since: '2026-11-15T10:00:00.000Z' },
+        { status: 'paused', pausedBy: 'policy', cause: 'Bounce finding', since: '2026-11-15T10:00:00.000Z' },
+        { status: 'enabled' },
+      ];
+      const asked = yield* Ref.make<ReadonlyArray<string>>([]);
+      const layer = pinger(async () => new Response('ok'), {
+        aws: fakeAws(published),
+        store: store(),
+        email: {
+          sending: (app) =>
+            Effect.gen(function* () {
+              yield* Ref.update(asked, (a) => [...a, app]);
+              return Option.fromNullishOr(statuses.shift());
+            }),
+        },
+      });
+      const states = yield* Effect.gen(function* () {
+        const out: Array<{ paused: boolean | undefined; alerts: ReadonlyArray<string | undefined> }> = [];
+        for (let i = 0; i < 4; i++) {
+          const before = published.length;
+          const result = yield* Pinger.use((p) => p.run);
+          assert.deepStrictEqual(result, { checked: 2, down: [] });
+          const shop = yield* Store.use((s) => s.getStage('shop', 'prod'));
+          out.push({
+            paused: Option.getOrUndefined(shop)?.emailPaused,
+            alerts: published.slice(before).map((p) => p.Subject),
+          });
+        }
+        const blog = Option.getOrUndefined(yield* Store.use((s) => s.getStage('blog', 'prod')));
+        // A stage without email has no pause to remember, and nothing to alert about.
+        assert.strictEqual(blog?.emailPaused, undefined);
+        const shop = Option.getOrUndefined(yield* Store.use((s) => s.getStage('shop', 'prod')));
+        assert.isString(shop?.emailChangedAt);
+        return out;
+      }).pipe(Effect.provide(layer));
+
+      assert.deepStrictEqual(states, [
+        { paused: false, alerts: [] },
+        { paused: true, alerts: ['[platform] shop email is PAUSED'] },
+        { paused: true, alerts: [] },
+        { paused: false, alerts: ['[platform] shop email is sending again'] },
+      ]);
+      // Only stages whose live deployment declares email are asked about.
+      assert.deepStrictEqual(yield* Ref.get(asked), ['shop', 'shop', 'shop', 'shop']);
+      assert.strictEqual(published[0]?.TopicArn, 'arn:alerts');
+      assert.match(published[0]?.Message ?? '', /^The reputation policy paused shop's email \(prod\)/);
+    }),
+  );
+
+  effect.live('keeps checking uptime when SES can’t be read', () =>
+    Effect.gen(function* () {
+      const published: PublishCommandInput[] = [];
+      const failures = [
+        Effect.fail(new AwsError({ code: 'AccessDeniedException', message: 'denied', cause: null })),
+        Effect.die(new Error('SES answered something unexpected')),
+      ];
+      const layer = pinger(async () => new Response(null, { status: 503 }), {
+        aws: fakeAws(published),
+        store: memoryStore({
+          stages: [prod('shop', { failures: 1 })],
+          deployments: [deployment('shop', 'shop-d1', manifest({ dailyLimit: 200 }))],
+        }),
+        email: { sending: () => failures.shift() ?? Effect.succeedNone },
+      });
+      const { first, second, shop } = yield* Effect.gen(function* () {
+        const first = yield* Pinger.use((p) => p.run);
+        const second = yield* Pinger.use((p) => p.run);
+        const shop = Option.getOrUndefined(yield* Store.use((s) => s.getStage('shop', 'prod')));
+        return { first, second, shop };
+      }).pipe(Effect.provide(layer));
+      // The second failed check takes it down and alerts, whatever SES said.
+      assert.deepStrictEqual(first, { checked: 1, down: ['shop'] });
+      assert.deepStrictEqual(second, { checked: 1, down: ['shop'] });
+      assert.deepStrictEqual(
+        published.map((p) => p.Subject),
+        ['[platform] shop is DOWN'],
+      );
+      assert.strictEqual(shop?.up, false);
+      assert.strictEqual(shop?.failures, 3);
+      assert.strictEqual(shop?.emailPaused, undefined);
     }),
   );
 });

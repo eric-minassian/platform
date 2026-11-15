@@ -10,6 +10,7 @@ import { CostExplorerClient } from '@aws-sdk/client-cost-explorer';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { LambdaClient } from '@aws-sdk/client-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
+import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { SNSClient } from '@aws-sdk/client-sns';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
@@ -53,6 +54,7 @@ export class Aws extends Context.Service<
     readonly sns: () => SNSClient;
     readonly logs: () => CloudWatchLogsClient;
     readonly cloudwatch: () => CloudWatchClient;
+    readonly sesv2: () => SESv2Client;
     /** Cost Explorer is a global service served from us-east-1. */
     readonly ce: () => CostExplorerClient;
   }
@@ -80,6 +82,7 @@ export class Aws extends Context.Service<
       sns: lazy(() => new SNSClient({ region })),
       logs: lazy(() => new CloudWatchLogsClient({ region })),
       cloudwatch: lazy(() => new CloudWatchClient({ region })),
+      sesv2: lazy(() => new SESv2Client({ region })),
       ce: lazy(() => new CostExplorerClient({ region: 'us-east-1' })),
     });
   });

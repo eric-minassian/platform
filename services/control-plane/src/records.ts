@@ -36,6 +36,10 @@ export const StageItem = Schema.Struct({
   upChangedAt: Schema.optional(Schema.String),
   /** Consecutive failed uptime checks. */
   failures: Schema.optional(Schema.Finite),
+  /** Whether SES had paused the stage's sending at the last check (prod stages that send email). */
+  emailPaused: Schema.optional(Schema.Boolean),
+  /** When `emailPaused` last changed. */
+  emailChangedAt: Schema.optional(Schema.String),
 });
 export type StageItem = typeof StageItem.Type;
 

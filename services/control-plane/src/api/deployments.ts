@@ -130,6 +130,12 @@ export const DeploymentsLive = HttpApiBuilder.group(
           });
           if (manifest.name !== app.name)
             return yield* BadRequest.of(`plat.config.ts name "${manifest.name}" must be "${app.name}"`);
+          const { emailsPerDay } = settings.platform.limits;
+          if (manifest.email && manifest.email.dailyLimit > emailsPerDay) {
+            return yield* LimitReached.of(
+              `email.dailyLimit is ${manifest.email.dailyLimit}, above the platform's ceiling of ${emailsPerDay} recipients a day (limits.emailsPerDay in platform.config.ts)`,
+            );
+          }
 
           // manifest.json is always uploaded; tolerate clients that list it.
           const files = [...new Set(payload.files ?? [])].filter((f) => f !== 'manifest.json');

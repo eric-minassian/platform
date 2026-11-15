@@ -1,9 +1,10 @@
-/** Data browser, storage, secrets, and job controls (run cron, redrive DLQ). */
-import { ENV_NAME_PATTERN } from '@ericminassian/platform-core';
+/** Data browser, storage, secrets, job controls (run cron, redrive DLQ), and email's suppression list and pauses. */
+import { ENV_NAME_PATTERN, isEmailAddress } from '@ericminassian/platform-core';
 import { BadRequest, Conflict, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Effect, Option } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { DataBrowser } from '../data.ts';
+import { AppEmail } from '../email.ts';
 import { AppQueues } from '../jobs/queues.ts';
 import { AppSecrets } from '../secrets.ts';
 import { Access, stageParam } from './access.ts';
@@ -25,12 +26,25 @@ export const ManageLive = HttpApiBuilder.group(
   Effect.fn(function* (handlers) {
     const access = yield* Access;
     const data = yield* DataBrowser;
+    const email = yield* AppEmail;
     const queues = yield* AppQueues;
     const secrets = yield* AppSecrets;
 
     const scope = Effect.fnUntraced(function* (app: string, stage: string | undefined) {
       const found = yield* access.memberApp(app);
       return { app: found.app.name, stage: yield* stageParam(stage) };
+    });
+
+    /** The app and stage of an email endpoint; 404 unless the stage's live deployment declares `email`. */
+    const emailScope = Effect.fnUntraced(function* (app: string, stage: string | undefined) {
+      const target = yield* scope(app, stage);
+      const manifest = yield* access.liveManifest(target.app, target.stage);
+      if (Option.isNone(manifest) || !manifest.value.email)
+        return yield* new NotFound({
+          code: 'not_found',
+          message: `${target.app}/${target.stage} doesn't send email: its live deployment declares no \`email\` in plat.config.ts`,
+        });
+      return target;
     });
 
     return handlers.handleAll({
@@ -123,6 +137,26 @@ export const ManageLive = HttpApiBuilder.group(
             .redrive(app, stage, params.name)
             .pipe(Effect.mapError((e) => new Conflict({ code: 'redrive_failed', message: e.message })));
           return { taskHandle };
+        }),
+
+      suppressed: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* emailScope(params.app, query.stage);
+          return yield* email.suppressed(app, stage, query.next);
+        }),
+
+      unsuppress: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* emailScope(params.app, query.stage);
+          const address = params.address.trim();
+          if (!isEmailAddress(address)) return yield* BadRequest.of(`"${address}" is not an email address`);
+          yield* email.unsuppress(app, stage, address);
+        }),
+
+      resumeEmail: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* emailScope(params.app, query.stage);
+          return yield* email.resume(app, stage);
         }),
     });
   }),

@@ -31,6 +31,7 @@ const router = createBrowserRouter([
           { path: 'traces/:trace', lazy: page(() => import('./pages/app/Traces.tsx'), 'TracesTab') },
           { path: 'errors', lazy: page(() => import('./pages/app/Errors.tsx'), 'ErrorsTab') },
           { path: 'jobs', lazy: page(() => import('./pages/app/Jobs.tsx'), 'JobsTab') },
+          { path: 'email', lazy: page(() => import('./pages/app/Email.tsx'), 'EmailTab') },
           { path: 'data', lazy: page(() => import('./pages/app/Data.tsx'), 'DataTab') },
           { path: 'deployments', lazy: page(() => import('./pages/app/Deployments.tsx'), 'DeploymentsTab') },
           { path: 'secrets', lazy: page(() => import('./pages/app/Secrets.tsx'), 'SecretsTab') },

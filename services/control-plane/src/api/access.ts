@@ -118,6 +118,8 @@ export const publicStage = ({
   up: _u,
   upChangedAt: _c,
   failures: _f,
+  emailPaused: _e,
+  emailChangedAt: _ec,
   ...stage
 }: StageItem): StageRecord => stage;
 

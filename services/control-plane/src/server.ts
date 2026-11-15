@@ -10,6 +10,7 @@ import { Artifacts } from './artifacts.ts';
 import { Tokens } from './auth.ts';
 import { DataBrowser } from './data.ts';
 import { Dns } from './dns.ts';
+import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
 import { AppQueues } from './jobs/queues.ts';
@@ -23,6 +24,7 @@ import { TelemetryQuery } from './telemetry/query.ts';
 export const ServerLive = HttpLive.pipe(
   Layer.provide(
     Layer.mergeAll(
+      AppEmail.layer,
       AppQueues.layer,
       AppRealtime.layer,
       AppSecrets.layer,
