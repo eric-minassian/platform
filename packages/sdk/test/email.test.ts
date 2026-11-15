@@ -280,10 +280,9 @@ describe('sendEmail: SES', () => {
         () => undefined,
         (e: unknown) => e,
       );
-      if (reason) {
-        expect(err, error.name).toBeInstanceOf(EmailRefused);
-        expect((err as EmailRefused).reason).toBe(reason);
-      } else expect(err, error.name).toBe(error);
+      // A refusal's reason, or `defect` when the error comes out unchanged.
+      const outcome = err instanceof EmailRefused ? err.reason : err === error ? 'defect' : err;
+      expect(outcome, error.name).toBe(reason ?? 'defect');
       expect(calls.ddb.map((c) => c.input.ExpressionAttributeValues)).toEqual([
         expect.objectContaining({ ':k': 1 }),
         { ':k': -1 },
@@ -363,7 +362,7 @@ describe('sendEmail: local', () => {
       let body = '';
       req.on('data', (c) => (body += c));
       req.on('end', () => {
-        received.push({ contentType: req.headers['content-type'], body: JSON.parse(body) });
+        received.push({ contentType: req.headers['content-type'], body: JSON.parse(body) as CapturedEmail });
         res.writeHead(status).end();
       });
     });
@@ -398,7 +397,7 @@ describe('sendEmail: local', () => {
         contentType: 'application/json',
         body: {
           id,
-          at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+          at: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) as unknown,
           app: 'todo',
           stage: 'local',
           from: '"Todo" <todo--local@mail.localhost>',
@@ -458,7 +457,7 @@ describe('captureEmails', () => {
     expect(captured.sent).toEqual([
       {
         id,
-        at: expect.any(String),
+        at: expect.any(String) as unknown,
         app: 'todo',
         stage: 'prod',
         from: '"Todo" <todo@mail.platform.example.org>',
@@ -567,7 +566,7 @@ describe('Email in memory', () => {
         expect(yield* (yield* Platform.Memory).emails).toEqual([
           { id, to: ['alice@example.com'], replyTo: [], subject: 'Hi', text: 'Hello', html: '<p>Hi</p>' },
           {
-            id: expect.any(String),
+            id: expect.any(String) as unknown,
             to: ['a@example.com', 'b@example.com'],
             replyTo: ['r@example.com'],
             subject: 'Two',
@@ -585,7 +584,7 @@ describe('Email in memory', () => {
         expect(refused).toBeInstanceOf(EmailNotSent);
         expect(refused).toMatchObject({
           reason: 'daily-limit',
-          message: expect.stringMatching(/daily limit of 3/),
+          message: expect.stringMatching(/daily limit of 3/) as unknown,
         });
         yield* send(message);
         expect(yield* reason(send(message))).toBe('daily-limit');
@@ -603,7 +602,7 @@ describe('Email in memory', () => {
         const refused = yield* Effect.flip(send(message));
         expect(refused).toMatchObject({
           reason: 'paused',
-          message: expect.stringMatching(/paused for shop--pr-4\. `plat email --stage pr-4`/),
+          message: expect.stringMatching(/paused for shop--pr-4\. `plat email --stage pr-4`/) as unknown,
         });
         expect(yield* (yield* Platform.Memory).emails).toEqual([]);
       }).pipe(

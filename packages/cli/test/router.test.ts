@@ -2,7 +2,6 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
 import { type AddressInfo, createServer as createTcpServer, type Server as TcpServer } from 'node:net';
 import { join } from 'node:path';
-import { localInbox, waitForEmail } from '@ericminassian/platform/testing';
 import {
   type CapturedEmail,
   EMAIL_INBOX_PATH,
@@ -11,6 +10,7 @@ import {
   REALTIME_TOKEN_PATH,
   type RealtimeEdgeEntry,
 } from '@ericminassian/platform-core';
+import { localInbox, waitForEmail } from '@ericminassian/platform/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createInbox, type LocalInbox, localMailUrl, startInboxServer } from '../src/dev/mail.ts';
 import {
@@ -438,7 +438,7 @@ describe('startLocalRouter mail', () => {
       ids.push(m.id);
       await post(m);
     }
-    expect(inbox.messages().map((m) => m.id)).toEqual(ids.slice(2).reverse());
+    expect(inbox.messages().map((m) => m.id)).toEqual(ids.slice(2).toReversed());
     expect((await fetch(`${base}${EMAIL_INBOX_PATH}/${ids[0]}`)).status).toBe(404);
   });
 
@@ -513,7 +513,7 @@ describe('startLocalRouter mail', () => {
     const controller = new AbortController();
     const res = await fetch(`${base}${EMAIL_INBOX_PATH}/events`, { signal: controller.signal });
     expect(res.headers.get('content-type')).toBe('text/event-stream');
-    const reader = res.body!.getReader();
+    const reader = res.body!.getReader() as ReadableStreamDefaultReader<Uint8Array>;
     const m = mail();
     await post(m);
     let text = '';
@@ -526,10 +526,10 @@ describe('startLocalRouter mail', () => {
 describe('startInboxServer', () => {
   it('serves the inbox on its own port for plat test', async () => {
     const inbox = createInbox({ app: 'shop' });
-    const server = await startInboxServer(inbox);
+    const inboxServer = await startInboxServer(inbox);
     try {
-      expect(server.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/__platform\/mail\/messages$/);
-      const posted = await fetch(server.url, {
+      expect(inboxServer.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/__platform\/mail\/messages$/);
+      const posted = await fetch(inboxServer.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -545,10 +545,12 @@ describe('startInboxServer', () => {
         }),
       });
       expect(posted.status).toBe(201);
-      expect(((await (await fetch(server.url)).json()) as { messages: unknown[] }).messages).toHaveLength(1);
-      expect((await fetch(new URL('/elsewhere', server.url))).status).toBe(404);
+      expect(
+        ((await (await fetch(inboxServer.url)).json()) as { messages: unknown[] }).messages,
+      ).toHaveLength(1);
+      expect((await fetch(new URL('/elsewhere', inboxServer.url))).status).toBe(404);
     } finally {
-      await server.stop();
+      await inboxServer.stop();
     }
   });
 });

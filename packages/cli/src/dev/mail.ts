@@ -128,15 +128,13 @@ export function createInbox(opts: {
 export async function startInboxServer(inbox: LocalInbox): Promise<{ url: string; stop(): Promise<void> }> {
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    inbox.handle(req, res, url).then(
-      (handled) => {
-        if (!handled) json(res, 404, { error: 'not found' });
-      },
-      (err: Error) => {
-        if (!res.headersSent) json(res, 500, { error: err.message });
-        else res.destroy();
-      },
-    );
+    const serve = async () => {
+      if (!(await inbox.handle(req, res, url))) json(res, 404, { error: 'not found' });
+    };
+    serve().catch((err: Error) => {
+      if (!res.headersSent) json(res, 500, { error: err.message });
+      else res.destroy();
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);

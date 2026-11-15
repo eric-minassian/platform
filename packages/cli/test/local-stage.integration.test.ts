@@ -273,7 +273,7 @@ describe.skipIf(!findEmulatorBinary())('local email on the AWS Emulator', () => 
     expect(list.messages).toEqual([
       {
         id: sent.body.id,
-        at: expect.any(String),
+        at: expect.any(String) as unknown,
         app: 'basic-app',
         stage: 'test',
         from: `"Basic" <${stage.bindings.email!.from}>`,

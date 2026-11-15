@@ -91,7 +91,7 @@ describe('plat email requests', () => {
       baseUrl: 'https://api.test',
       token: 't',
       fetch: (async (url: string, init?: RequestInit) => {
-        calls.push(`${init?.method} ${url}${init?.body ? ` ${init.body}` : ''}`);
+        calls.push(`${init?.method} ${url}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
         return new Response(init?.method === 'DELETE' ? null : '{}', {
           status: init?.method === 'DELETE' ? 204 : 200,
         });

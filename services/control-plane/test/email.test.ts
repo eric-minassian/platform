@@ -27,8 +27,8 @@ const awsError = (name: string, message = name) => Object.assign(new Error(messa
 
 type Command = { readonly constructor: { readonly name: string }; readonly input: Record<string, unknown> };
 
-/** A client whose `send` answers by command (`GetTenantCommand` → `getTenant`) and records what it was sent. */
-function fakeClient<C>(answers: Record<string, (input: Record<string, unknown>) => unknown>) {
+/** An SES client whose `send` answers by command (`GetTenantCommand` → `getTenant`) and records what it was sent. */
+function fakeSes(answers: Record<string, (input: Record<string, unknown>) => unknown>) {
   const sent: Array<{ readonly command: string; readonly input: Record<string, unknown> }> = [];
   const client = {
     send: async (command: Command) => {
@@ -38,7 +38,7 @@ function fakeClient<C>(answers: Record<string, (input: Record<string, unknown>) 
       if (!answer) throw new Error(`the test has no answer for ${name}`);
       return answer(command.input);
     },
-  } as unknown as C;
+  } as unknown as SESv2Client;
   return { client, sent };
 }
 
@@ -152,7 +152,7 @@ describe('email stats', () => {
   it.effect('reads status, today’s usage and the tenant’s counts', () =>
     Effect.gen(function* () {
       yield* TestClock.setTime(t0 + 2 * hour);
-      const ses = fakeClient<SESv2Client>({
+      const ses = fakeSes({
         ...enabledTenant,
         getReputationEntity: () => ({
           ReputationEntity: {
@@ -237,7 +237,7 @@ describe('email stats', () => {
     Effect.gen(function* () {
       yield* TestClock.setTime(t0 + hour);
       const range = { from: t0, to: t0 + hour, res: '1h' as const };
-      const ses = fakeClient<SESv2Client>({
+      const ses = fakeSes({
         getTenant: () => {
           throw awsError('NotFoundException', 'The requested tenant <shop--pr-2> does not exist.');
         },
@@ -272,8 +272,8 @@ describe('email stats', () => {
 
   it.effect('answers whether a tenant can send, or none without one', () =>
     Effect.gen(function* () {
-      const ses = fakeClient<SESv2Client>(enabledTenant);
-      const missing = fakeClient<SESv2Client>({
+      const ses = fakeSes(enabledTenant);
+      const missing = fakeSes({
         getTenant: () => {
           throw awsError('NotFoundException');
         },
@@ -282,7 +282,7 @@ describe('email stats', () => {
         AppEmail.use((e) => e.sending('shop', 'prod')).pipe(Effect.provide(service({ sesv2: () => client })));
       assert.deepStrictEqual(yield* sending(ses.client), Option.some({ status: 'enabled' as const }));
       assert.deepStrictEqual(yield* sending(missing.client), Option.none());
-      const throttled = fakeClient<SESv2Client>({
+      const throttled = fakeSes({
         getTenant: () => {
           throw awsError('TooManyRequestsException');
         },
@@ -297,7 +297,7 @@ describe('suppression list', () => {
   it.effect('pages through the tenant’s list', () =>
     Effect.gen(function* () {
       const since = new Date('2026-11-14T00:00:00Z');
-      const ses = fakeClient<SESv2Client>({
+      const ses = fakeSes({
         listSuppressedDestinations: (input) => {
           if (input.NextToken === 'bad') throw awsError('InvalidNextTokenException', 'Token is invalid.');
           if (input.TenantName === 'shop--pr-9') throw awsError('NotFoundException');
@@ -350,7 +350,7 @@ describe('suppression list', () => {
 
   it.effect('removes an address from the tenant’s list, and says when it isn’t on it', () =>
     Effect.gen(function* () {
-      const ses = fakeClient<SESv2Client>({
+      const ses = fakeSes({
         deleteSuppressedDestination: (input) => {
           if (input.EmailAddress === 'nobody@x.com') throw awsError('NotFoundException');
           return {};
@@ -374,7 +374,7 @@ describe('suppression list', () => {
 describe('resuming email', () => {
   /** `resume` on a tenant with this reputation entity, and the status updates it sent. */
   const resume = (reputation: Record<string, unknown>) => {
-    const ses = fakeClient<SESv2Client>({
+    const ses = fakeSes({
       ...enabledTenant,
       getReputationEntity: () => ({ ReputationEntity: reputation }),
       updateReputationEntityCustomerManagedStatus: () => ({}),

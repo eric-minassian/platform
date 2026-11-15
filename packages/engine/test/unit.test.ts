@@ -1086,7 +1086,7 @@ describe('email', () => {
       expect(bindings).toBeUndefined();
       expect(resources).toEqual([]);
       expect(f.sesCalls()).toEqual(['GetTenantCommand']);
-      expect(f.logs).toContainEqual({ level: 'warn', msg: expect.stringMatching(/keeping it/) });
+      expect(f.logs).toContainEqual({ level: 'warn', msg: expect.stringMatching(/keeping it/) as unknown });
       // Nothing to warn about for an app that never sent.
       const fresh = fakeSes();
       await reconcile(fresh, { email: false });

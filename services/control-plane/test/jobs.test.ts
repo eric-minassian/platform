@@ -466,10 +466,11 @@ describe('pinger', () => {
         email: { sending: () => failures.shift() ?? Effect.succeedNone },
       });
       const { first, second, shop } = yield* Effect.gen(function* () {
-        const first = yield* Pinger.use((p) => p.run);
-        const second = yield* Pinger.use((p) => p.run);
-        const shop = Option.getOrUndefined(yield* Store.use((s) => s.getStage('shop', 'prod')));
-        return { first, second, shop };
+        return {
+          first: yield* Pinger.use((p) => p.run),
+          second: yield* Pinger.use((p) => p.run),
+          shop: Option.getOrUndefined(yield* Store.use((s) => s.getStage('shop', 'prod'))),
+        };
       }).pipe(Effect.provide(layer));
       // The second failed check takes it down and alerts, whatever SES said.
       assert.deepStrictEqual(first, { checked: 1, down: ['shop'] });

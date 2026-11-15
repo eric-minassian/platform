@@ -228,16 +228,22 @@ describe('foundation stack', () => {
       });
     });
 
+    /** The template's one user pool, as far as these tests read it. */
+    const userPools = (t: Template) =>
+      t.findResources('AWS::Cognito::UserPool') as Record<
+        string,
+        { Properties: { EmailConfiguration?: unknown }; DependsOn?: string[] }
+      >;
+
     it("keeps Cognito's sender until SES can deliver to anyone", () => {
-      const pool = Object.values(template.findResources('AWS::Cognito::UserPool'))[0]!;
+      const pool = Object.values(userPools(template))[0]!;
       expect(pool.Properties.EmailConfiguration).toBeUndefined();
       expect(pool.DependsOn).toBeUndefined();
     });
 
     it('then sends sign-up mail from login@ the mail domain through SES', () => {
       const ses = synth({ userPoolEmail: 'ses' });
-      const pools = ses.findResources('AWS::Cognito::UserPool');
-      const [id, pool] = Object.entries(pools)[0]!;
+      const [id, pool] = Object.entries(userPools(ses))[0]!;
       expect(pool.Properties.EmailConfiguration).toEqual({
         EmailSendingAccount: 'DEVELOPER',
         From: `"${config.domain}" <login@${mailDomain}>`,

@@ -130,9 +130,7 @@ export class Pinger extends Context.Service<
 
       /** Records SES's sending status for a prod stage that sends email, and alerts when it changes. */
       const checkEmail = Effect.fnUntraced(function* (s: StageItem) {
-        const live = s.currentDeployment
-          ? yield* store.getDeployment(s.currentDeployment)
-          : Option.none<never>();
+        const live = s.currentDeployment ? yield* store.getDeployment(s.currentDeployment) : Option.none();
         if (!Option.exists(live, (d) => d.manifest?.email !== undefined)) {
           // A stage that stopped sending email has no pause to remember.
           if (s.emailPaused !== undefined)

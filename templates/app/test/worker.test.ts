@@ -83,7 +83,7 @@ describe('worker', () => {
     const error = telemetry.events.find((e) => e.t === 'err');
     expect(error).toMatchObject({
       name: 'EmailNotSent',
-      message: expect.stringContaining('not an email address'),
+      message: expect.stringContaining('not an email address') as unknown,
     });
   });
 });

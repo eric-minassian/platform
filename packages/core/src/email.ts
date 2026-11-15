@@ -87,7 +87,7 @@ export function isEmailAddress(value: string): boolean {
 
 /** Domains that can never receive mail (RFC 2606 and RFC 6761). */
 const RESERVED_DOMAINS = ['example.com', 'example.net', 'example.org'];
-const RESERVED_TLDS = ['test', 'example', 'invalid', 'localhost'];
+const RESERVED_TLDS = new Set(['test', 'example', 'invalid', 'localhost']);
 
 /**
  * True for addresses at reserved domains (`alice@example.com`, `bob@app.test`).
@@ -98,7 +98,7 @@ export function isReservedEmailDomain(address: string): boolean {
   const domain = address.slice(address.lastIndexOf('@') + 1).toLowerCase();
   if (RESERVED_DOMAINS.some((d) => domain === d || domain.endsWith(`.${d}`))) return true;
   const tld = domain.slice(domain.lastIndexOf('.') + 1);
-  return RESERVED_TLDS.includes(tld) || domain === 'localhost';
+  return RESERVED_TLDS.has(tld) || domain === 'localhost';
 }
 
 // ---------------------------------------------------------------- the message
