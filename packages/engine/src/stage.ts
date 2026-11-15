@@ -117,10 +117,18 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
 
   ctx.log('info', `deploying ${app}/${stage} (${deploymentId})`);
 
-  // 1. Log groups (retention set before anything writes to them).
+  // 1. Log groups (retention set before anything writes to them). These are all of them: the stage
+  // role can't create log groups (see stageRolePolicy).
   const webLogGroup = names.logGroup(app, stage, 'web');
   const workerLogGroup = names.logGroup(app, stage, 'worker');
-  if (hasWeb) await ensureLogGroup(ctx, { name: webLogGroup, retentionDays: retention, tags });
+  if (hasWeb) {
+    await ensureLogGroup(ctx, { name: webLogGroup, retentionDays: retention, tags });
+    await ensureLogGroup(ctx, {
+      name: names.logGroup(app, stage, 'web.local'),
+      retentionDays: retention,
+      tags,
+    });
+  }
   if (hasWorker) await ensureLogGroup(ctx, { name: workerLogGroup, retentionDays: retention, tags });
 
   // 2. Data.

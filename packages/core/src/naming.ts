@@ -112,7 +112,11 @@ export const names = {
   scheduleGroup: (app: string, stage: string) => `${app}--${stage}`,
   schedule: (cronKey: string) => cronKey,
   userPoolClient: (app: string, stage: string) => `${app}--${stage}`,
-  logGroup: (app: string, stage: string, component: 'web' | 'worker') =>
+  /**
+   * A stage's log groups. Lambda also writes a Web Function's environments to
+   * `<web group>.local`, so the engine creates that one too.
+   */
+  logGroup: (app: string, stage: string, component: 'web' | 'web.local' | 'worker') =>
     `/platform/apps/${app}/${stage}/${component}`,
   logGroupPrefix: (app: string, stage?: string) =>
     stage ? `/platform/apps/${app}/${stage}/` : `/platform/apps/${app}/`,

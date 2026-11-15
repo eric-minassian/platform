@@ -57,6 +57,14 @@ describe('stage role policy', () => {
     );
   });
 
+  it("can't create log groups, so none outlives a destroyed stage", () => {
+    const boundary = policies.boundaryPolicy({ region: 'us-east-1', accountId: '1', storageBucket: 'st' });
+    for (const d of [doc, boundary]) {
+      expect(d.Statement.flatMap((s) => [s.Action].flat())).not.toContain('logs:CreateLogGroup');
+    }
+    expect(bySid.Logs?.Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
+  });
+
   it('omits grants for features the app does not use', () => {
     const minimal = policies.stageRolePolicy({
       app: 'site',

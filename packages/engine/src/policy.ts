@@ -35,10 +35,12 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
   const base = names.base(app, stage);
   const statements: PolicyStatement[] = [];
 
+  // No logs:CreateLogGroup: the engine creates the stage's groups. With it, logs still in flight
+  // when a stage is destroyed recreate the groups right after destroy deletes them.
   statements.push({
     Sid: 'Logs',
     Effect: 'Allow',
-    Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+    Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
     Resource: [
       `arn:aws:logs:${region}:${acct}:log-group:${names.logGroupPrefix(app, stage)}*`,
       `arn:aws:logs:${region}:${acct}:log-group:${names.logGroupPrefix(app, stage)}*:log-stream:*`,
@@ -156,7 +158,7 @@ export function boundaryPolicy(input: {
     {
       Sid: 'StageLogs',
       Effect: 'Allow',
-      Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
       Resource: `arn:aws:logs:${region}:${acct}:log-group:/platform/apps/*`,
     },
     {
