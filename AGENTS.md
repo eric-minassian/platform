@@ -21,8 +21,10 @@ a single file.
   plane. A change there is a cross-package change: update every user in the
   same PR. Core must stay isomorphic: the console imports its types, and
   node-only code goes in `cloudfront-function.ts`.
-- **No CloudFormation/CDK/Terraform** for apps or the foundation. The engine
-  calls the AWS SDK directly with idempotent "ensure" drivers.
+- **No CloudFormation/CDK/Terraform for apps.** The engine provisions every
+  stage with idempotent "ensure" drivers over the AWS SDK. The platform's own
+  shared resources are one CDK stack (`foundation/src/stack.ts`); keep
+  per-app and per-stage resources out of it.
 
 ## Names are the state
 
