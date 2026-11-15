@@ -113,6 +113,8 @@ export const names = {
     stage ? `/platform/apps/${app}/${stage}/` : `/platform/apps/${app}/`,
   secretsPath: (app: string, stage: string) => `/platform/apps/${app}/${stage}/secrets/`,
   sharedSecretsPath: (app: string) => `/platform/apps/${app}/_shared/secrets/`,
+  /** SSM SecureString holding the stage key (see `Bindings.stageKey`); outside the secrets path. */
+  stageKeyParameter: (app: string, stage: string) => `/platform/apps/${app}/${stage}/stage-key`,
   /** Prefix inside the shared storage bucket: `<app>/<stage>/<bucket>/`. */
   storagePrefix: (app: string, stage: string, bucket?: string) =>
     bucket ? `${app}/${stage}/${bucket}/` : `${app}/${stage}/`,

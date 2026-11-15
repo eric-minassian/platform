@@ -10,6 +10,7 @@ import {
 import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
 import { getBindings } from './bindings.ts';
 import { ddbClient } from './clients.ts';
+import { openCursor, sealCursor } from './cursor.ts';
 import { span } from './telemetry.ts';
 
 /**
@@ -48,12 +49,22 @@ export interface QueryOptions {
   lt?: KeyValue;
   lte?: KeyValue;
   limit?: number;
+  /**
+   * A `cursor` from the previous page of this same query (same partition,
+   * index and sort condition; `limit` and `reverse` may change). Any other
+   * value throws `InvalidCursorError`, which the server answers with a 400.
+   */
   cursor?: string;
   reverse?: boolean;
 }
 
 export interface Page<T> {
   items: T[];
+  /**
+   * Set when more items may follow, whatever `items.length` is: a page also
+   * ends at 1 MB of data, so it can be shorter than `limit`. The next page can
+   * be empty. Opaque; safe to hand to browsers.
+   */
   cursor?: string;
 }
 
@@ -62,8 +73,10 @@ export interface Collection<T extends Record<string, unknown>> {
   put(item: T, opts?: { ifNotExists?: boolean }): Promise<T>;
   update(key: Partial<T>, patch: Partial<T>): Promise<T>;
   delete(key: Partial<T>): Promise<void>;
-  /** All items sharing the given partition-key values. */
+  /** One page of the items sharing the given partition-key values. Continue while `cursor` is set. */
   query(partition: Partial<T>, opts?: QueryOptions): Promise<Page<T>>;
+  /** Every matching item, following pages until the last one. */
+  queryAll(partition: Partial<T>, opts?: Omit<QueryOptions, 'cursor' | 'limit'>): Promise<T[]>;
 }
 
 export interface Db {
@@ -125,17 +138,20 @@ export function stripInternal<T>(item: Record<string, unknown> | undefined): T |
   return out as T;
 }
 
-export function encodeCursor(key: Record<string, unknown> | undefined): string | undefined {
-  return key ? Buffer.from(JSON.stringify(key)).toString('base64url') : undefined;
-}
-
-export function decodeCursor(cursor: string | undefined): Record<string, unknown> | undefined {
-  if (!cursor) return undefined;
-  try {
-    return JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-  } catch {
-    throw new Error('Invalid cursor');
-  }
+/**
+ * What a cursor is bound to: the table, index and whole key condition, so it
+ * only opens for the query that issued it. The sort condition is included
+ * because DynamoDB rejects a start key outside it with a ValidationException.
+ * Limit and order may change between pages.
+ */
+function cursorScope(input: QueryCommandInput): string {
+  return JSON.stringify([
+    input.TableName,
+    input.IndexName ?? null,
+    input.KeyConditionExpression,
+    input.ExpressionAttributeNames,
+    input.ExpressionAttributeValues,
+  ]);
 }
 
 /** Pure key/attribute mapping, exported for tests and the console's data browser. */
@@ -231,7 +247,6 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
         sortCond(`#sk ${op[1]} :v`);
       }
     }
-    const start = decodeCursor(q.cursor);
     return {
       TableName: tableName,
       ...(indexName ? { IndexName: indexName } : {}),
@@ -240,7 +255,6 @@ export function createKeyMapper<T extends Record<string, unknown>>(name: string,
       ExpressionAttributeValues: vals,
       ScanIndexForward: !q.reverse,
       ...(q.limit ? { Limit: q.limit } : {}),
-      ...(start ? { ExclusiveStartKey: start } : {}),
     };
   };
 
@@ -334,12 +348,28 @@ function collection<T extends Record<string, unknown>>(
 
     query: (values, q = {}) =>
       span('db.query', name, async () => {
-        const out = await ddb().send(new QueryCommand(m.queryInput(values, q, table())));
+        const input = m.queryInput(values, q, table());
+        const scope = cursorScope(input);
+        if (q.cursor) input.ExclusiveStartKey = openCursor(q.cursor, scope);
+        const out = await ddb().send(new QueryCommand(input));
         const page: Page<T> = { items: (out.Items ?? []).map((i) => stripInternal<T>(i)!) };
-        const cursor = encodeCursor(out.LastEvaluatedKey);
-        if (cursor) page.cursor = cursor;
+        if (out.LastEvaluatedKey) page.cursor = sealCursor(out.LastEvaluatedKey, scope);
         return page;
       }),
+
+    queryAll: async (values, q = {}) => {
+      const input = m.queryInput(values, q, table());
+      const items: T[] = [];
+      let start: Record<string, unknown> | undefined;
+      do {
+        const out = await span('db.query', name, () =>
+          ddb().send(new QueryCommand(start ? { ...input, ExclusiveStartKey: start } : input)),
+        );
+        for (const i of out.Items ?? []) items.push(stripInternal<T>(i)!);
+        start = out.LastEvaluatedKey;
+      } while (start);
+      return items;
+    },
   };
 }
 

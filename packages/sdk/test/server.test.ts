@@ -3,9 +3,16 @@ import type { AddressInfo } from 'node:net';
 import { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { setRoute } from '../src/context.ts';
+import { db } from '../src/db.ts';
 import { createNodeServer, parseEndpoint } from '../src/http.ts';
 import { normalizePath } from '../src/server.ts';
-import { captureTelemetry, createPlatformFetch, resetPlatform, useTestBindings } from '../src/testing.ts';
+import {
+  captureTelemetry,
+  createPlatformFetch,
+  mockClient,
+  resetPlatform,
+  useTestBindings,
+} from '../src/testing.ts';
 
 const AUTH = {
   mode: 'cognito' as const,
@@ -112,6 +119,46 @@ describe('createPlatformFetch', () => {
     expect(await (await f(new Request('http://x/custom/abc'))).text()).toBe('/custom/abc');
     expect(tel.events.find((e) => e.t === 'req')).toMatchObject({ route: '/custom/:x' });
     expect((await f(new Request('http://x/__platform/nope'))).status).toBe(404);
+  });
+
+  it('answers a bad db cursor with 400 and no error group, whatever the onError handler', async () => {
+    useTestBindings({ table: 'todo--prod' });
+    mockClient('ddb', () => ({ Items: [], LastEvaluatedKey: { pk: 'todos#u1', sk: 't1' } }));
+    const todos = db.collection<{ userId: string; id: string }>('todos', { partition: 'userId', sort: 'id' });
+    const list = async (req: Request) => {
+      const cursor = new URL(req.url).searchParams.get('cursor') ?? undefined;
+      return Response.json(await todos.query({ userId: 'u1' }, { cursor }));
+    };
+    const honoApp = (onError?: (err: Error) => Response) => {
+      const h = new Hono();
+      h.get('/api/todos', (c) => list(c.req.raw));
+      if (onError) h.onError(onError);
+      return h;
+    };
+    const handlers = [
+      honoApp(),
+      honoApp(() => Response.json({ error: 'catch-all' }, { status: 500 })),
+      honoApp((err) => {
+        throw err;
+      }),
+      list,
+    ];
+
+    for (const handler of handlers) {
+      const f = createPlatformFetch(handler);
+      const first = (await (await f(new Request('http://x/api/todos'))).json()) as { cursor: string };
+      expect((await f(new Request(`http://x/api/todos?cursor=${first.cursor}`))).status).toBe(200);
+
+      const bad = await f(new Request('http://x/api/todos?cursor=eyJwayI6InRvZG9zI3UyIn0'));
+      expect(bad.status).toBe(400);
+      expect(await bad.json()).toEqual({
+        error: { code: 'invalid_cursor', message: expect.stringMatching(/^Invalid cursor/) },
+      });
+    }
+    expect(tel.events.filter((e) => e.t === 'err')).toEqual([]);
+    expect(tel.events.filter((e) => e.t === 'req').map((e) => (e as { status: number }).status)).toEqual(
+      handlers.flatMap(() => [200, 200, 400]),
+    );
   });
 
   it('gates every app route when auth is required', async () => {

@@ -1,10 +1,11 @@
 import {
+  DeleteParameterCommand,
   DeleteParametersCommand,
   GetParameterCommand,
   GetParametersByPathCommand,
   PutParameterCommand,
 } from '@aws-sdk/client-ssm';
-import { type EngineContext, ignoreNotFound } from '../util.ts';
+import { type EngineContext, errorName, ignoreNotFound } from '../util.ts';
 
 export async function getParameter(
   ctx: EngineContext,
@@ -41,9 +42,29 @@ export async function ensureParameterOnce(
   const current = await getParameter(ctx, spec.name);
   if (current !== undefined) return current;
   const value = spec.generate();
-  await putParameter(ctx, { name: spec.name, value, secure: spec.secure, description: spec.description });
+  try {
+    await ctx.clients.ssm.send(
+      new PutParameterCommand({
+        Name: spec.name,
+        Value: value,
+        Type: spec.secure ? 'SecureString' : 'String',
+        Description: spec.description,
+        // Never overwrite: a concurrent creator may have won, and its value is the one in use.
+        Overwrite: false,
+      }),
+    );
+  } catch (e) {
+    if (errorName(e) !== 'ParameterAlreadyExists') throw e;
+    const winner = await getParameter(ctx, spec.name);
+    if (winner === undefined) throw e;
+    return winner;
+  }
   ctx.log('info', 'created parameter', `parameter ${spec.name}`);
   return value;
+}
+
+export async function deleteParameter(ctx: EngineContext, name: string): Promise<void> {
+  await ignoreNotFound(ctx.clients.ssm.send(new DeleteParameterCommand({ Name: name })));
 }
 
 export async function deleteParametersByPath(ctx: EngineContext, path: string): Promise<number> {

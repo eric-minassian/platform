@@ -3,6 +3,7 @@ import { DescribeTableCommand, DescribeTimeToLiveCommand } from '@aws-sdk/client
 import { PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { GetRoleCommand } from '@aws-sdk/client-iam';
 import { SendMessageCommand } from '@aws-sdk/client-sqs';
+import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   names,
   newDeploymentId,
@@ -56,6 +57,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
     let conn: EmulatorConnection;
     let engine: Engine;
     let platform: PlatformRuntimeConfig;
+    let stageKey: string | undefined;
     const logs: EngineLogEntry[] = [];
 
     beforeAll(async () => {
@@ -149,6 +151,8 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         stores: ['files'],
       });
       expect(result.bindings.worker).toBe('itest--itest1--worker');
+      expect(result.bindings.stageKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      stageKey = result.bindings.stageKey;
       expect(result.route).toBeUndefined(); // external web mode: no route flip
 
       const ctx = engineContext(engine);
@@ -207,12 +211,18 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         before.map((r) => `${r.type}:${r.name}`).sort(),
       );
       expect(again.bindings.revision).not.toBe('');
+      expect(again.bindings.stageKey).toBe(stageKey);
     });
 
     it('destroys everything for the stage', async () => {
       await engine.destroyStage({ app: 'itest', stage, platform });
       const left = await engine.listStageResources('itest', stage);
       expect(left).toEqual([]);
+      await expect(
+        engineContext(engine).clients.ssm.send(
+          new GetParameterCommand({ Name: names.stageKeyParameter('itest', stage) }),
+        ),
+      ).rejects.toMatchObject({ name: 'ParameterNotFound' });
     });
   },
 );

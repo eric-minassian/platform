@@ -32,6 +32,7 @@ export function testBindings(overrides: Partial<Bindings> = {}): Bindings {
       sharedPath: '/platform/apps/test-app/_shared/secrets/',
       names: [],
     },
+    stageKey: 'dGVzdC1vbmx5LXN0YWdlLWtleS1ub3QtYS1zZWNyZXQ',
     ...overrides,
   };
 }

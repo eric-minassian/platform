@@ -47,6 +47,7 @@ import { defineWorker, invokeJob } from '@ericminassian/platform/worker';
 | `db.collection`             | `const todos = db.collection<Todo>('todos', { partition: 'userId', sort: 'id' })`                           |
 | `.get/.put/.update/.delete` | `await todos.put(t, { ifNotExists: true })`, `await todos.update({ userId, id }, { done: true })`           |
 | `.query`                    | `await todos.query({ userId }, { beginsWith: '2026', limit: 20, reverse: true })` → `{ items, cursor }`     |
+| `.queryAll`                 | `await todos.queryAll({ userId })` → every matching item, across all pages                                  |
 | `queue(name).send`          | `await queue('emails').send({ to, subject, body }, { delaySeconds: 60 })`                                   |
 | `events.publish`            | `await events.publish('todo.created', { userId, id, title })`                                               |
 | `storage(name)`             | `await storage('uploads').put(key, bytes, { contentType })`, `.get`, `.getText`, `.list(prefix)`, `.delete` |
@@ -71,6 +72,13 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   then `users.query({ email }, { index: 'byEmail' })`.
   - Slots 1-3 are fixed GSIs. Never reuse a slot for a different key in the same collection.
   - For expiry, set `ttl: 'expiresAt'` (epoch seconds).
+- **Pagination.** Return `page.cursor` to the client and pass it back as `{ cursor }`, with the same
+  partition, index and sort condition.
+  - `cursor` set means there may be more pages, even when `items` is shorter than `limit`: a page also
+    ends at 1 MB. Stop when `cursor` is absent, never on the item count. The next page can be empty.
+  - Cursors are opaque and safe to send to browsers. One that was edited or issued for another query
+    throws `InvalidCursorError`, which the platform answers with a 400.
+  - On the server, `queryAll` follows the pages for you.
 - **Queue.**
   1. Add `thumbnails: queue<ThumbnailJob>({ batchSize: 5 })` under `queues` in `plat.config.ts`, with
      `ThumbnailJob` in `src/types.ts`.
