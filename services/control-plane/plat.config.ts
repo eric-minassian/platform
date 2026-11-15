@@ -7,7 +7,7 @@ const app = defineApp({
     server: 'src/server.ts',
     static: 'web/dist',
     build: 'pnpm web:build',
-    dev: { command: 'pnpm web:dev', port: 5173 },
+    dev: { command: 'pnpm web:dev' },
     spa: true,
     serverRoutes: ['/v1/', '/auth/'],
     timeoutSeconds: 120,

@@ -5,6 +5,8 @@ import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
 const api = 'http://127.0.0.1:8787';
+// Under `plat dev`, the port it picked; it waits for exactly that one.
+const platDevPort = Number(process.env.PLATFORM_DEV_WEB_PORT) || undefined;
 const guidePath = fileURLToPath(new URL('./src/agent-guide.md', import.meta.url));
 const readGuide = () => readFileSync(guidePath, 'utf8');
 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -41,7 +43,8 @@ export default defineConfig({
   plugins: [react(), tailwindcss(), agentGuide()],
   build: { outDir: 'dist', emptyOutDir: true, sourcemap: false },
   server: {
-    port: 5173,
+    port: platDevPort ?? 5173,
+    strictPort: platDevPort !== undefined,
     proxy: { '/v1': { target: api, changeOrigin: false }, '/auth': { target: api, changeOrigin: false } },
   },
 });

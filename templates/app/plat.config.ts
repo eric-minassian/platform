@@ -11,7 +11,7 @@ const app = defineApp({
     server: 'src/server.ts',
     static: 'web/dist',
     build: 'vite build --config web/vite.config.ts',
-    dev: { command: 'vite --config web/vite.config.ts', port: 5173 },
+    dev: { command: 'vite --config web/vite.config.ts' },
     spa: true,
   },
   auth: true,

@@ -25,7 +25,7 @@ const WebSchema = z
     server: z.string().optional(),
     static: z.string().optional(),
     build: z.string().optional(),
-    dev: z.object({ command: z.string(), port: z.number().int().positive() }).optional(),
+    dev: z.object({ command: z.string(), port: z.number().int().min(1).max(65535).optional() }).optional(),
     spa: z.boolean().default(true),
     serverRoutes: z.array(z.string().startsWith('/')).default(['/api/']),
     timeoutSeconds: z.number().int().min(3).max(900).default(30),
@@ -101,8 +101,12 @@ export interface WebConfig {
   static?: string;
   /** Shell command that builds `static` (run by `plat build`). */
   build?: string;
-  /** Dev server for the frontend, proxied by `plat dev` (e.g. Vite). */
-  dev?: { command: string; port: number };
+  /**
+   * Dev server for the frontend, proxied by `plat dev` (e.g. Vite). The command
+   * listens on the port `plat dev` passes in `PLATFORM_DEV_WEB_PORT` (and `PORT`):
+   * `port` when it is free, otherwise any free port.
+   */
+  dev?: { command: string; port?: number };
   /** Serve `index.html` for unknown non-file paths (client-side routing). Default `true`. */
   spa?: boolean;
   /** When both `server` and `static` exist, path prefixes handled by the server. Default `['/api/']`. */
