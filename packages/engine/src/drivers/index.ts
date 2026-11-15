@@ -1,3 +1,4 @@
+export * from './appsync.ts';
 export * from './cognito.ts';
 export * from './dynamodb.ts';
 export * from './events.ts';

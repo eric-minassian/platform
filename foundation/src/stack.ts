@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import {
   HOST_HEADER,
   names,
@@ -5,18 +6,22 @@ import {
   type PlatformRuntimeConfig,
   PROD_STAGE,
   platformNames,
+  REALTIME_TOKEN_PATTERN,
 } from '@ericminassian/platform-core';
 import { buildRouterFunctionCode } from '@ericminassian/platform-core/cloudfront-function';
 import { platformTags, policies } from '@ericminassian/platform-engine';
 import {
   ArnFormat,
   aws_certificatemanager as acm,
+  aws_appsync as appsync,
   CfnOutput,
   aws_cloudfront as cloudfront,
   aws_cognito as cognito,
   Duration,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
+  aws_lambda as lambda,
+  aws_logs as logs,
   RemovalPolicy,
   aws_route53 as route53,
   Stack,
@@ -27,6 +32,7 @@ import {
   Tags,
 } from 'aws-cdk-lib';
 import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { CloudFrontTarget, UserPoolDomainTarget } from 'aws-cdk-lib/aws-route53-targets';
 import type { Construct, IConstruct } from 'constructs';
 
@@ -58,7 +64,8 @@ export interface FoundationStackProps extends StackProps {
 export class FoundationStack extends Stack {
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
     super(scope, id, {
-      description: 'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, IAM',
+      description:
+        'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, realtime, IAM',
       terminationProtection: true,
       ...props,
     });
@@ -283,6 +290,92 @@ export class FoundationStack extends Stack {
     for (const record of consoleAliases) login.node.addDependency(record);
     aliases('LoginAlias', config.loginHost, route53.RecordTarget.fromAlias(new UserPoolDomainTarget(login)));
 
+    // -------------------------------------------------------------- realtime
+    // One AppSync Event API for every app: the engine gives each stage that
+    // declares `realtime` a channel namespace in it. Browsers reach it through
+    // the router (`/__platform/realtime` on the app's own host). Publishing is
+    // IAM only (stage roles); subscribing takes the public API key or a token
+    // from the app's server, which this authorizer checks. There is no API key
+    // here: the control plane owns it and extends it nightly, and a drift-
+    // reverting stack deploy would fight that.
+    const authorizerLogs = new logs.LogGroup(this, 'RealtimeAuthorizerLogs', {
+      logGroupName: `/aws/lambda/${platformNames.realtimeAuthorizer}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const authorizer = new NodejsFunction(this, 'RealtimeAuthorizer', {
+      functionName: platformNames.realtimeAuthorizer,
+      description: 'Checks signed-in subscribe tokens for the realtime Event API',
+      entry: fileURLToPath(new URL('./realtime-authorizer.ts', import.meta.url)),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      // It verifies an HMAC and reads one cached SSM parameter.
+      memorySize: 256,
+      timeout: Duration.seconds(5),
+      logGroup: authorizerLogs,
+      bundling: {
+        format: OutputFormat.ESM,
+        target: 'node24',
+        minify: true,
+        // The Node.js runtime ships the AWS SDK v3.
+        externalModules: ['@aws-sdk/*'],
+      },
+    });
+    // Stage keys only (the token names its stage); SecureStrings decrypt through SSM.
+    authorizer.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ssm:GetParameter'],
+        resources: [
+          this.formatArn({
+            service: 'ssm',
+            resource: 'parameter',
+            resourceName: names.stageKeyParameter('*', '*').replace(/^\//, ''),
+          }),
+        ],
+      }),
+    );
+    authorizer.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['kms:Decrypt'],
+        resources: [this.formatArn({ service: 'kms', resource: 'key', resourceName: '*' })],
+        conditions: { StringEquals: { 'kms:ViaService': `ssm.${this.region}.amazonaws.com` } },
+      }),
+    );
+    tag(authorizer, 'realtime');
+
+    const realtimeApi = new appsync.CfnApi(this, 'RealtimeApi', {
+      name: platformNames.realtimeApi,
+      eventConfig: {
+        authProviders: [
+          { authType: 'API_KEY' },
+          { authType: 'AWS_IAM' },
+          {
+            authType: 'AWS_LAMBDA',
+            lambdaAuthorizerConfig: {
+              authorizerUri: authorizer.functionArn,
+              // A default; each answer sets its own ttlOverride (the token's remaining life).
+              authorizerResultTtlInSeconds: 300,
+              // Malformed tokens are refused without invoking the function.
+              identityValidationExpression: REALTIME_TOKEN_PATTERN,
+            },
+          },
+        ],
+        connectionAuthModes: [{ authType: 'API_KEY' }, { authType: 'AWS_LAMBDA' }],
+        defaultPublishAuthModes: [{ authType: 'AWS_IAM' }],
+        defaultSubscribeAuthModes: [{ authType: 'AWS_LAMBDA' }],
+      },
+    });
+    // Its domains are in the runtime config and the route store, and stages'
+    // namespaces live in it: a replacement would break every realtime app.
+    realtimeApi.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    tag(realtimeApi, 'realtime');
+    authorizer.addPermission('AppSyncInvoke', {
+      principal: new iam.ServicePrincipal('appsync.amazonaws.com'),
+      action: 'lambda:InvokeFunction',
+      sourceArn: realtimeApi.attrApiArn,
+    });
+
     // ---------------------------------------------------------------- alerts
     const alerts = new sns.Topic(this, 'Alerts', { topicName: platformNames.alertsTopic });
     // A fixed construct id: the default one would spell the address into the
@@ -306,6 +399,7 @@ export class FoundationStack extends Stack {
           region: this.region,
           accountId: this.account,
           storageBucket: storage.bucketName,
+          realtimeApiId: realtimeApi.attrApiId,
         }),
       ),
     });
@@ -331,6 +425,7 @@ export class FoundationStack extends Stack {
               userPoolId: users.userPoolId,
               boundaryPolicyArn: boundary.managedPolicyArn,
               alertsTopicArn: alerts.topicArn,
+              realtime: { apiId: realtimeApi.attrApiId },
             },
           }),
         ),
@@ -394,6 +489,11 @@ export class FoundationStack extends Stack {
         resourceName: names.workerFunction(CONTROL_PLANE_APP, PROD_STAGE),
         arnFormat: ArnFormat.COLON_RESOURCE_NAME,
       }),
+      realtime: {
+        apiId: realtimeApi.attrApiId,
+        httpDomain: realtimeApi.attrDnsHttp,
+        realtimeDomain: realtimeApi.attrDnsRealtime,
+      },
     };
     new ssm.StringParameter(this, 'RuntimeConfig', {
       parameterName: platformNames.runtimeConfigParameter,
@@ -404,6 +504,7 @@ export class FoundationStack extends Stack {
     new CfnOutput(this, 'ControlPlaneRoleArn', { value: controlPlaneRole.roleArn });
     new CfnOutput(this, 'CiRoleArn', { value: ciRole.roleArn });
     new CfnOutput(this, 'DistributionDomainName', { value: distribution.distributionDomainName });
+    new CfnOutput(this, 'RealtimeApiId', { value: realtimeApi.attrApiId });
   }
 }
 

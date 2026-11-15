@@ -13,7 +13,17 @@ export interface StagePolicyInput {
   region: string;
   accountId: string;
   manifest: ResolvedManifest;
-  platform: Pick<PlatformRuntimeConfig, 'storageBucket'>;
+  platform: Pick<PlatformRuntimeConfig, 'storageBucket' | 'realtime'>;
+}
+
+/** A channel namespace's ARN in the platform's Event API. */
+export function channelNamespaceArn(
+  region: string,
+  accountId: string,
+  apiId: string,
+  namespace: string,
+): string {
+  return `arn:aws:appsync:${region}:${accountId}:apis/${apiId}/channelNamespace/${namespace}`;
 }
 
 /** Trust for per-stage roles: the worker and Web Function (Lambda) and schedules (Scheduler). */
@@ -130,6 +140,18 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
     },
   );
 
+  // Publishing only (HTTP, IAM-signed), and only to this stage's namespace:
+  // namespaces are per stage so IAM, not handler code, keeps stages apart.
+  const realtimeApi = input.platform.realtime?.apiId;
+  if (manifest.realtime && realtimeApi) {
+    statements.push({
+      Sid: 'Realtime',
+      Effect: 'Allow',
+      Action: 'appsync:EventPublish',
+      Resource: channelNamespaceArn(region, acct, realtimeApi, names.realtimeNamespace(app, stage)),
+    });
+  }
+
   if (manifest.worker) {
     statements.push({
       Sid: 'InvokeWorker',
@@ -152,8 +174,22 @@ export function boundaryPolicy(input: {
   region: string;
   accountId: string;
   storageBucket: string;
+  /** The platform's Event API; stage roles may publish to its stage namespaces. */
+  realtimeApiId?: string;
 }): PolicyDocument {
   const { region, accountId: acct } = input;
+  const realtime: PolicyStatement[] = input.realtimeApiId
+    ? [
+        {
+          Sid: 'StageRealtime',
+          Effect: 'Allow',
+          Action: 'appsync:EventPublish',
+          // Stage namespaces are `<app>--<stage>` (or that, hashed, when long); `--` never
+          // appears in an app or stage name.
+          Resource: channelNamespaceArn(region, acct, input.realtimeApiId, '*--*'),
+        },
+      ]
+    : [];
   return policy(
     {
       Sid: 'StageLogs',
@@ -210,6 +246,7 @@ export function boundaryPolicy(input: {
       Action: 'lambda:InvokeFunction',
       Resource: `arn:aws:lambda:${region}:${acct}:function:*--*--worker`,
     },
+    ...realtime,
   );
 }
 
@@ -230,7 +267,7 @@ export function controlPlanePolicy(input: {
     | 'userPoolId'
     | 'boundaryPolicyArn'
     | 'alertsTopicArn'
-  >;
+  > & { realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'> };
 }): PolicyDocument {
   const { region, accountId: acct, runtime } = input;
   const appRoles = `arn:aws:iam::${acct}:role${IAM_APP_PATH}*`;
@@ -359,6 +396,34 @@ export function controlPlanePolicy(input: {
         'cognito-idp:AdminGetUser',
       ],
       Resource: `arn:aws:cognito-idp:${region}:${acct}:userpool/${runtime.userPoolId}`,
+    });
+  }
+  if (runtime.realtime) {
+    const api = `arn:aws:appsync:${region}:${acct}:apis/${runtime.realtime.apiId}`;
+    statements.push({
+      // Stage namespaces (deploy, destroy) and the public subscribe key (nightly extension).
+      Sid: 'Realtime',
+      Effect: 'Allow',
+      Action: [
+        'appsync:CreateChannelNamespace',
+        'appsync:UpdateChannelNamespace',
+        'appsync:DeleteChannelNamespace',
+        'appsync:GetChannelNamespace',
+        'appsync:ListChannelNamespaces',
+        'appsync:CreateApiKey',
+        'appsync:UpdateApiKey',
+        'appsync:ListApiKeys',
+        'appsync:TagResource',
+        'appsync:ListTagsForResource',
+      ],
+      Resource: [api, `${api}/*`],
+    });
+    statements.push({
+      // listStageResources finds the API by name, like every other resource.
+      Sid: 'RealtimeLookup',
+      Effect: 'Allow',
+      Action: 'appsync:ListApis',
+      Resource: '*',
     });
   }
   if (runtime.alertsTopicArn) {

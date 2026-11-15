@@ -16,13 +16,22 @@ import {
   names,
   type PlatformRuntimeConfig,
   PROD_STAGE,
+  platformNames,
   publicUrl,
   type ResolvedManifest,
   type RouteRecord,
+  realtimeEndpoints,
   stageHost,
   toSchedulerExpression,
   validateStageName,
 } from '@ericminassian/platform-core';
+import {
+  deleteChannelNamespace,
+  ensureChannelNamespace,
+  ensureRealtimePlatform,
+  findEventApi,
+  getChannelNamespace,
+} from './drivers/appsync.ts';
 import { deleteUserPoolClient, ensureUserPoolClient } from './drivers/cognito.ts';
 import { deleteTable, describeTable, ensureTable, stageTableSpec } from './drivers/dynamodb.ts';
 import { deleteEventBus, deleteRule, ensureEventBus, ensureRule, listRules } from './drivers/events.ts';
@@ -114,6 +123,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     throw new Error('manifest declares a worker but no worker artifact was provided');
   if (hasWeb && !input.artifacts.server)
     throw new Error('manifest declares web.server but no server artifact was provided');
+  if (m.realtime && !platform.realtime)
+    throw new Error(
+      "plat.config.ts declares realtime, but this platform has no realtime API yet (its foundation predates it): deploy the platform's foundation first",
+    );
 
   ctx.log('info', `deploying ${app}/${stage} (${deploymentId})`);
 
@@ -234,6 +247,29 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     generate: () => randomBytes(32).toString('base64url'),
   });
 
+  // 7b. Realtime: the stage's channel namespace, ready before any code that
+  // publishes to it (worker, web revision) and before the route advertises it.
+  let realtime: Bindings['realtime'];
+  if (m.realtime && platform.realtime) {
+    const namespace = names.realtimeNamespace(app, stage);
+    const ns = await ensureChannelNamespace(ctx, {
+      apiId: platform.realtime.apiId,
+      name: namespace,
+      subscribe: m.realtime.subscribe,
+      tags,
+    });
+    // The key and the router's entry normally exist (foundation deploy, nightly job); this makes
+    // a first realtime deploy work regardless.
+    await ensureRealtimePlatform(ctx, platform);
+    realtime = {
+      namespace,
+      publishUrl: realtimeEndpoints(platform, platform.realtime).publishUrl,
+      subscribe: m.realtime.subscribe,
+      channels: m.realtime.channels,
+    };
+    resources.push({ type: 'channel-namespace', name: namespace, ...(ns.arn ? { arn: ns.arn } : {}) });
+  }
+
   // 8. Bindings.
   const bindings: Bindings = {
     v: 1,
@@ -261,6 +297,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       names: m.secrets,
     },
     ...(auth ? { auth } : {}),
+    ...(realtime ? { realtime } : {}),
     ...(hasWorker ? { worker: workerName } : {}),
     stageKey,
   };
@@ -372,6 +409,14 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       ...(staticPrefix ? { s: staticPrefix } : {}),
       ...(webFunction && staticPrefix ? { r: m.web?.serverRoutes ?? ['/api/'] } : {}),
       ...(staticPrefix ? { spa: m.web?.spa === false ? (0 as const) : (1 as const) } : {}),
+      ...(realtime
+        ? {
+            rt: {
+              n: realtime.namespace,
+              m: realtime.subscribe === 'signed-in' ? ('s' as const) : ('p' as const),
+            },
+          }
+        : {}),
     };
     if (platform.kvsArn) {
       await putRoute(ctx, platform.kvsArn, host, route);
@@ -389,7 +434,13 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     }
   }
 
-  // 14. Queues removed from the manifest.
+  // 14. Realtime removed from the manifest: the route no longer advertises it, so the namespace
+  // can go (open connections to it are dropped by AppSync).
+  if (!m.realtime && platform.realtime) {
+    await deleteChannelNamespace(ctx, platform.realtime.apiId, names.realtimeNamespace(app, stage));
+  }
+
+  // 15. Queues removed from the manifest.
   const wantedQueues = new Set(
     Object.keys(m.queues).flatMap((k) => [names.queue(app, stage, k), names.deadLetterQueue(app, stage, k)]),
   );
@@ -583,6 +634,8 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   await deleteWebFunction(ctx, names.webFunction(app, stage));
   for (const q of await listQueues(ctx, `${names.base(app, stage)}--`)) await deleteQueue(ctx, q.name);
   await deleteEventBus(ctx, names.eventBus(app, stage));
+  if (platform.realtime)
+    await deleteChannelNamespace(ctx, platform.realtime.apiId, names.realtimeNamespace(app, stage));
   if (platform.userPoolId)
     await deleteUserPoolClient(ctx, platform.userPoolId, names.userPoolClient(app, stage));
   await deleteRole(ctx, names.role(app, stage));
@@ -636,5 +689,16 @@ export async function listStageResources(
   for (const s of await listSchedules(ctx, group)) out.push({ type: 'schedule', name: `${group}/${s}` });
   for (const g of await listLogGroups(ctx, names.logGroupPrefix(app, stage)))
     out.push({ type: 'log-group', name: g });
+  // Found by name like everything else, so this needs no runtime config.
+  const api = await findEventApi(ctx, platformNames.realtimeApi);
+  const ns = api?.apiId
+    ? await getChannelNamespace(ctx, api.apiId, names.realtimeNamespace(app, stage))
+    : undefined;
+  if (ns?.name)
+    out.push({
+      type: 'channel-namespace',
+      name: ns.name,
+      ...(ns.channelNamespaceArn ? { arn: ns.channelNamespaceArn } : {}),
+    });
   return out;
 }

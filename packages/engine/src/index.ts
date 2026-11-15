@@ -18,10 +18,12 @@ import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
 import type {
   Bindings,
   PlatformRuntimeConfig,
+  RealtimeEdgeEntry,
   ResolvedManifest,
   RouteRecord,
 } from '@ericminassian/platform-core';
 import { createClients } from './clients.ts';
+import { ensureRealtimePlatform } from './drivers/appsync.ts';
 import { putObject } from './drivers/s3.ts';
 import { ensureLocal } from './local.ts';
 import { deployStage, destroyStage, listStageResources, rollbackStage } from './stage.ts';
@@ -83,7 +85,7 @@ export interface DeployStageInput {
 }
 
 export interface ResourceRef {
-  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `route`, `static` */
+  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `route`, `static` */
   type: string;
   name: string;
   arn?: string;
@@ -129,6 +131,13 @@ export interface Engine {
   listStageResources(app: string, stage: string): Promise<ResourceRef[]>;
   /** Upload a local file/buffer into the artifacts bucket (used by `plat dev`). */
   putArtifact(platform: PlatformRuntimeConfig, key: string, body: Uint8Array): Promise<S3Location>;
+  /**
+   * Keep realtime usable platform-wide: the public subscribe key exists and is far from expiry,
+   * and the router's realtime entry is current (written only when the platform has a route
+   * store). Returns that entry, or undefined when the platform has no realtime API. The control
+   * plane runs it nightly; `plat dev` serves the entry from its local router.
+   */
+  ensureRealtimePlatform(platform: PlatformRuntimeConfig): Promise<RealtimeEdgeEntry | undefined>;
 }
 
 export function createEngine(opts: EngineOptions): Engine {
@@ -142,6 +151,7 @@ export function createEngine(opts: EngineOptions): Engine {
     destroyStage: (input) => destroyStage(ctx, input),
     listStageResources: (app, stage) => listStageResources(ctx, app, stage),
     putArtifact: (platform, key, body) => putObject(ctx, { bucket: platform.artifactsBucket, key, body }),
+    ensureRealtimePlatform: (platform) => ensureRealtimePlatform(ctx, platform),
   };
   contexts.set(engine, ctx);
   return engine;
