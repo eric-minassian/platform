@@ -1,7 +1,8 @@
+import { safeRedirect } from '@ericminassian/platform-core';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { parseCookies, serializeCookie } from '../src/auth/cookies.ts';
-import { challengeFor, decodeFlow, encodeFlow, safeRedirect } from '../src/auth/pkce.ts';
+import { challengeFor, decodeFlow, encodeFlow } from '../src/auth/pkce.ts';
 import { auth } from '../src/index.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform, useTestBindings } from '../src/testing.ts';
 

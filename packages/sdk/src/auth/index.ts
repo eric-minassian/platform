@@ -5,13 +5,17 @@ import {
   AUTH_SCOPES,
   type AuthBindings,
   type Bindings,
+  loginPath,
+  logoutPath,
   type PlatformUser,
+  safeRedirect,
+  UNAUTHORIZED_BODY,
 } from '@ericminassian/platform-core';
 import { getBindings } from '../bindings.ts';
 import { currentContext } from '../context.ts';
 import { log } from '../telemetry.ts';
 import { clearCookie, parseCookies, serializeCookie } from './cookies.ts';
-import { challengeFor, createVerifier, decodeFlow, encodeFlow, randomState, safeRedirect } from './pkce.ts';
+import { challengeFor, createVerifier, decodeFlow, encodeFlow, randomState } from './pkce.ts';
 import {
   exchangeCode,
   isExpiredError,
@@ -97,10 +101,7 @@ async function resolveUser(request: Request): Promise<PlatformUser | null> {
 }
 
 export function unauthorized(): Response {
-  return Response.json(
-    { error: { code: 'unauthorized', message: 'Sign in required', loginUrl: AUTH_ROUTES.login } },
-    { status: 401, headers: { 'cache-control': 'no-store' } },
-  );
+  return Response.json(UNAUTHORIZED_BODY, { status: 401, headers: { 'cache-control': 'no-store' } });
 }
 
 export const auth: Auth = {
@@ -110,9 +111,8 @@ export const auth: Auth = {
     if (!user) throw unauthorized();
     return user;
   },
-  loginUrl: (redirect = '/') => `${AUTH_ROUTES.login}?redirect=${encodeURIComponent(safeRedirect(redirect))}`,
-  logoutUrl: (redirect = '/') =>
-    `${AUTH_ROUTES.logout}?redirect=${encodeURIComponent(safeRedirect(redirect))}`,
+  loginUrl: loginPath,
+  logoutUrl: logoutPath,
 };
 
 /**

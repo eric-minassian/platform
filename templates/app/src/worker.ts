@@ -1,32 +1,41 @@
-import { log, metrics } from '@ericminassian/platform';
-import { defineWorker } from '@ericminassian/platform/worker';
+import { defineWorker, Metrics, Platform } from '@ericminassian/platform/effect';
+import { Effect, Schema } from 'effect';
+import { EmailJob, TodoCreated } from './domain.ts';
 
 // Handles exactly the `queues`, `events` and `crons` in plat.config.ts (a missing
-// or extra handler is a type error), with the payload types declared there.
-// Throwing retries the job (queues: up to maxReceiveCount, then the dead-letter queue).
+// or extra handler is a type error). Payloads are decoded again here: a message
+// sent by an older deploy that no longer matches fails, retries, and then goes to
+// the dead-letter queue, instead of half-running. A failed handler retries the job.
 export default defineWorker({
+  layer: Platform.layer,
+
   queues: {
-    emails: async (message) => {
-      // Swap in a real email provider here (store its API key with `plat secrets set`).
-      log.info('would send email', {
-        to: message.body.to,
-        subject: message.body.subject,
-        attempt: message.attempt,
-      });
-      metrics.count('emails.sent');
-    },
+    emails: (message) =>
+      Effect.gen(function* () {
+        const job = yield* Schema.decodeEffect(EmailJob)(message.body);
+        // Swap in a real email provider here (store its API key with `plat secrets set`).
+        yield* Effect.logInfo('would send email').pipe(
+          Effect.annotateLogs({ to: job.to, subject: job.subject, attempt: message.attempt }),
+        );
+        const metrics = yield* Metrics;
+        yield* metrics.count('emails.sent');
+      }),
   },
 
   events: {
-    'todo.created': async (event) => {
-      log.info('todo created', { id: event.detail.id, userId: event.detail.userId });
-    },
+    'todo.created': (event) =>
+      Effect.gen(function* () {
+        const todo = yield* Schema.decodeEffect(TodoCreated)(event.detail);
+        yield* Effect.logInfo('todo created').pipe(Effect.annotateLogs({ id: todo.id, userId: todo.userId }));
+      }),
   },
 
   crons: {
-    cleanup: async () => {
-      log.info('nightly cleanup ran');
-      metrics.count('cleanup.runs');
-    },
+    cleanup: () =>
+      Effect.gen(function* () {
+        yield* Effect.logInfo('nightly cleanup ran');
+        const metrics = yield* Metrics;
+        yield* metrics.count('cleanup.runs');
+      }),
   },
 });

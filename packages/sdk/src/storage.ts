@@ -47,7 +47,7 @@ async function sign(command: unknown, expiresIn: number): Promise<string> {
   return getSignedUrl(c as any, command as any, { expiresIn });
 }
 
-function objectKey(prefix: string, key: string): string {
+export function objectKey(prefix: string, key: string): string {
   const k = key.replace(/^\/+/, '');
   if (!k || k.split('/').some((p) => p === '..')) throw new Error(`Invalid storage key "${key}"`);
   return prefix + k;

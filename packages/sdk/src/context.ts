@@ -18,6 +18,8 @@ export interface RequestContext {
   job?: string;
   /** Error a framework handled itself (e.g. a Hono app's onError), for telemetry. */
   error?: unknown;
+  /** Whether `error` was a defect (an unexpected failure) rather than an expected one. */
+  errorIsDefect?: boolean;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -44,6 +46,20 @@ export function parseTraceparent(header: string | null | undefined): string | un
   if (!header) return undefined;
   const m = /^[\da-f]{2}-([\da-f]{32})-[\da-f]{16}-[\da-f]{2}$/i.exec(header.trim());
   return m?.[1]?.toLowerCase();
+}
+
+/**
+ * Record an error a framework turned into a response itself, so a 5xx is
+ * reported with that error's stack. A defect replaces an earlier expected
+ * failure (a 4xx a handler chose), never the other way round.
+ */
+export function recordError(error: unknown, options: { defect: boolean }): void {
+  const ctx = storage.getStore();
+  if (!ctx) return;
+  if (ctx.error === undefined || (options.defect && !ctx.errorIsDefect)) {
+    ctx.error = error;
+    ctx.errorIsDefect = options.defect;
+  }
 }
 
 /**

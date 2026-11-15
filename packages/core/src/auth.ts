@@ -21,6 +21,32 @@ export const AUTH_COOKIES = {
 
 export const AUTH_SCOPES = ['openid', 'email', 'profile'] as const;
 
+/** Only same-origin absolute paths are allowed as post-login destinations. */
+export function safeRedirect(target: string | null | undefined): string {
+  if (!target?.startsWith('/') || target.startsWith('//') || target.includes('\\')) return '/';
+  return target;
+}
+
+/** Path that starts sign-in and returns to `redirect` afterwards. */
+export function loginPath(redirect = '/'): string {
+  return `${AUTH_ROUTES.login}?redirect=${encodeURIComponent(safeRedirect(redirect))}`;
+}
+
+/** Path that signs out and then goes to `redirect`. */
+export function logoutPath(redirect = '/'): string {
+  return `${AUTH_ROUTES.logout}?redirect=${encodeURIComponent(safeRedirect(redirect))}`;
+}
+
+/**
+ * Body of every platform 401 (the `auth.required` gate, `auth.requireUser`
+ * and the Effect SDK's `Unauthorized` error), so clients decode one shape.
+ */
+export const UNAUTHORIZED_BODY = {
+  _tag: 'Unauthorized',
+  message: 'Sign in required',
+  loginUrl: AUTH_ROUTES.login,
+} as const;
+
 /** The user object apps see. */
 export interface PlatformUser {
   /** Stable user id (Cognito `sub`). Same across all platform apps. */

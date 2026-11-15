@@ -1,119 +1,156 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { assert, describe, it } from '@effect/vitest';
+import { Platform, toFetchHandler, type User } from '@ericminassian/platform/effect';
+import {
+  captureTelemetry,
+  createPlatformFetch,
+  resetPlatform,
+  useTestBindings,
+} from '@ericminassian/platform/testing';
+import { Context, Effect, Layer } from 'effect';
+import { FetchHttpClient, HttpClient, HttpClientRequest } from 'effect/http';
+import { HttpApiClient } from 'effect/http-api';
+import { afterEach, beforeEach } from 'vitest';
+import { Api } from '../src/api.ts';
+import { HttpLive } from '../src/http.ts';
 
-// Unit tests replace the platform SDK with in-memory fakes, so they run with no
-// emulator and no AWS. Integration tests (`*.integration.test.ts`, `plat test`)
-// use the real SDK against the AWS Emulator.
-const store = new Map<string, Record<string, unknown>>();
-const published: Array<{ type: string; detail: unknown }> = [];
-const sent: unknown[] = [];
+// Unit tests run the whole app (the platform's server wrapper, routing,
+// validation, sign-in and handlers) on the in-memory platform: no emulator, no
+// AWS. `plat test` runs `*.integration.test.ts` against the AWS Emulator instead.
 
-vi.mock('@ericminassian/platform', () => {
-  const userFrom = (req: Request) => {
-    const id = req.headers.get('x-test-user');
-    return id ? { id, email: `${id}@example.com`, groups: [] } : null;
-  };
-  return {
-    app: {
-      name: 'template-app',
-      stage: 'test',
-      host: 'localhost',
-      url: 'http://localhost',
-      revision: 'd0',
-      isLocal: true,
-    },
-    auth: {
-      getUser: async (req: Request) => userFrom(req),
-      requireUser: async (req: Request) => {
-        const u = userFrom(req);
-        if (!u) throw new Response('unauthorized', { status: 401 });
-        return u;
-      },
-    },
-    db: {
-      collection: (name: string) => {
-        const k = (key: Record<string, unknown>) => `${name}#${key.userId}#${key.id}`;
-        return {
-          get: async (key: Record<string, unknown>) => store.get(k(key)),
-          put: async (item: Record<string, unknown>) => {
-            store.set(k(item), item);
-            return item;
-          },
-          update: async (key: Record<string, unknown>, patch: Record<string, unknown>) => {
-            const next = { ...store.get(k(key)), ...patch };
-            store.set(k(key), next);
-            return next;
-          },
-          delete: async (key: Record<string, unknown>) => void store.delete(k(key)),
-          queryAll: async (part: Record<string, unknown>) =>
-            [...store.entries()]
-              .filter(([key]) => key.startsWith(`${name}#${part.userId}#`))
-              .map(([, v]) => v),
-        };
-      },
-    },
-    events: { publish: async (type: string, detail: unknown) => void published.push({ type, detail }) },
-    queue: () => ({ send: async (body: unknown) => void sent.push(body), sendBatch: async () => {} }),
-    metrics: { count: () => {}, value: () => {} },
-    log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
-  };
+const alice: User = { id: 'alice', email: 'alice@example.com', groups: [] };
+const bob: User = { id: 'bob', groups: [] };
+
+/** The app on a fresh in-memory platform, where `Authorization: Bearer <id>` signs in as that user. */
+const setup = Effect.gen(function* () {
+  const platform = yield* Layer.build(Platform.layerMemory({ users: [alice, bob] }));
+  const app = toFetchHandler(HttpLive.pipe(Layer.provide(Layer.succeedContext(platform))));
+  yield* Effect.addFinalizer(() => Effect.promise(app.dispose));
+  const fetch = createPlatformFetch(app);
+
+  /** A client generated from `Api`, sending requests through `fetch`. */
+  const clientAs = (user?: User) =>
+    HttpApiClient.make(Api, {
+      baseUrl: 'http://test-app.localhost',
+      ...(user && { transformClient: HttpClient.mapRequest(HttpClientRequest.bearerToken(user.id)) }),
+    }).pipe(
+      Effect.provide(
+        FetchHttpClient.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FetchHttpClient.Fetch)((input, init) => fetch(new Request(input, init))),
+          ),
+        ),
+      ),
+    );
+
+  return { fetch, clientAs, memory: Context.get(platform, Platform.Memory) };
 });
 
-const { default: app } = await import('../src/server.ts');
-
-const as = (user: string) => ({ 'x-test-user': user, 'content-type': 'application/json' });
+const post = (body: string, user = alice) =>
+  new Request('http://test-app.localhost/api/todos', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${user.id}`, 'content-type': 'application/json' },
+    body,
+  });
 
 describe('api', () => {
+  let telemetry: ReturnType<typeof captureTelemetry>;
   beforeEach(() => {
-    store.clear();
-    published.length = 0;
-    sent.length = 0;
+    useTestBindings({ app: 'template-app' });
+    telemetry = captureTelemetry();
   });
-
-  it('reports health', async () => {
-    const res = await app.request('/api/health');
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, app: 'template-app' });
+  afterEach(() => {
+    telemetry.stop();
+    resetPlatform();
   });
+  const errors = () => telemetry.events.filter((e) => e.t === 'err');
 
-  it('requires sign-in for todos', async () => {
-    const res = await app.request('/api/todos');
-    expect(res.status).toBe(401);
-  });
+  it.effect('reports health and the signed-in user', () =>
+    Effect.gen(function* () {
+      const { clientAs } = yield* setup;
+      const anonymous = yield* clientAs();
+      assert.deepStrictEqual(yield* anonymous.health(), { ok: true, app: 'test-app', stage: 'test' });
+      assert.isNull(yield* anonymous.me());
+      assert.deepStrictEqual(yield* (yield* clientAs(alice)).me(), alice);
+    }),
+  );
 
-  it('creates, lists, toggles and deletes todos', async () => {
-    const created = await app.request('/api/todos', {
-      method: 'POST',
-      headers: as('u1'),
-      body: JSON.stringify({ title: 'Buy milk' }),
-    });
-    expect(created.status).toBe(201);
-    const { todo } = (await created.json()) as { todo: { id: string; done: boolean } };
-    expect(published).toEqual([{ type: 'todo.created', detail: expect.objectContaining({ id: todo.id }) }]);
-    expect(sent).toHaveLength(1);
+  it.effect('requires sign-in for todos', () =>
+    Effect.gen(function* () {
+      const { clientAs } = yield* setup;
+      const error = yield* Effect.flip((yield* clientAs()).todos.list());
+      assert.strictEqual(error._tag, 'Unauthorized');
+    }),
+  );
 
-    const list = await app.request('/api/todos', { headers: as('u1') });
-    expect(((await list.json()) as { todos: unknown[] }).todos).toHaveLength(1);
-    const other = await app.request('/api/todos', { headers: as('u2') });
-    expect(((await other.json()) as { todos: unknown[] }).todos).toHaveLength(0);
+  it.effect('creates, lists, updates and removes todos', () =>
+    Effect.gen(function* () {
+      const { clientAs, memory } = yield* setup;
+      const api = yield* clientAs(alice);
 
-    const patched = await app.request(`/api/todos/${todo.id}`, {
-      method: 'PATCH',
-      headers: as('u1'),
-      body: JSON.stringify({ done: true }),
-    });
-    expect(((await patched.json()) as { todo: { done: boolean } }).todo.done).toBe(true);
+      const todo = yield* api.todos.create({ payload: { title: 'Buy milk' } });
+      assert.isFalse(todo.done);
+      assert.deepStrictEqual(yield* memory.published, [
+        { type: 'todo.created', detail: { userId: 'alice', id: todo.id, title: 'Buy milk' } },
+      ]);
+      assert.deepStrictEqual(yield* memory.sent, [
+        { queue: 'emails', body: { to: 'alice@example.com', subject: 'New todo', body: 'Buy milk' } },
+      ]);
 
-    const deleted = await app.request(`/api/todos/${todo.id}`, { method: 'DELETE', headers: as('u1') });
-    expect(deleted.status).toBe(204);
-    expect(store.size).toBe(0);
-  });
+      assert.deepStrictEqual(yield* api.todos.list(), [todo]);
+      assert.deepStrictEqual(yield* (yield* clientAs(bob)).todos.list(), []);
 
-  it('validates input', async () => {
-    const res = await app.request('/api/todos', {
-      method: 'POST',
-      headers: as('u1'),
-      body: JSON.stringify({ title: '' }),
-    });
-    expect(res.status).toBe(400);
-  });
+      const done = yield* api.todos.update({ params: { id: todo.id }, payload: { done: true } });
+      assert.isTrue(done.done);
+      assert.strictEqual(done.title, 'Buy milk');
+
+      yield* api.todos.remove({ params: { id: todo.id } });
+      assert.deepStrictEqual(yield* api.todos.list(), []);
+    }),
+  );
+
+  it.effect("keeps users' todos apart, and each test starts empty", () =>
+    Effect.gen(function* () {
+      const { clientAs } = yield* setup;
+      const api = yield* clientAs(alice);
+      const todo = yield* api.todos.create({ payload: { title: 'Mine' } });
+      assert.deepStrictEqual(yield* api.todos.list(), [todo]);
+      const error = yield* Effect.flip(
+        (yield* clientAs(bob)).todos.update({ params: { id: todo.id }, payload: { done: true } }),
+      );
+      assert.strictEqual(error._tag, 'TodoNotFound');
+    }),
+  );
+
+  it.effect('trims titles', () =>
+    Effect.gen(function* () {
+      const { fetch } = yield* setup;
+      const res = yield* Effect.promise(() => fetch(post(JSON.stringify({ title: '  Buy milk ' }))));
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(((yield* Effect.promise(() => res.json())) as { title: string }).title, 'Buy milk');
+    }),
+  );
+
+  it.effect('rejects invalid bodies with a 400 and records no error', () =>
+    Effect.gen(function* () {
+      const { fetch } = yield* setup;
+      for (const body of ['{"title":"   "}', JSON.stringify({ title: 'x'.repeat(201) }), '{bad']) {
+        const res = yield* Effect.promise(() => fetch(post(body)));
+        assert.strictEqual(res.status, 400, body);
+      }
+      assert.deepStrictEqual(errors(), []);
+    }),
+  );
+
+  it.effect('records the route pattern of each request', () =>
+    Effect.gen(function* () {
+      const { clientAs } = yield* setup;
+      const api = yield* clientAs(alice);
+      const todo = yield* api.todos.create({ payload: { title: 'Route' } });
+      yield* api.todos.update({ params: { id: todo.id }, payload: { done: true } });
+      const routes = telemetry.events.flatMap((e) =>
+        e.t === 'req' ? [`${e.method} ${e.route} ${e.status}`] : [],
+      );
+      assert.deepStrictEqual(routes, ['POST /api/todos 201', 'PATCH /api/todos/:id 200']);
+    }),
+  );
 });

@@ -55,15 +55,15 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ### Components
 
-| Component                                  | What it is                                                                                                                                                                                     |
-| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                                 |
-| `packages/sdk` (`@ericminassian/platform`) | What app code imports: `db`, `queue`, `events`, `storage`, `secrets`, `auth`, `metrics`, `log`, `app`. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
-| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                            |
-| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                             |
-| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                |
-| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, IAM) as one CDK stack, and the deploy that brings up the control plane on them.                          |
-| `templates/app`                            | What `plat init` copies: a Hono API + React SPA with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                         |
+| Component                                  | What it is                                                                                                                                                                                                            |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, API types. Isomorphic.                                                                                        |
+| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service (`/effect`, with an in-memory platform for tests), or as promises. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented. |
+| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                   |
+| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                    |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                                       |
+| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, IAM) as one CDK stack, and the deploy that brings up the control plane on them.                                                 |
+| `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                               |
 
 ## The app contract
 
@@ -71,7 +71,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ```ts
 import { defineApp, event, queue } from '@ericminassian/platform/config';
-import type { EmailJob, TodoCreated } from './src/types.ts';
+import type { EmailJob, TodoCreated } from './src/domain.ts';
 
 const app = defineApp({
   name: 'todo',
@@ -94,7 +94,7 @@ const app = defineApp({
 });
 export default app;
 
-declare module '@ericminassian/platform' {
+declare module '@ericminassian/platform/config' {
   interface Register {
     app: typeof app;
   }
@@ -110,25 +110,34 @@ declare module '@ericminassian/platform' {
   `manifest.json` and `plat deploy` sends, so the control plane never runs app
   code.
 - **Typed code.** `Register` hands the literal config to the SDK
-  (`packages/sdk/src/register.ts`):
-  - `queue()`, `events.publish()`, `storage()` and `secrets.get()` accept only
-    declared names.
+  (`packages/sdk/src/register.ts`). `plat.config.ts` augments it in
+  `@ericminassian/platform/config`, the one SDK module every app imports.
+  - Queue, event, store and secret names must be declared ones, in both the
+    Effect services and the promise API.
   - Bodies and details must match `queue<T>()` / `event<T>()`.
   - `defineWorker` must handle exactly the declared queues, events and crons.
 
 ### Code
 
 - **Server**: the default export of `web.server` is any web-standard fetch
-  handler (a Hono app, `{ fetch }`, or a function). The SDK wraps it and
-  listens on `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract.
-- **Worker**: `export default defineWorker({ queues, events, crons })`. One
-  Lambda per stage handles all of them; the wrapper dispatches on event shape
-  and reports partial SQS batch failures. Handlers get the payload types
-  declared in `plat.config.ts`.
-- **Resources**: only through `@ericminassian/platform`. `db.collection()`
-  maps typed collections onto the stage's single table (partition/sort keys,
-  up to three pinned index slots, TTL), so adding a collection needs no
-  deploy-time provisioning.
+  handler (`{ fetch }` or a function). The SDK wraps it and listens on
+  `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract. Effect apps export
+  `toFetchHandler(layer)`, which serves an `HttpApi` and passes route patterns,
+  logs and the error behind a 500 to the platform's telemetry. Hono apps (the
+  control plane) get the same through the wrapper's Hono hooks.
+- **Worker**: `export default defineWorker({ queues, events, crons })` (the
+  Effect variant also takes the `layer` its handlers run on). One Lambda per
+  stage handles all of them; the wrapper dispatches on event shape and reports
+  partial SQS batch failures. Handlers get the payload types declared in
+  `plat.config.ts`.
+- **Resources**: only through `@ericminassian/platform`. `Db.collection()`
+  (`db.collection()` with promises) maps collections onto the stage's single
+  table (partition/sort keys, up to three pinned index slots, TTL), so adding
+  a collection needs no deploy-time provisioning. Effect collections encode
+  and decode documents with a schema.
+- **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
+  `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
+  against both it and DynamoDB in the emulator.
 
 ### Bindings
 
@@ -427,6 +436,7 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                     |
 | App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories. |
+| Apps are written with Effect v4 (the template, the SDK's Effect API)                  | Eric's call (2026-11-15). One `HttpApi` definition gives the server, the typed web client and OpenAPI. Services and layers make every resource swappable, so unit tests run the whole app on an in-memory platform, and failures are typed instead of thrown `Response`s. The promise API stays for the Hono control plane.                                                      |
 | Foundation is one CDK stack; stages stay on the engine                                | Eric's call (2026-11-15). The shared resources are one fixed set that rarely changes and serves every app, which suits CloudFormation: `cdk diff`, rollback on failure, removal of resources dropped from code, drift-aware deploys. Stages keep the engine: many, short-lived, deployed in seconds. The engine's resources were imported into the stack, not recreated.         |
 | Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                       |
 | One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                        |

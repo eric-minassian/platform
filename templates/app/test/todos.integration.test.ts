@@ -1,30 +1,35 @@
-import { db } from '@ericminassian/platform';
+import { assert, layer } from '@effect/vitest';
+import { Platform, type User } from '@ericminassian/platform/effect';
 import { createPlatformFetch } from '@ericminassian/platform/server';
-import { describe, expect, it } from 'vitest';
+import { Effect, Layer } from 'effect';
 import app from '../src/server.ts';
-import type { Todo } from '../src/types.ts';
+import { Todos } from '../src/todos.ts';
 
-// Runs under `plat test`: real SDK, real (emulated) DynamoDB/SQS/EventBridge.
-const fetchApp = createPlatformFetch(app);
+// Runs under `plat test`: the real platform services against the AWS Emulator
+// (DynamoDB, SQS, EventBridge), with the bindings a deployed stage gets.
+const user: User = { id: `it-${Date.now()}`, email: 'it@example.com', groups: [] };
 
-describe('integration', () => {
-  it('serves health through the platform wrapper', async () => {
-    const res = await fetchApp(new Request('http://localhost/api/health'));
-    expect(res.status).toBe(200);
-  });
+// `excludeTestServices`: the real clock, which ids and timestamps come from.
+layer(Todos.layer.pipe(Layer.provide(Platform.layer)), { excludeTestServices: true })('integration', (it) => {
+  it.effect('serves health through the platform wrapper', () =>
+    Effect.gen(function* () {
+      const fetch = createPlatformFetch(app);
+      const res = yield* Effect.promise(() => fetch(new Request('http://localhost/api/health')));
+      assert.strictEqual(res.status, 200);
+    }),
+  );
 
-  it('round-trips a todo through the database', async () => {
-    const todos = db.collection<Todo>('todos', { partition: 'userId', sort: 'id' });
-    const todo: Todo = {
-      userId: 'it-user',
-      id: `t-${Date.now()}`,
-      title: 'from a test',
-      done: false,
-      createdAt: new Date().toISOString(),
-    };
-    await todos.put(todo);
-    expect(await todos.get({ userId: todo.userId, id: todo.id })).toMatchObject({ title: 'from a test' });
-    const page = await todos.query({ userId: todo.userId });
-    expect(page.items.map((t) => t.id)).toContain(todo.id);
-  });
+  it.effect('stores, lists, updates and removes a todo', () =>
+    Effect.gen(function* () {
+      const todos = yield* Todos;
+      const todo = yield* todos.create(user, { title: 'from a test' });
+      assert.deepStrictEqual(yield* todos.list(user.id), [todo]);
+
+      const done = yield* todos.update(user.id, todo.id, { done: true });
+      assert.isTrue(done.done);
+
+      yield* todos.remove(user.id, todo.id);
+      assert.deepStrictEqual(yield* todos.list(user.id), []);
+    }),
+  );
 });

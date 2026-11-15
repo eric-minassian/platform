@@ -17,7 +17,7 @@ const app = defineApp({
 });
 export default app;
 
-declare module '@ericminassian/platform' {
+declare module '@ericminassian/platform/config' {
   interface Register {
     app: typeof app;
   }

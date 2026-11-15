@@ -35,9 +35,3 @@ export function decodeFlow(raw: string | undefined): FlowState | null {
     return null;
   }
 }
-
-/** Only same-origin absolute paths are allowed as post-login destinations. */
-export function safeRedirect(target: string | null | undefined): string {
-  if (!target?.startsWith('/') || target.startsWith('//') || target.includes('\\')) return '/';
-  return target;
-}

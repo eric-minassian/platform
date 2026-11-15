@@ -26,11 +26,14 @@ import {
 } from '@aws-sdk/client-sqs';
 import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { BINDINGS_ENV, type Bindings, encodeBindings } from '@ericminassian/platform-core';
+import { Effect } from 'effect';
 import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { setBindings } from '../../src/bindings.ts';
+import { Db } from '../../src/effect/index.ts';
 import { auth, db, events, InvalidCursorError, queue, secrets, storage } from '../../src/index.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
+import { dbContract } from '../effect-db-contract.ts';
 
 const region = process.env.AWS_REGION ?? 'us-east-1';
 const endpoint = process.env.AWS_ENDPOINT_URL;
@@ -259,6 +262,9 @@ describe('against the AWS Emulator', () => {
     await notes().delete({ ownerId: 'u1', noteId: 'n1' });
     expect(await notes().get({ ownerId: 'u1', noteId: 'n1' })).toBeUndefined();
   });
+
+  it('db (Effect): behaves like the in-memory store', () =>
+    Effect.runPromise(dbContract('notes-effect').pipe(Effect.provide(Db.layer))));
 
   it('queue: send carries the body and trace', async () => {
     await queue('emails').send({ to: 'eric@example.com' });

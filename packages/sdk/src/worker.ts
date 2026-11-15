@@ -68,13 +68,13 @@ export interface WorkerDefinition {
   logs?: (batch: LogsBatch, ctx: JobContext) => unknown | Promise<unknown>;
 }
 
-type QueueHandlers = {
-  [K in QueueName]: (message: QueueMessage<QueueBody<K>>, ctx: JobContext) => unknown | Promise<unknown>;
+type QueueHandlers<Out> = {
+  [K in QueueName]: (message: QueueMessage<QueueBody<K>>, ctx: JobContext) => Out;
 };
-type EventHandlers = {
-  [K in EventType]: (event: PlatformEvent<EventDetail<K>>, ctx: JobContext) => unknown | Promise<unknown>;
+type EventHandlers<Out> = {
+  [K in EventType]: (event: PlatformEvent<EventDetail<K>>, ctx: JobContext) => Out;
 };
-type CronHandlers = { [K in CronName]: (ctx: JobContext) => unknown | Promise<unknown> };
+type CronHandlers<Out> = { [K in CronName]: (ctx: JobContext) => Out };
 
 /**
  * Unregistered (names are `string`): an optional map. Registered: required
@@ -86,10 +86,13 @@ type Section<Key extends string, Name extends string, Handlers> = string extends
     ? { [P in Key]?: never }
     : { [P in Key]: Handlers };
 
+/** Queue, event and cron handlers returning `Out`, checked against the registered config. */
+export type AppWorkerHandlers<Out> = Section<'queues', QueueName, QueueHandlers<Out>> &
+  Section<'events', EventType, EventHandlers<Out>> &
+  Section<'crons', CronName, CronHandlers<Out>>;
+
 /** What `defineWorker` accepts: `WorkerDefinition`, checked against the registered config. */
-export type AppWorkerDefinition = Section<'queues', QueueName, QueueHandlers> &
-  Section<'events', EventType, EventHandlers> &
-  Section<'crons', CronName, CronHandlers> &
+export type AppWorkerDefinition = AppWorkerHandlers<unknown | Promise<unknown>> &
   Pick<WorkerDefinition, 'invoke' | 'logs'>;
 
 /** Payload shapes the platform sends to the worker besides SQS/EventBridge records. */

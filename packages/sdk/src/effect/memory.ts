@@ -1,0 +1,185 @@
+import { Context, Effect, Layer, Option, Redacted } from 'effect';
+import { HttpServerRequest } from 'effect/http';
+import { objectKey, type StoredObject } from '../storage.ts';
+import type { User } from './api.ts';
+import { Db } from './db.ts';
+import {
+  AppInfo,
+  Auth,
+  delaySeconds,
+  Events,
+  Metrics,
+  Queues,
+  Secrets,
+  Storage,
+  type Store,
+} from './services.ts';
+
+export interface SentMessage {
+  readonly queue: string;
+  readonly body: unknown;
+  readonly delaySeconds?: number;
+}
+
+export interface PublishedEvent {
+  readonly type: string;
+  readonly detail: unknown;
+}
+
+export interface RecordedMetric {
+  readonly name: string;
+  readonly value: number;
+  readonly unit?: string;
+}
+
+/** What `Platform.layerMemory` recorded, for assertions in tests. */
+export class PlatformMemory extends Context.Service<
+  PlatformMemory,
+  {
+    readonly sent: Effect.Effect<ReadonlyArray<SentMessage>>;
+    readonly published: Effect.Effect<ReadonlyArray<PublishedEvent>>;
+    readonly metrics: Effect.Effect<ReadonlyArray<RecordedMetric>>;
+  }
+>()('@ericminassian/platform/PlatformMemory') {}
+
+export interface MemoryOptions {
+  /**
+   * Users `Auth` recognizes. A request is signed in as the user whose `id` it
+   * sends as a bearer token (`Authorization: Bearer <id>`).
+   */
+  readonly users?: ReadonlyArray<User>;
+  readonly secrets?: Readonly<Record<string, string>>;
+  readonly app?: Partial<AppInfo['Service']>;
+}
+
+/** Every platform service in memory, plus `PlatformMemory`. Each build starts empty. */
+export const layerMemory = (
+  options: MemoryOptions = {},
+): Layer.Layer<AppInfo | Auth | Db | Events | Metrics | Queues | Secrets | Storage | PlatformMemory> =>
+  Layer.mergeAll(
+    Db.layerMemory(),
+    Layer.effectContext(
+      Effect.sync(() => {
+        const sent: SentMessage[] = [];
+        const published: PublishedEvent[] = [];
+        const recorded: RecordedMetric[] = [];
+        const users = new Map((options.users ?? []).map((u) => [u.id, u]));
+        const secrets = new Map(Object.entries(options.secrets ?? {}));
+
+        return Context.make(
+          AppInfo,
+          AppInfo.of({
+            name: 'test-app',
+            stage: 'test',
+            host: 'test-app.localhost',
+            url: 'http://test-app.localhost:3000',
+            revision: 'dtest',
+            isLocal: true,
+            ...options.app,
+          }),
+        ).pipe(
+          Context.add(
+            Auth,
+            Auth.of({
+              currentUser: Effect.map(HttpServerRequest.HttpServerRequest, (request) => {
+                const token = /^Bearer\s+(.+)$/i.exec(request.headers.authorization ?? '')?.[1];
+                return Option.fromUndefinedOr(token === undefined ? undefined : users.get(token));
+              }),
+            }),
+          ),
+          Context.add(
+            Queues,
+            Queues.of({
+              send: (queue, body, opts) =>
+                Effect.sync(() => {
+                  sent.push({
+                    queue,
+                    body,
+                    ...(opts?.delay === undefined ? {} : { delaySeconds: delaySeconds(opts.delay) }),
+                  });
+                }),
+              sendBatch: (queue, bodies) =>
+                Effect.sync(() => {
+                  for (const body of bodies) sent.push({ queue, body });
+                }),
+            }),
+          ),
+          Context.add(
+            Events,
+            Events.of({
+              publish: (type, detail) => Effect.sync(() => void published.push({ type, detail })),
+            }),
+          ),
+          Context.add(Storage, Storage.of({ store: memoryStores() })),
+          Context.add(
+            Secrets,
+            Secrets.of({
+              get: (name) =>
+                Effect.suspend(() => {
+                  const value = secrets.get(name);
+                  return value === undefined
+                    ? Effect.die(new Error(`Secret ${name} is not set in Platform.layerMemory({ secrets })`))
+                    : Effect.succeed(Redacted.make(value));
+                }),
+              getOptional: (name) =>
+                Effect.sync(() =>
+                  Option.map(Option.fromUndefinedOr(secrets.get(name)), (v) => Redacted.make(v)),
+                ),
+            }),
+          ),
+          Context.add(
+            Metrics,
+            Metrics.of({
+              count: (name, n = 1) =>
+                Effect.sync(() => void recorded.push({ name, value: n, unit: 'count' })),
+              value: (name, value, unit) =>
+                Effect.sync(() => void recorded.push({ name, value, ...(unit ? { unit } : {}) })),
+            }),
+          ),
+          Context.add(
+            PlatformMemory,
+            PlatformMemory.of({
+              sent: Effect.sync(() => [...sent]),
+              published: Effect.sync(() => [...published]),
+              metrics: Effect.sync(() => [...recorded]),
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
+/** Stores in memory. Keys are validated like S3 keys; signed URLs are `memory://<store>/<key>`. */
+function memoryStores(): (name: string) => Store {
+  const stores = new Map<string, Map<string, Uint8Array>>();
+  return (name) => {
+    const objects = stores.get(name) ?? new Map<string, Uint8Array>();
+    stores.set(name, objects);
+    const key = (k: string) => objectKey('', k);
+    const get = (k: string) => Effect.sync(() => Option.fromUndefinedOr(objects.get(key(k))));
+    return {
+      put: (k, body) =>
+        Effect.sync(
+          () => void objects.set(key(k), typeof body === 'string' ? new TextEncoder().encode(body) : body),
+        ),
+      get,
+      getText: (k) =>
+        Effect.map(
+          get(k),
+          Option.map((bytes) => new TextDecoder().decode(bytes)),
+        ),
+      delete: (k) => Effect.sync(() => void objects.delete(key(k))),
+      list: (prefix = '', opts) =>
+        Effect.sync(() => {
+          const all: StoredObject[] = [...objects.entries()]
+            .filter(([k]) => k.startsWith(prefix.replace(/^\/+/, '')) && (!opts?.cursor || k > opts.cursor))
+            .sort(([a], [b]) => (a < b ? -1 : 1))
+            .map(([k, bytes]) => ({ key: k, size: bytes.byteLength }));
+          const page = all.slice(0, opts?.limit ?? 1000);
+          return page.length < all.length ? { objects: page, cursor: page.at(-1)!.key } : { objects: page };
+        }),
+      uploadUrl: (k) => Effect.sync(() => `memory://${name}/${key(k)}`),
+      downloadUrl: (k) => Effect.sync(() => `memory://${name}/${key(k)}`),
+    };
+  };
+}
