@@ -1,4 +1,5 @@
 import type { ApiKey, ChannelNamespace } from '@aws-sdk/client-appsync';
+import type { Tag } from '@aws-sdk/client-sesv2';
 import {
   type PlatformRuntimeConfig,
   parseManifest,
@@ -15,10 +16,22 @@ import {
   namespaceAuthModes,
 } from '../src/drivers/appsync.ts';
 import { snapRetention } from '../src/drivers/logs.ts';
+import {
+  deleteTenant,
+  ensureConfigurationSet,
+  ensureTenant,
+  ensureTenantResources,
+} from '../src/drivers/ses.ts';
 import { endpointForRevision } from '../src/drivers/web-function.ts';
-import { cacheControlFor, contentTypeFor, hostFor, policies } from '../src/index.ts';
-import { deployStage, rollbackStage, staleStaticPrefixes } from '../src/stage.ts';
-import type { EngineContext } from '../src/util.ts';
+import { cacheControlFor, contentTypeFor, hostFor, policies, type ResourceRef } from '../src/index.ts';
+import {
+  deployStage,
+  destroyStage,
+  reconcileStageEmail,
+  rollbackStage,
+  staleStaticPrefixes,
+} from '../src/stage.ts';
+import type { EngineContext, EngineLog } from '../src/util.ts';
 
 const platform = (over: Partial<PlatformRuntimeConfig> = {}): PlatformRuntimeConfig => ({
   v: 1,
@@ -609,5 +622,512 @@ describe('realtime', () => {
         artifacts: {},
       }),
     ).rejects.toThrow(/no realtime API yet/);
+  });
+});
+
+describe('email', () => {
+  const acct = '111122223333';
+  const mail = {
+    domain: 'mail.example.com',
+    identityArn: `arn:aws:ses:us-east-1:${acct}:identity/mail.example.com`,
+  };
+  const csArn = (name: string) => `arn:aws:ses:us-east-1:${acct}:configuration-set/${name}`;
+  const tags = { 'platform:app': 'todo', 'platform:stage': 'prod' };
+  const tagList = (t: Record<string, string>): Tag[] =>
+    Object.entries(t).map(([Key, Value]) => ({ Key, Value }));
+
+  interface FakeTenant {
+    id: string;
+    scope: 'ACCOUNT' | 'TENANT';
+    reasons: string[];
+    tags: Tag[];
+    resources: string[];
+  }
+
+  /**
+   * SES configuration sets, tenants and their associations behind one fake client. Other
+   * services (destroy's other steps) report nothing left: lists are empty, everything else is
+   * already gone.
+   */
+  function fakeSes(
+    opts: {
+      configurationSets?: Record<string, { metrics: boolean; tags: Tag[] }>;
+      tenants?: Record<string, Partial<FakeTenant>>;
+    } = {},
+  ) {
+    const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
+    const logs: Array<{ level: string; msg: string }> = [];
+    const configurationSets = new Map(Object.entries(opts.configurationSets ?? {}));
+    let ids = 0;
+    const tenant = (t: Partial<FakeTenant>): FakeTenant => ({
+      id: `tn-${++ids}`,
+      scope: 'ACCOUNT',
+      reasons: [],
+      tags: [],
+      resources: [],
+      ...t,
+    });
+    const tenants = new Map(Object.entries(opts.tenants ?? {}).map(([n, t]) => [n, tenant(t)]));
+    const notFound = () => Object.assign(new Error('not found'), { name: 'NotFoundException' });
+    const tenantOut = (name: string, t: FakeTenant) => ({
+      TenantName: name,
+      TenantId: t.id,
+      TenantArn: `arn:aws:ses:us-east-1:${acct}:tenant/${name}/${t.id}`,
+      Tags: t.tags,
+      SuppressionAttributes: { SuppressionScope: t.scope, SuppressedReasons: t.reasons },
+    });
+    const get = (name: unknown) => {
+      const t = tenants.get(name as string);
+      if (!t) throw notFound();
+      return t;
+    };
+    type In = Record<string, unknown>;
+    const handlers: Record<string, (i: In) => unknown> = {
+      GetConfigurationSetCommand: (i) => {
+        const cs = configurationSets.get(i.ConfigurationSetName as string);
+        if (!cs) throw notFound();
+        return {
+          ConfigurationSetName: i.ConfigurationSetName,
+          ReputationOptions: { ReputationMetricsEnabled: cs.metrics },
+          Tags: cs.tags,
+        };
+      },
+      CreateConfigurationSetCommand: (i) => {
+        configurationSets.set(i.ConfigurationSetName as string, {
+          metrics: Boolean(
+            (i.ReputationOptions as { ReputationMetricsEnabled?: boolean }).ReputationMetricsEnabled,
+          ),
+          tags: i.Tags as Tag[],
+        });
+        return {};
+      },
+      PutConfigurationSetReputationOptionsCommand: (i) => {
+        configurationSets.get(i.ConfigurationSetName as string)!.metrics =
+          i.ReputationMetricsEnabled as boolean;
+        return {};
+      },
+      DeleteConfigurationSetCommand: (i) => {
+        if (!configurationSets.delete(i.ConfigurationSetName as string)) throw notFound();
+        return {};
+      },
+      GetTenantCommand: (i) => ({ Tenant: tenantOut(i.TenantName as string, get(i.TenantName)) }),
+      CreateTenantCommand: (i) => {
+        const s = i.SuppressionAttributes as { SuppressionScope: 'TENANT'; SuppressedReasons: string[] };
+        const t = tenant({
+          scope: s.SuppressionScope,
+          reasons: [...s.SuppressedReasons],
+          tags: i.Tags as Tag[],
+        });
+        tenants.set(i.TenantName as string, t);
+        return tenantOut(i.TenantName as string, t);
+      },
+      PutTenantSuppressionAttributesCommand: (i) => {
+        const t = get(i.TenantName);
+        t.scope = i.SuppressionScope as 'TENANT';
+        t.reasons = [...(i.SuppressedReasons as string[])];
+        return {};
+      },
+      ListTenantResourcesCommand: (i) => ({
+        TenantResources: get(i.TenantName).resources.map((ResourceArn) => ({ ResourceArn })),
+      }),
+      CreateTenantResourceAssociationCommand: (i) => {
+        const t = get(i.TenantName);
+        if (t.resources.includes(i.ResourceArn as string))
+          throw Object.assign(new Error('already associated'), { name: 'AlreadyExistsException' });
+        t.resources.push(i.ResourceArn as string);
+        return {};
+      },
+      DeleteTenantResourceAssociationCommand: (i) => {
+        const t = get(i.TenantName);
+        t.resources = t.resources.filter((r) => r !== i.ResourceArn);
+        return {};
+      },
+      DeleteTenantCommand: (i) => {
+        get(i.TenantName);
+        tenants.delete(i.TenantName as string);
+        return {};
+      },
+      TagResourceCommand: (i) => {
+        const arn = i.ResourceArn as string;
+        const name = arn.split('/')[1]!;
+        const target = arn.includes(':tenant/') ? get(name) : configurationSets.get(name)!;
+        const added = i.Tags as Tag[];
+        target.tags = [...target.tags.filter((t) => !added.some((a) => a.Key === t.Key)), ...added];
+        return {};
+      },
+    };
+    const client = {
+      send: async (cmd: { constructor: { name: string }; input: In }) => {
+        const name = cmd.constructor.name;
+        calls.push({ name, input: cmd.input });
+        const handler = handlers[name];
+        if (handler) return handler(cmd.input);
+        if (/^(List|DescribeLogGroups)/.test(name)) return {};
+        throw notFound();
+      },
+    };
+    const log: EngineLog = (level, msg) => logs.push({ level, msg });
+    const ctx = {
+      clients: new Proxy({}, { get: () => client }),
+      region: 'us-east-1',
+      target: 'aws',
+      log,
+      accountId: async () => acct,
+    } as unknown as EngineContext;
+    const sent = (name: string) => calls.filter((c) => c.name === name);
+    const sesCalls = () => calls.filter((c) => c.name in handlers).map((c) => c.name);
+    return { ctx, calls, sent, sesCalls, logs, configurationSets, tenants };
+  }
+
+  describe('policies', () => {
+    const manifest = parseManifest({
+      name: 'todo',
+      web: { server: 'src/server.ts' },
+      email: { name: 'Todo' },
+    });
+    const stagePolicy = (stage: string, p = platform({ email: mail }), m = manifest) =>
+      policies.stageRolePolicy({
+        app: 'todo',
+        stage,
+        region: 'us-east-1',
+        accountId: acct,
+        manifest: m,
+        platform: p,
+      });
+    const sid = (doc: ReturnType<typeof stagePolicy>, id: string) => doc.Statement.find((s) => s.Sid === id);
+
+    it('lets a stage send only from its address, as its tenant, through its configuration set', () => {
+      expect(sid(stagePolicy('prod'), 'Email')).toEqual({
+        Sid: 'Email',
+        Effect: 'Allow',
+        Action: 'ses:SendEmail',
+        Resource: [mail.identityArn, csArn('todo--prod')],
+        Condition: {
+          StringEquals: {
+            'ses:FromAddress': 'todo@mail.example.com',
+            'ses:TenantName': 'todo--prod',
+            'ses:ApiVersion': '2',
+          },
+        },
+      });
+      const preview = sid(stagePolicy('pr-3'), 'Email');
+      expect(preview?.Resource).toEqual([mail.identityArn, csArn('todo--pr-3')]);
+      expect(preview?.Condition?.StringEquals).toMatchObject({
+        'ses:FromAddress': 'todo--pr-3@mail.example.com',
+        'ses:TenantName': 'todo--pr-3',
+      });
+    });
+
+    it("lets a stage count its own sends and no one else's", () => {
+      expect(sid(stagePolicy('pr-3'), 'EmailUsage')).toEqual({
+        Sid: 'EmailUsage',
+        Effect: 'Allow',
+        Action: 'dynamodb:UpdateItem',
+        Resource: `arn:aws:dynamodb:us-east-1:${acct}:table/platform-telemetry`,
+        Condition: { 'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['mail#todo#pr-3'] } },
+      });
+    });
+
+    it('grants nothing for email unless the app declares it and the platform has a mail domain', () => {
+      const without = parseManifest({ name: 'todo', web: { server: 'src/server.ts' } });
+      for (const doc of [
+        stagePolicy('prod', platform({ email: mail }), without),
+        stagePolicy('prod', platform()),
+      ]) {
+        const sids = doc.Statement.map((s) => s.Sid);
+        expect(sids).not.toContain('Email');
+        expect(sids).not.toContain('EmailUsage');
+      }
+    });
+
+    it('bounds stage roles to sending as a stage tenant and to usage rows', () => {
+      const boundary = policies.boundaryPolicy({
+        region: 'us-east-1',
+        accountId: acct,
+        storageBucket: 's',
+        email: { identityArn: mail.identityArn, usageTable: 'platform-telemetry' },
+      });
+      expect(boundary.Statement.filter((s) => s.Sid?.startsWith('StageEmail'))).toEqual([
+        {
+          Sid: 'StageEmail',
+          Effect: 'Allow',
+          Action: 'ses:SendEmail',
+          Resource: [mail.identityArn, csArn('*--*')],
+          Condition: { StringLike: { 'ses:TenantName': '*--*' } },
+        },
+        {
+          Sid: 'StageEmailUsage',
+          Effect: 'Allow',
+          Action: 'dynamodb:UpdateItem',
+          Resource: `arn:aws:dynamodb:us-east-1:${acct}:table/platform-telemetry`,
+          Condition: { 'ForAllValues:StringLike': { 'dynamodb:LeadingKeys': ['mail#*#*'] } },
+        },
+      ]);
+      // Every stage's grant fits inside the boundary's patterns.
+      expect(sid(stagePolicy('pr-3'), 'Email')?.Condition?.StringEquals?.['ses:TenantName']).toMatch(
+        /^.+--.+$/,
+      );
+      expect(
+        policies
+          .boundaryPolicy({ region: 'us-east-1', accountId: acct, storageBucket: 's' })
+          .Statement.map((s) => s.Sid),
+      ).not.toContain('StageEmail');
+    });
+
+    it('lets the control plane manage stage tenants but never send', () => {
+      const runtime = { artifactsBucket: 'a', sitesBucket: 's', storageBucket: 'st' };
+      const cp = policies.controlPlanePolicy({
+        region: 'us-east-1',
+        accountId: acct,
+        runtime: { ...runtime, email: { identityArn: mail.identityArn } },
+      });
+      const manage = cp.Statement.find((s) => s.Sid === 'Email');
+      expect(manage?.Resource).toEqual([
+        `arn:aws:ses:us-east-1:${acct}:tenant/*--*`,
+        `arn:aws:ses:us-east-1:${acct}:configuration-set/*--*`,
+      ]);
+      expect(manage?.Action).toEqual(
+        expect.arrayContaining([
+          'ses:CreateTenant',
+          'ses:DeleteTenant',
+          'ses:PutTenantSuppressionAttributes',
+          'ses:ListTenantResources',
+          'ses:CreateConfigurationSet',
+          'ses:DeleteConfigurationSet',
+          'ses:GetReputationEntity',
+          'ses:UpdateReputationEntityCustomerManagedStatus',
+          'ses:ListSuppressedDestinations',
+          'ses:DeleteSuppressedDestination',
+        ]),
+      );
+      expect(cp.Statement.find((s) => s.Sid === 'EmailDomain')).toEqual({
+        Sid: 'EmailDomain',
+        Effect: 'Allow',
+        Action: ['ses:CreateTenantResourceAssociation', 'ses:DeleteTenantResourceAssociation'],
+        Resource: mail.identityArn,
+      });
+      const actions = cp.Statement.flatMap((s) => [s.Action].flat());
+      expect(actions.filter((a) => a.startsWith('ses:Send'))).toEqual([]);
+      expect(actions.filter((a) => a.startsWith('ses:') && a.endsWith('*'))).toEqual([]);
+      expect(
+        policies
+          .controlPlanePolicy({ region: 'us-east-1', accountId: acct, runtime })
+          .Statement.map((s) => s.Sid),
+      ).not.toContain('Email');
+    });
+  });
+
+  describe('drivers', () => {
+    it('creates a configuration set with reputation metrics, then leaves it alone', async () => {
+      const f = fakeSes();
+      expect(await ensureConfigurationSet(f.ctx, { name: 'todo--prod', tags })).toEqual({
+        name: 'todo--prod',
+        arn: csArn('todo--prod'),
+      });
+      expect(f.sent('CreateConfigurationSetCommand')[0]?.input).toEqual({
+        ConfigurationSetName: 'todo--prod',
+        ReputationOptions: { ReputationMetricsEnabled: true },
+        Tags: tagList(tags),
+      });
+      await ensureConfigurationSet(f.ctx, { name: 'todo--prod', tags });
+      expect(f.sesCalls()).toEqual([
+        'GetConfigurationSetCommand',
+        'CreateConfigurationSetCommand',
+        'GetConfigurationSetCommand',
+      ]);
+    });
+
+    it('turns metrics back on and restores missing tags on an existing set', async () => {
+      const f = fakeSes({
+        configurationSets: { 'todo--prod': { metrics: false, tags: [{ Key: 'x', Value: '1' }] } },
+      });
+      await ensureConfigurationSet(f.ctx, { name: 'todo--prod', tags });
+      expect(f.configurationSets.get('todo--prod')).toEqual({
+        metrics: true,
+        tags: [{ Key: 'x', Value: '1' }, ...tagList(tags)],
+      });
+      expect(f.sent('CreateConfigurationSetCommand')).toEqual([]);
+    });
+
+    it('creates a tenant on its own suppression list', async () => {
+      const f = fakeSes();
+      const t = await ensureTenant(f.ctx, { name: 'todo--prod', tags });
+      expect(t).toEqual({
+        name: 'todo--prod',
+        id: 'tn-1',
+        arn: `arn:aws:ses:us-east-1:${acct}:tenant/todo--prod/tn-1`,
+      });
+      expect(f.sent('CreateTenantCommand')[0]?.input).toEqual({
+        TenantName: 'todo--prod',
+        Tags: tagList(tags),
+        SuppressionAttributes: { SuppressedReasons: ['BOUNCE', 'COMPLAINT'], SuppressionScope: 'TENANT' },
+      });
+      await ensureTenant(f.ctx, { name: 'todo--prod', tags });
+      expect(f.sesCalls()).toEqual(['GetTenantCommand', 'CreateTenantCommand', 'GetTenantCommand']);
+    });
+
+    it('moves an existing tenant off the account list in place (same id, same history)', async () => {
+      const f = fakeSes({ tenants: { 'todo--prod': { tags: tagList(tags) } } });
+      const t = await ensureTenant(f.ctx, { name: 'todo--prod', tags });
+      expect(t.id).toBe('tn-1');
+      expect(f.tenants.get('todo--prod')).toMatchObject({
+        scope: 'TENANT',
+        reasons: ['BOUNCE', 'COMPLAINT'],
+      });
+      expect(f.sesCalls()).toEqual(['GetTenantCommand', 'PutTenantSuppressionAttributesCommand']);
+    });
+
+    it('associates the domain and the configuration set once, and drops strays', async () => {
+      const stray = `arn:aws:ses:us-east-1:${acct}:identity/mail.old.example.com`;
+      const f = fakeSes({ tenants: { 'todo--prod': { resources: [stray] } } });
+      const wanted = [mail.identityArn, csArn('todo--prod')];
+      await ensureTenantResources(f.ctx, 'todo--prod', wanted);
+      expect(f.tenants.get('todo--prod')?.resources).toEqual(wanted);
+      await ensureTenantResources(f.ctx, 'todo--prod', wanted);
+      expect(f.sent('CreateTenantResourceAssociationCommand')).toHaveLength(2);
+      expect(f.sent('DeleteTenantResourceAssociationCommand').map((c) => c.input.ResourceArn)).toEqual([
+        stray,
+      ]);
+    });
+
+    it("removes a tenant's associations before the tenant, and tolerates a missing one", async () => {
+      const f = fakeSes({
+        tenants: { 'todo--prod': { resources: [mail.identityArn, csArn('todo--prod')] } },
+      });
+      expect(await deleteTenant(f.ctx, 'todo--prod')).toBe(true);
+      expect(f.sesCalls()).toEqual([
+        'ListTenantResourcesCommand',
+        'DeleteTenantResourceAssociationCommand',
+        'DeleteTenantResourceAssociationCommand',
+        'DeleteTenantCommand',
+      ]);
+      expect(await deleteTenant(f.ctx, 'todo--prod')).toBe(false);
+    });
+  });
+
+  describe('stages', () => {
+    const reconcile = (
+      f: ReturnType<typeof fakeSes>,
+      over: { stage?: string; email?: unknown; platform?: PlatformRuntimeConfig } = {},
+    ) => {
+      const resources: ResourceRef[] = [];
+      const stage = over.stage ?? 'prod';
+      const manifest = parseManifest({
+        name: 'todo',
+        web: { server: 'src/server.ts' },
+        ...(over.email === undefined ? { email: { name: 'Todo', dailyLimit: 500 } } : { email: over.email }),
+      });
+      return reconcileStageEmail(f.ctx, {
+        app: 'todo',
+        stage,
+        manifest,
+        platform: over.platform ?? platform({ email: mail }),
+        tags,
+        resources,
+      }).then((bindings) => ({ bindings, resources }));
+    };
+
+    it('binds a prod stage to its tenant, address and declared limit', async () => {
+      const f = fakeSes();
+      const { bindings, resources } = await reconcile(f);
+      expect(bindings).toEqual({
+        mode: 'ses',
+        from: 'todo@mail.example.com',
+        name: 'Todo',
+        tenant: 'todo--prod',
+        dailyLimit: 500,
+        usageTable: 'platform-telemetry',
+      });
+      expect(f.tenants.get('todo--prod')).toMatchObject({
+        scope: 'TENANT',
+        resources: [mail.identityArn, csArn('todo--prod')],
+      });
+      expect(f.configurationSets.get('todo--prod')?.metrics).toBe(true);
+      expect(resources.map((r) => `${r.type}:${r.name}`)).toEqual([
+        'email-tenant:todo--prod',
+        'configuration-set:todo--prod',
+      ]);
+      // Tenant, then configuration set, each ready before the association that names it.
+      expect(f.sesCalls().indexOf('CreateTenantResourceAssociationCommand')).toBeGreaterThan(
+        f.sesCalls().indexOf('CreateTenantCommand'),
+      );
+    });
+
+    it('caps previews, defaults the limit, and keeps mail local in the emulator', async () => {
+      const preview = await reconcile(fakeSes(), { stage: 'pr-3' });
+      expect(preview.bindings).toMatchObject({
+        from: 'todo--pr-3@mail.example.com',
+        tenant: 'todo--pr-3',
+        dailyLimit: 50,
+      });
+      const local = await reconcile(fakeSes(), {
+        stage: 'local',
+        email: true,
+        platform: platform({ target: 'emulator', email: { ...mail, domain: 'mail.localhost' } }),
+      });
+      expect(local.bindings).toEqual({
+        mode: 'local',
+        from: 'todo--local@mail.localhost',
+        tenant: 'todo--local',
+        dailyLimit: 50,
+        usageTable: 'platform-telemetry',
+      });
+      const prod = await reconcile(fakeSes(), { email: true });
+      expect(prod.bindings?.dailyLimit).toBe(200);
+      expect(prod.bindings).not.toHaveProperty('name');
+    });
+
+    it('keeps the tenant and its configuration set when email leaves the config', async () => {
+      const f = fakeSes({
+        configurationSets: { 'todo--prod': { metrics: true, tags: [] } },
+        tenants: { 'todo--prod': { scope: 'TENANT', resources: [mail.identityArn, csArn('todo--prod')] } },
+      });
+      const { bindings, resources } = await reconcile(f, { email: false });
+      expect(bindings).toBeUndefined();
+      expect(resources).toEqual([]);
+      expect(f.sesCalls()).toEqual(['GetTenantCommand']);
+      expect(f.logs).toContainEqual({ level: 'warn', msg: expect.stringMatching(/keeping it/) });
+      // Nothing to warn about for an app that never sent.
+      const fresh = fakeSes();
+      await reconcile(fresh, { email: false });
+      expect(fresh.logs).toEqual([]);
+    });
+
+    it('leaves SES alone on a platform without a mail domain', async () => {
+      const f = fakeSes();
+      expect((await reconcile(f, { email: false, platform: platform() })).bindings).toBeUndefined();
+      expect(f.calls).toEqual([]);
+    });
+
+    it('refuses an email app on a platform that predates email, before creating anything', async () => {
+      const f = fakeSes();
+      await expect(
+        deployStage(f.ctx, {
+          manifest: parseManifest({ name: 'todo', web: { static: 'dist' }, email: true }),
+          stage: 'prod',
+          deploymentId: 'd1',
+          platform: platform(),
+          artifacts: {},
+        }),
+      ).rejects.toThrow(/no mail domain yet.*deploy the platform's foundation first/);
+      expect(f.calls).toEqual([]);
+    });
+
+    it('deletes the tenant (associations first) and the configuration set with the stage', async () => {
+      const f = fakeSes({
+        configurationSets: { 'todo--pr-3': { metrics: true, tags: [] } },
+        tenants: { 'todo--pr-3': { scope: 'TENANT', resources: [mail.identityArn, csArn('todo--pr-3')] } },
+      });
+      await destroyStage(f.ctx, { app: 'todo', stage: 'pr-3', platform: platform({ email: mail }) });
+      expect(f.tenants.size).toBe(0);
+      expect(f.configurationSets.size).toBe(0);
+      expect(f.sesCalls()).toEqual([
+        'ListTenantResourcesCommand',
+        'DeleteTenantResourceAssociationCommand',
+        'DeleteTenantResourceAssociationCommand',
+        'DeleteTenantCommand',
+        'DeleteConfigurationSetCommand',
+      ]);
+    });
   });
 });

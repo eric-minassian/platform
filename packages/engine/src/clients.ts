@@ -12,6 +12,7 @@ import { LambdaWebClient } from '@aws-sdk/client-lambda-web';
 import { ResourceGroupsTaggingAPIClient } from '@aws-sdk/client-resource-groups-tagging-api';
 import { S3Client } from '@aws-sdk/client-s3';
 import { SchedulerClient } from '@aws-sdk/client-scheduler';
+import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { STSClient } from '@aws-sdk/client-sts';
@@ -44,6 +45,7 @@ export interface AwsClients {
   readonly lambdaWeb: LambdaWebClient;
   readonly logs: CloudWatchLogsClient;
   readonly s3: S3Client;
+  readonly ses: SESv2Client;
   readonly ssm: SSMClient;
   readonly cognito: CognitoIdentityProviderClient;
   readonly kvs: CloudFrontKeyValueStoreClient;
@@ -107,6 +109,9 @@ export function createClients(opts: ClientOptions): AwsClients {
     },
     get s3() {
       return lazy('s3', () => new S3Client({ ...base, forcePathStyle: emulator }));
+    },
+    get ses() {
+      return lazy('ses', () => new SESv2Client(base));
     },
     get ssm() {
       return lazy('ssm', () => new SSMClient(base));

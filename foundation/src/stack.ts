@@ -1,5 +1,8 @@
 import { fileURLToPath } from 'node:url';
 import {
+  EMAIL_LOGIN_LOCAL_PART,
+  emailDomain,
+  emailMailFromDomain,
   HOST_HEADER,
   names,
   type PlatformConfig,
@@ -27,6 +30,7 @@ import {
   Stack,
   type StackProps,
   aws_s3 as s3,
+  aws_ses as ses,
   aws_sns as sns,
   aws_ssm as ssm,
   Tags,
@@ -49,6 +53,13 @@ export interface FoundationStackProps extends StackProps {
   dnsDelegationRoleArn: string;
   /** Subscribed to the alerts topic. Unset means no subscription. */
   alertEmail?: string;
+  /**
+   * Who sends the user pool's mail (sign-up codes, password resets): `ses` sends from
+   * `login@mail.<zone>` through the platform's SES domain, `cognito` uses Cognito's own sender
+   * (`no-reply@verificationemail.com`, at most 50 messages a day). app.ts picks `ses` once SES
+   * can deliver to anyone.
+   */
+  userPoolEmail: 'ses' | 'cognito';
 }
 
 /**
@@ -65,7 +76,7 @@ export class FoundationStack extends Stack {
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
     super(scope, id, {
       description:
-        'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, realtime, IAM',
+        'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, realtime, email, IAM',
       terminationProtection: true,
       ...props,
     });
@@ -259,6 +270,56 @@ export class FoundationStack extends Stack {
     aliases('EdgeAlias', config.edgeHost, edgeTarget);
     const consoleAliases = aliases('ConsoleAlias', config.consoleHost, edgeTarget);
 
+    // ---------------------------------------------------------------- email
+    // One SES domain identity every app sends from (`<app>@mail.<zone>`); the
+    // engine gives each stage that declares `email` a tenant associated with
+    // it. Every record lives in this zone, so the root zone needs no change
+    // (not Identity.publicHostedZone: that would verify the zone apex).
+    const mailDomain = emailDomain(config.zone);
+    const mailFromDomain = emailMailFromDomain(mailDomain);
+    const mail = new ses.EmailIdentity(this, 'MailIdentity', {
+      identity: ses.Identity.domain(mailDomain),
+      dkimIdentity: ses.DkimIdentity.easyDkim(ses.EasyDkimSigningKeyLength.RSA_2048_BIT),
+      mailFromDomain,
+      // Without the MX record SES still sends, with its own bounce domain; DMARC then passes
+      // on DKIM alone.
+      mailFromBehaviorOnMxFailure: ses.MailFromBehaviorOnMxFailure.USE_DEFAULT_VALUE,
+    });
+    // Stages' tenants are associated with it and the runtime config names it:
+    // a replacement would stop every app's mail until it verified again.
+    mail.applyRemovalPolicy(RemovalPolicy.RETAIN);
+    tag(mail, 'email');
+    // Easy DKIM: three CNAMEs to keys SES holds and rotates. Plain record sets,
+    // as CDK makes for a hosted-zone identity: the names are tokens that are
+    // already fully qualified, which the record constructs would qualify again.
+    for (const [i, record] of mail.dkimRecords.entries()) {
+      new route53.CfnRecordSet(this, `MailDkim${i + 1}`, {
+        hostedZoneId: zone.hostedZoneId,
+        name: record.name,
+        type: 'CNAME',
+        resourceRecords: [record.value],
+        ttl: '1800',
+      });
+    }
+    // MAIL FROM: bounces return to SES, and SPF passes for a domain aligned with the sender's.
+    new route53.MxRecord(this, 'MailFromMx', {
+      zone,
+      recordName: mailFromDomain,
+      values: [{ priority: 10, hostName: `feedback-smtp.${this.region}.amazonses.com` }],
+    });
+    new route53.TxtRecord(this, 'MailFromSpf', {
+      zone,
+      recordName: mailFromDomain,
+      values: ['v=spf1 include:amazonses.com ~all'],
+    });
+    // Receivers quarantine mail that claims the domain without aligned DKIM or
+    // SPF. No `rua`: there is no mailbox to receive aggregate reports.
+    new route53.TxtRecord(this, 'MailDmarc', {
+      zone,
+      recordName: `_dmarc.${mailDomain}`,
+      values: ['v=DMARC1; p=quarantine; adkim=r; aspf=r'],
+    });
+
     // ------------------------------------------------------------ identity
     // App end users, shared by every app (SSO across apps). Apps get their
     // own clients, which the engine creates per stage.
@@ -280,8 +341,28 @@ export class FoundationStack extends Stack {
       featurePlan: cognito.FeaturePlan.ESSENTIALS,
       deletionProtection: true,
       removalPolicy: RemovalPolicy.RETAIN,
+      // DEVELOPER email from an identity in this account and region needs no
+      // sending-authorization policy (that's for Cognito's own sender with a
+      // custom From): Cognito sends with its service-linked role
+      // (AWSServiceRoleForAmazonCognitoIdpEmailService), which it creates on
+      // the first such update with the deploying credentials, CloudFormation's
+      // execution role. Without a configuration set or tenant, these count
+      // against the account, not any app.
+      ...(props.userPoolEmail === 'ses'
+        ? {
+            email: cognito.UserPoolEmail.withSES({
+              fromEmail: `${EMAIL_LOGIN_LOCAL_PART}@${mailDomain}`,
+              // Quoted: a display name with a dot isn't a plain phrase (RFC 5322).
+              fromName: `"${config.domain}"`,
+              sesRegion: this.region,
+              sesVerifiedDomain: mailDomain,
+            }),
+          }
+        : {}),
     });
     tag(users, 'identity');
+    // The pool names the identity by ARN, which CloudFormation can't see as a reference.
+    if (props.userPoolEmail === 'ses') users.node.addDependency(mail);
     const login = users.addDomain('Login', {
       customDomain: { domainName: config.loginHost, certificate: zoneCertificate },
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
@@ -400,6 +481,7 @@ export class FoundationStack extends Stack {
           accountId: this.account,
           storageBucket: storage.bucketName,
           realtimeApiId: realtimeApi.attrApiId,
+          email: { identityArn: mail.emailIdentityArn, usageTable: telemetry.tableName },
         }),
       ),
     });
@@ -426,6 +508,7 @@ export class FoundationStack extends Stack {
               boundaryPolicyArn: boundary.managedPolicyArn,
               alertsTopicArn: alerts.topicArn,
               realtime: { apiId: realtimeApi.attrApiId },
+              email: { identityArn: mail.emailIdentityArn },
             },
           }),
         ),
@@ -494,6 +577,7 @@ export class FoundationStack extends Stack {
         httpDomain: realtimeApi.attrDnsHttp,
         realtimeDomain: realtimeApi.attrDnsRealtime,
       },
+      email: { domain: mailDomain, identityArn: mail.emailIdentityArn },
     };
     new ssm.StringParameter(this, 'RuntimeConfig', {
       parameterName: platformNames.runtimeConfigParameter,

@@ -9,6 +9,9 @@ import {
   type Bindings,
   cognitoIssuer,
   cognitoJwksUri,
+  type EmailBindings,
+  emailDailyLimit,
+  emailFromAddress,
   encodeBindings,
   IAM_APP_PATH,
   LOCAL_STAGE,
@@ -55,6 +58,15 @@ import {
   ensureScheduleGroup,
   listSchedules,
 } from './drivers/scheduler.ts';
+import {
+  deleteConfigurationSet,
+  deleteTenant,
+  ensureConfigurationSet,
+  ensureTenant,
+  ensureTenantResources,
+  getConfigurationSet,
+  getTenant,
+} from './drivers/ses.ts';
 import { deleteQueue, ensureQueue, listQueues } from './drivers/sqs.ts';
 import { deleteParameter, deleteParametersByPath, ensureParameterOnce } from './drivers/ssm.ts';
 import {
@@ -72,7 +84,7 @@ import type {
   ResourceRef,
   RollbackStageInput,
 } from './index.ts';
-import { stageRolePolicy, stageTrustPolicy } from './policy.ts';
+import { configurationSetArn, stageRolePolicy, stageTrustPolicy } from './policy.ts';
 import { type EngineContext, ignoreNotFound, stageTags } from './util.ts';
 
 /**
@@ -126,6 +138,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   if (m.realtime && !platform.realtime)
     throw new Error(
       "plat.config.ts declares realtime, but this platform has no realtime API yet (its foundation predates it): deploy the platform's foundation first",
+    );
+  if (m.email && !platform.email)
+    throw new Error(
+      "plat.config.ts declares email, but this platform has no mail domain yet (its foundation predates it): deploy the platform's foundation first",
     );
 
   ctx.log('info', `deploying ${app}/${stage} (${deploymentId})`);
@@ -270,6 +286,9 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     resources.push({ type: 'channel-namespace', name: namespace, ...(ns.arn ? { arn: ns.arn } : {}) });
   }
 
+  // 7c. Email: the stage's SES tenant, ready before any code that sends with it.
+  const email = await reconcileStageEmail(ctx, { app, stage, manifest: m, platform, tags, resources });
+
   // 8. Bindings.
   const bindings: Bindings = {
     v: 1,
@@ -298,6 +317,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     },
     ...(auth ? { auth } : {}),
     ...(realtime ? { realtime } : {}),
+    ...(email ? { email } : {}),
     ...(hasWorker ? { worker: workerName } : {}),
     stageKey,
   };
@@ -458,6 +478,66 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     ...(workerFunction ? { workerFunction } : {}),
     resources,
   };
+}
+
+/**
+ * A stage's SES tenant and configuration set (both `names.emailTenant`),
+ * associated with the platform's domain, and the bindings the SDK sends
+ * with. Under `plat dev` and `plat test` the same resources exist in the
+ * emulator, but the SDK hands mail to the CLI instead of sending (`local`).
+ *
+ * When `email` leaves the manifest the role loses its grant
+ * (stageRolePolicy), but the tenant and its configuration set stay, like a
+ * table when `db` goes: the tenant holds the stage's suppression list and any
+ * pause SES put on it, and recreating it later would start both over.
+ */
+export async function reconcileStageEmail(
+  ctx: EngineContext,
+  p: {
+    app: string;
+    stage: string;
+    manifest: Pick<ResolvedManifest, 'email'>;
+    platform: Pick<PlatformRuntimeConfig, 'target' | 'telemetryTable' | 'email'>;
+    tags: Record<string, string>;
+    resources: ResourceRef[];
+  },
+): Promise<EmailBindings | undefined> {
+  const { app, stage, platform } = p;
+  const declared = p.manifest.email;
+  const name = names.emailTenant(app, stage);
+  // A platform without a mail domain can't have created a tenant (deployStage refuses `email`
+  // there), and its control plane may not call SES at all.
+  if (!platform.email) return undefined;
+  if (!declared) {
+    if (await getTenant(ctx, name))
+      ctx.log(
+        'warn',
+        'email is off in plat.config.ts but the SES tenant still exists; keeping it (suppression list, sending status)',
+        `email-tenant ${name}`,
+      );
+    return undefined;
+  }
+  const configurationSet = await ensureConfigurationSet(ctx, { name, tags: p.tags });
+  const tenant = await ensureTenant(ctx, { name, tags: p.tags });
+  await ensureTenantResources(ctx, name, [platform.email.identityArn, configurationSet.arn]);
+  p.resources.push(
+    { type: 'email-tenant', name, arn: tenant.arn },
+    { type: 'configuration-set', name, arn: configurationSet.arn },
+  );
+  return {
+    mode: platform.target === 'emulator' ? 'local' : 'ses',
+    from: emailFromAddress(app, stage, platform.email.domain),
+    ...(declared.name ? { name: declared.name } : {}),
+    tenant: name,
+    dailyLimit: emailDailyLimit(stage, declared.dailyLimit),
+    usageTable: platform.telemetryTable,
+  };
+}
+
+/** Destroy: the tenant (associations first), then its configuration set. */
+async function deleteStageEmail(ctx: EngineContext, name: string): Promise<void> {
+  await deleteTenant(ctx, name);
+  await deleteConfigurationSet(ctx, name);
 }
 
 async function reconcileWorkerTriggers(
@@ -636,6 +716,7 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   await deleteEventBus(ctx, names.eventBus(app, stage));
   if (platform.realtime)
     await deleteChannelNamespace(ctx, platform.realtime.apiId, names.realtimeNamespace(app, stage));
+  if (platform.email) await deleteStageEmail(ctx, names.emailTenant(app, stage));
   if (platform.userPoolId)
     await deleteUserPoolClient(ctx, platform.userPoolId, names.userPoolClient(app, stage));
   await deleteRole(ctx, names.role(app, stage));
@@ -699,6 +780,15 @@ export async function listStageResources(
       type: 'channel-namespace',
       name: ns.name,
       ...(ns.channelNamespaceArn ? { arn: ns.channelNamespaceArn } : {}),
+    });
+  const tenantName = names.emailTenant(app, stage);
+  const tenant = await getTenant(ctx, tenantName);
+  if (tenant) out.push({ type: 'email-tenant', name: tenant.name, arn: tenant.arn });
+  if (await getConfigurationSet(ctx, tenantName))
+    out.push({
+      type: 'configuration-set',
+      name: tenantName,
+      arn: configurationSetArn(ctx.region, await ctx.accountId(), tenantName),
     });
   return out;
 }
