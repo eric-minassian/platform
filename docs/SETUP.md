@@ -106,21 +106,32 @@ subscribed. To subscribe:
 
 ## 7. GitHub App (console sign-in + error issues)
 
-Create it at GitHub → Settings → Developer settings → GitHub Apps → New:
+Create it at https://github.com/settings/apps/new (GitHub → Settings → Developer
+settings → GitHub Apps → New GitHub App):
 
 - **Homepage:** `https://platform.ericminassian.com`
 - **Callback URL:** `https://platform.ericminassian.com/auth/github/callback`
-- **Webhook:** off
-- **Permissions:** Repository → Issues: read & write; Metadata: read
-- **Where can it be installed:** only this account
+- **Webhook:** uncheck Active
+- **Permissions:** Repository → Issues: read & write (Metadata: read is added automatically)
+- **Where can it be installed:** only on this account
 
-Install it on your account (all or selected repos). Then store its settings:
+On the App's General page:
+
+- Note the **App ID** and **Client ID** at the top.
+- Under **Client secrets**, generate a new client secret.
+- Under **Private keys**, generate a private key; GitHub downloads a `.pem` file.
+
+Then choose **Install App** in the left sidebar and install it on your account
+with **All repositories**, so error issues can open in any app repo. You don't
+need the installation id or a JWT: the control plane signs its own JWT with the
+private key and looks up the installation for each repo.
+
+Store the settings:
 
 ```sh
 P=/platform/config/github-app
 aws ssm put-parameter --profile platform-prod --name $P/app_id --type String --value <app id>
 aws ssm put-parameter --profile platform-prod --name $P/client_id --type String --value <client id>
-aws ssm put-parameter --profile platform-prod --name $P/installation_id --type String --value <installation id>
 aws ssm put-parameter --profile platform-prod --name $P/client_secret --type SecureString --value <client secret>
 aws ssm put-parameter --profile platform-prod --name $P/private_key --type SecureString --value "$(cat app.private-key.pem)"
 ```
