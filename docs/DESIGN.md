@@ -549,7 +549,9 @@ Fargate      one task per stage, public subnet + public IPv4, no inbound; stdout
   write idempotently.
 - **Deploy.** Images and task definitions are built after the worker; the
   rollouts run while the static files and web revision go up, and the deploy
-  waits for them (up to 6 minutes) before the route flip. ECS's circuit
+  waits for them before the route flip: until each new task has run 30 s
+  with none failing (ECS itself marks a rollout complete about two minutes
+  later), up to 6 minutes. ECS's circuit
   breaker returns a service that can't start to its previous build; the
   engine fails fast after two failed tasks, and the deployment's error
   carries the task's stop reason, exit code and last log lines.
