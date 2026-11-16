@@ -353,7 +353,8 @@ daily chooser   prod servers: simulateWebCompute(last days of minute rollups) â†
   of the live deployment's build in that mode, actor `platform`, with the
   reason as its message and `computeSwitchOf` naming the build; the deployer
   runs it like any other, so it shows in the deployment history and can be
-  rolled back. A stage that is deploying waits for the next day, and a build
+  rolled back. Like any deployment it also redeploys the worker and rolls
+  services out again (about a minute without them). A stage that is deploying waits for the next day, and a build
   whose artifacts expired (90 days) stays due until the next deployment.
 
 - **Rollback** restores the target deployment's mode, pointing that mode's

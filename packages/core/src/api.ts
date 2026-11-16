@@ -102,7 +102,7 @@ export const DeploymentRecord = Schema.Struct({
   app: Schema.String,
   stage: Schema.String,
   status: DeploymentStatus,
-  /** GitHub username, or `ci:<repo>` for OIDC deploys. */
+  /** GitHub username, `ci:<repo>` for OIDC deploys, or `platform` for a compute switch. */
   actor: Schema.String,
   commit: optional(Schema.String),
   ref: optional(Schema.String),
