@@ -1,4 +1,5 @@
 import { ResourceNotFoundException } from '@aws-sdk/client-dynamodb';
+import type { S3Client } from '@aws-sdk/client-s3';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, describe, it } from '@effect/vitest';
 import { Effect, Exit, Layer } from 'effect';
@@ -27,7 +28,39 @@ const browser = (send: (command: Command) => Promise<unknown>) => {
 const noTable = () =>
   Promise.reject(new ResourceNotFoundException({ message: 'Requested resource not found', $metadata: {} }));
 
+/** The data browser over an S3 client that answers with `send`. */
+const files = (send: (command: Command) => Promise<unknown>) => {
+  const sent: Command[] = [];
+  const s3 = {
+    send: (command: Command) => {
+      sent.push(command);
+      return send(command);
+    },
+  } as unknown as S3Client;
+  const layer = DataBrowser.layer.pipe(Layer.provide([awsLayer({ s3: () => s3 }), settingsLayer()]));
+  return {
+    sent,
+    use: <A, E>(f: (data: DataBrowser['Service']) => Effect.Effect<A, E>) =>
+      Effect.provide(DataBrowser.use(f), layer),
+  };
+};
+
 describe('data browser', () => {
+  it.effect('lists a public store’s files under the public prefix', () =>
+    Effect.gen(function* () {
+      const { sent, use } = files(async () => ({
+        Contents: [{ Key: '_public/atlas/prod/snapshots/fires/a.json', Size: 3 }],
+      }));
+      const listing = yield* use((d) =>
+        d.storage({ app: 'atlas', stage: 'prod', store: 'snapshots', public: true, prefix: 'fires/' }),
+      );
+      assert.deepStrictEqual(listing, { objects: [{ key: 'fires/a.json', size: 3 }] });
+      assert.strictEqual(sent[0]?.input.Prefix, '_public/atlas/prod/snapshots/fires/');
+      yield* use((d) => d.storage({ app: 'atlas', stage: 'prod', store: 'uploads', public: false }));
+      assert.strictEqual(sent[1]?.input.Prefix, 'atlas/prod/uploads/');
+    }),
+  );
+
   it.effect('reports a stage without a table as having no database', () =>
     Effect.gen(function* () {
       const { sent, use } = browser(noTable);

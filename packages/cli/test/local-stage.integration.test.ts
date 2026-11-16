@@ -3,15 +3,18 @@ import type { Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import {
   APPSYNC_SUBPROTOCOL,
   type CapturedEmail,
   channelPath,
   EMAIL_INBOX_PATH,
+  publicStores,
   REALTIME_PATH,
   type RealtimeClientConfig,
   type ResolvedManifest,
+  STORAGE_PATH,
 } from '@ericminassian/platform-core';
 import { findEmulatorBinary } from '@ericminassian/platform-engine';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -295,5 +298,76 @@ describe.skipIf(!findEmulatorBinary())('local email on the AWS Emulator', () => 
     expect(refused).toMatchObject({ status: 409, body: { reason: 'daily-limit' } });
     expect((await send({ to: 'b@example.com', subject: 'One more', text: 'x' })).status).toBe(200);
     expect(inbox.messages().map((m) => m.subject)).toEqual(['One more', 'Welcome to Basic']);
+  });
+});
+
+// Public stores the way a browser meets them under `plat dev`: files in the
+// emulator's storage bucket, served by the local router with the edge's headers.
+describe.skipIf(!findEmulatorBinary())('local public stores on the AWS Emulator', () => {
+  const filesManifest: ResolvedManifest = {
+    ...manifest,
+    storage: ['uploads', 'snapshots'],
+    storageOptions: { uploads: { public: false }, snapshots: { public: true } },
+  };
+  let stage: LocalStage;
+  let router: Server;
+  let base: string;
+
+  beforeAll(async () => {
+    stage = await startLocalStage({ root, manifest: filesManifest, stage: 'test', port: 3996 });
+    const record = localRouteRecord({
+      app: filesManifest.name,
+      stage: 'test',
+      deploymentId: stage.deploymentId,
+      hasServer: false,
+      hasStatic: true,
+      serverRoutes: ['/api/'],
+      spa: true,
+      publicStores: publicStores(filesManifest),
+    });
+    const publicFiles = stage.publicFiles!;
+    router = await startLocalRouter({ port: 0, state: () => ({ record, staticDir: root, publicFiles }) });
+    base = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+    const s3 = new S3Client({ ...emulatorClientConfig(stage.conn), forcePathStyle: true });
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: stage.bindings.storage!.bucket,
+        Key: `${stage.bindings.storage!.publicPrefix}snapshots/fires/latest.json`,
+        Body: '{"fires":3}',
+        ContentType: 'application/json',
+        CacheControl: 'public, max-age=60',
+      }),
+    );
+  });
+
+  afterAll(async () => {
+    router?.close();
+    await stage?.stop();
+  });
+
+  it('serves a public store’s files from the emulator', async () => {
+    expect(stage.bindings.storage?.public).toEqual(['snapshots']);
+    const res = await fetch(`${base}${STORAGE_PATH}snapshots/fires/latest.json`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ fires: 3 });
+    expect(res.headers.get('content-type')).toBe('application/json');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+
+    const part = await fetch(`${base}${STORAGE_PATH}snapshots/fires/latest.json`, {
+      headers: { range: 'bytes=0-1' },
+    });
+    expect(part.status).toBe(206);
+    expect(await part.text()).toBe('{"');
+    const etag = res.headers.get('etag')!;
+    const again = await fetch(`${base}${STORAGE_PATH}snapshots/fires/latest.json`, {
+      headers: { 'if-none-match': etag },
+    });
+    expect(again.status).toBe(304);
+  });
+
+  it('answers 404 for missing files and private stores', async () => {
+    expect((await fetch(`${base}${STORAGE_PATH}snapshots/fires/nope.json`)).status).toBe(404);
+    expect((await fetch(`${base}${STORAGE_PATH}uploads/a.json`)).status).toBe(404);
   });
 });

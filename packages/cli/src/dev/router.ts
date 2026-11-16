@@ -7,16 +7,22 @@ import {
   type ServerResponse,
 } from 'node:http';
 import { connect, type Socket } from 'node:net';
-import { extname, join, normalize, sep } from 'node:path';
+import { join, normalize, sep } from 'node:path';
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import {
   APPSYNC_REALTIME_PATH,
+  contentTypeFor,
   decide,
   type HealthResponse,
   HOST_HEADER,
+  PUBLIC_STORAGE_ROOT,
   type RealtimeClientConfig,
   type RealtimeEdgeEntry,
   type RealtimeSubscribe,
   type RouteRecord,
+  STORAGE_DEFAULT_CACHE_CONTROL,
+  STORAGE_RESPONSE_HEADERS,
   VIEWER_ADDRESS_HEADER,
 } from '@ericminassian/platform-core';
 import { isInboxPath, type LocalInbox } from './mail.ts';
@@ -41,6 +47,30 @@ export interface LocalRealtime {
   target: Target;
 }
 
+/** A public store's file as S3 answers the edge (`status` 304 has no body). */
+export interface StoredFile {
+  status: 200 | 206 | 304;
+  body?: Readable;
+  headers: {
+    contentType?: string;
+    cacheControl?: string;
+    contentLength?: number;
+    contentRange?: string;
+    etag?: string;
+    lastModified?: Date;
+  };
+}
+
+/**
+ * Reads a public store's file (its full key in the storage bucket) the way
+ * the edge's request to S3 would, passing on `Range` and `If-None-Match`.
+ * Undefined when there's no such file.
+ */
+export type PublicFiles = (
+  key: string,
+  conditions: { range?: string; ifNoneMatch?: string },
+) => Promise<StoredFile | undefined>;
+
 export interface LocalRouterState {
   record: RouteRecord;
   server?: Target;
@@ -49,6 +79,8 @@ export interface LocalRouterState {
   webDevStarting?: boolean;
   staticDir?: string;
   realtime?: LocalRealtime;
+  /** Present when the stage has public stores. */
+  publicFiles?: PublicFiles;
 }
 
 export type LocalDecision =
@@ -57,6 +89,7 @@ export type LocalDecision =
   | { kind: 'file'; path: string }
   | { kind: 'health'; body: HealthResponse }
   | { kind: 'realtime'; realtime: LocalRealtime }
+  | { kind: 'storage'; key: string; files: PublicFiles }
   | { kind: 'unavailable'; reason: string }
   | { kind: 'notfound' };
 
@@ -74,6 +107,15 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
       ? { kind: 'realtime', realtime: state.realtime }
       : { kind: 'unavailable', reason: 'realtime is not set up in the emulator' };
   }
+  if (d.t === 'storage') {
+    if (!state.publicFiles)
+      return { kind: 'unavailable', reason: 'public stores are not set up in the emulator' };
+    // The edge's origin path adds the public root; S3 decodes the key (and has no such key when it can't).
+    const key = decodedOrUndefined(d.key.slice(1));
+    return key === undefined
+      ? { kind: 'notfound' }
+      : { kind: 'storage', key: `${PUBLIC_STORAGE_ROOT}${key}`, files: state.publicFiles };
+  }
   if (d.t === 'server') {
     return state.server
       ? { kind: 'server', target: state.server }
@@ -89,6 +131,14 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
   return file ? { kind: 'file', path: file } : { kind: 'notfound' };
 }
 
+function decodedOrUndefined(path: string): string | undefined {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return undefined;
+  }
+}
+
 /** Local route record for an app (mirrors what the engine writes to the KVS). */
 export function localRouteRecord(opts: {
   app: string;
@@ -99,6 +149,7 @@ export function localRouteRecord(opts: {
   serverRoutes: readonly string[];
   spa: boolean;
   realtime?: { namespace: string; subscribe: RealtimeSubscribe };
+  publicStores?: readonly string[];
 }): RouteRecord {
   return {
     v: 1,
@@ -112,6 +163,7 @@ export function localRouteRecord(opts: {
     ...(opts.realtime
       ? { rt: { n: opts.realtime.namespace, m: opts.realtime.subscribe === 'signed-in' ? 's' : 'p' } }
       : {}),
+    ...(opts.publicStores?.length ? { p: opts.publicStores } : {}),
   };
 }
 
@@ -192,6 +244,8 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
         // A WebSocket arrives as an `upgrade` (below); anything else reads the config.
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         return res.end(JSON.stringify(d.realtime.config));
+      case 'storage':
+        return serveStored(req, res, d.key, d.files);
       case 'unavailable':
         return text(res, 503, `${d.reason}\n`);
       case 'notfound':
@@ -314,37 +368,54 @@ function tunnel(
   socket.once('error', close);
 }
 
-const MIME: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json',
-  '.map': 'application/json',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.txt': 'text/plain; charset=utf-8',
-  '.wasm': 'application/wasm',
-  '.webmanifest': 'application/manifest+json',
-};
-
 function serveFile(res: ServerResponse, path: string): void {
   if (!existsSync(path) || !statSync(path).isFile()) {
     text(res, 404, 'Not found\n');
     return;
   }
-  res.writeHead(200, {
-    'content-type': MIME[extname(path)] ?? 'application/octet-stream',
-    'cache-control': 'no-cache',
-  });
+  res.writeHead(200, { 'content-type': contentTypeFor(path), 'cache-control': 'no-cache' });
   createReadStream(path).pipe(res);
+}
+
+/** A public store's file with the headers the edge sends (see core `storage.ts`). */
+async function serveStored(
+  req: IncomingMessage,
+  res: ServerResponse,
+  key: string,
+  files: PublicFiles,
+): Promise<void> {
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' });
+    return void res.end('Only GET and HEAD are allowed here\n');
+  }
+  const header = (name: string) => {
+    const v = req.headers[name];
+    return typeof v === 'string' ? v : undefined;
+  };
+  const range = header('range');
+  const ifNoneMatch = header('if-none-match');
+  const file = await files(key, { ...(range ? { range } : {}), ...(ifNoneMatch ? { ifNoneMatch } : {}) });
+  if (!file) {
+    res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8', ...STORAGE_RESPONSE_HEADERS });
+    return void res.end('Not found\n');
+  }
+  const h = file.headers;
+  res.writeHead(file.status, {
+    ...STORAGE_RESPONSE_HEADERS,
+    'cache-control': h.cacheControl ?? STORAGE_DEFAULT_CACHE_CONTROL,
+    'accept-ranges': 'bytes',
+    ...(h.contentType ? { 'content-type': h.contentType } : {}),
+    ...(h.contentLength !== undefined ? { 'content-length': String(h.contentLength) } : {}),
+    ...(h.contentRange ? { 'content-range': h.contentRange } : {}),
+    ...(h.etag ? { etag: h.etag } : {}),
+    ...(h.lastModified ? { 'last-modified': h.lastModified.toUTCString() } : {}),
+  });
+  if (!file.body || req.method === 'HEAD') {
+    file.body?.destroy();
+    return void res.end();
+  }
+  // Destroys both on an error or a client that goes away.
+  await pipeline(file.body, res).catch(() => undefined);
 }
 
 function text(res: ServerResponse, status: number, body: string): void {

@@ -5,6 +5,7 @@ import {
   EMAIL_INBOX_PATH,
   LOCAL_MAIL_URL_ENV,
   LOCAL_STAGE,
+  publicStores,
   type ResolvedManifest,
 } from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
@@ -106,9 +107,11 @@ export async function runDev(opts: DevOptions): Promise<void> {
             },
           }
         : {}),
+      publicStores: publicStores(manifest),
     }),
     ...(manifest.web?.static ? { staticDir: resolve(root, manifest.web.static) } : {}),
     ...(stage.realtime ? { realtime: stage.realtime } : {}),
+    ...(stage.publicFiles ? { publicFiles: stage.publicFiles } : {}),
   };
 
   // ------------------------------------------------------------ mail
@@ -302,7 +305,12 @@ function printBanner(
   const queues = Object.keys(b.queues);
   if (queues.length) lines.push(`  ${pc.dim('➜')} Queues:    ${queues.join(', ')}`);
   if (manifest.events.length) lines.push(`  ${pc.dim('➜')} Events:    ${manifest.events.join(', ')}`);
-  if (b.storage) lines.push(`  ${pc.dim('➜')} Storage:   ${b.storage.stores.join(', ')}`);
+  if (b.storage) {
+    const stores = b.storage.stores.map((s) =>
+      b.storage?.public?.includes(s) ? `${s} ${pc.dim('(public)')}` : s,
+    );
+    lines.push(`  ${pc.dim('➜')} Storage:   ${stores.join(', ')}`);
+  }
   if (b.auth) lines.push(`  ${pc.dim('➜')} Auth:      local sign-in at /__platform/auth/login (any email)`);
   if (manifest.realtime) {
     // The emulator never calls the authorizer, so signed-in subscribe tokens aren't checked locally.

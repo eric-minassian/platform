@@ -2,6 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
 import { type AddressInfo, createServer as createTcpServer, type Server as TcpServer } from 'node:net';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import {
   type CapturedEmail,
   EMAIL_INBOX_PATH,
@@ -9,6 +10,7 @@ import {
   REALTIME_PATH,
   REALTIME_TOKEN_PATH,
   type RealtimeEdgeEntry,
+  STORAGE_PATH,
 } from '@ericminassian/platform-core';
 import { localInbox, waitForEmail } from '@ericminassian/platform/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -19,6 +21,7 @@ import {
   localDecision,
   localRealtime,
   localRouteRecord,
+  type PublicFiles,
   safeJoin,
   startLocalRouter,
   viewerAddress,
@@ -552,5 +555,105 @@ describe('startInboxServer', () => {
     } finally {
       await inboxServer.stop();
     }
+  });
+});
+
+describe('startLocalRouter public stores', () => {
+  const files = new Map<string, { body: string; contentType?: string; cacheControl?: string; etag: string }>([
+    [
+      '_public/atlas/local/snapshots/fires/today 1.json',
+      { body: '{"n":1}', contentType: 'application/json', cacheControl: 'public, max-age=60', etag: '"e1"' },
+    ],
+    ['_public/atlas/local/snapshots/raw.bin', { body: 'abcdef', etag: '"e2"' }],
+  ]);
+  const asked: Array<{ key: string; range?: string; ifNoneMatch?: string }> = [];
+  const publicFiles: PublicFiles = async (key, conditions) => {
+    asked.push({ key, ...conditions });
+    const f = files.get(key);
+    if (!f) return undefined;
+    if (conditions.ifNoneMatch === f.etag) return { status: 304, headers: { etag: f.etag } };
+    const m = conditions.range ? /^bytes=(\d+)-(\d+)$/.exec(conditions.range) : null;
+    const body = m ? f.body.slice(Number(m[1]), Number(m[2]) + 1) : f.body;
+    return {
+      status: m ? 206 : 200,
+      body: Readable.from([Buffer.from(body)]),
+      headers: {
+        etag: f.etag,
+        contentLength: body.length,
+        ...(m ? { contentRange: `bytes ${m[1]}-${m[2]}/${f.body.length}` } : {}),
+        ...(f.contentType ? { contentType: f.contentType } : {}),
+        ...(f.cacheControl ? { cacheControl: f.cacheControl } : {}),
+      },
+    };
+  };
+  const atlas = localRouteRecord({
+    app: 'atlas',
+    stage: 'local',
+    deploymentId: 'd1',
+    hasServer: true,
+    hasStatic: false,
+    serverRoutes: ['/api/'],
+    spa: true,
+    publicStores: ['snapshots'],
+  });
+  let router: Server;
+  let base: string;
+
+  beforeAll(async () => {
+    router = await startLocalRouter({ port: 0, state: () => ({ record: atlas, publicFiles }) });
+    base = `http://127.0.0.1:${(router.address() as AddressInfo).port}`;
+  });
+  afterAll(() => router?.close());
+
+  it('decides like the edge, with the full key in the storage bucket', () => {
+    expect(atlas.p).toEqual(['snapshots']);
+    expect(
+      localDecision({ record: atlas, publicFiles }, `${STORAGE_PATH}snapshots/a%20b.json?x=1`),
+    ).toMatchObject({
+      kind: 'storage',
+      key: '_public/atlas/local/snapshots/a b.json',
+    });
+    expect(localDecision({ record: atlas }, `${STORAGE_PATH}snapshots/a.json`)).toMatchObject({
+      kind: 'unavailable',
+    });
+    expect(localDecision({ record: atlas, publicFiles }, `${STORAGE_PATH}uploads/a.json`)).toEqual({
+      kind: 'notfound',
+    });
+  });
+
+  it('serves a file with its own headers and the edge’s', async () => {
+    const res = await fetch(`${base}${STORAGE_PATH}snapshots/fires/today%201.json`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('{"n":1}');
+    expect(res.headers.get('content-type')).toBe('application/json');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=60');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('content-security-policy')).toBe("script-src 'none'");
+    expect(res.headers.get('etag')).toBe('"e1"');
+  });
+
+  it('defaults Cache-Control, and passes ranges and revalidation on', async () => {
+    const raw = await fetch(`${base}${STORAGE_PATH}snapshots/raw.bin`, { headers: { range: 'bytes=1-2' } });
+    expect(raw.status).toBe(206);
+    expect(await raw.text()).toBe('bc');
+    expect(raw.headers.get('content-range')).toBe('bytes 1-2/6');
+    expect(raw.headers.get('cache-control')).toBe('no-cache');
+    const again = await fetch(`${base}${STORAGE_PATH}snapshots/raw.bin`, {
+      headers: { 'if-none-match': '"e2"' },
+    });
+    expect(again.status).toBe(304);
+    const head = await fetch(`${base}${STORAGE_PATH}snapshots/raw.bin`, { method: 'HEAD' });
+    expect(head.status).toBe(200);
+    expect(head.headers.get('content-length')).toBe('6');
+  });
+
+  it('answers 404 for missing files and other stores, and refuses writes', async () => {
+    expect((await fetch(`${base}${STORAGE_PATH}snapshots/missing.json`)).status).toBe(404);
+    expect((await fetch(`${base}${STORAGE_PATH}uploads/a.json`)).status).toBe(404);
+    expect((await fetch(`${base}${STORAGE_PATH}snapshots/..%2Fx`)).status).toBe(404);
+    expect(
+      (await fetch(`${base}${STORAGE_PATH}snapshots/raw.bin`, { method: 'PUT', body: 'x' })).status,
+    ).toBe(403);
+    expect(asked.every((a) => a.key.startsWith('_public/atlas/local/snapshots/'))).toBe(true);
   });
 });

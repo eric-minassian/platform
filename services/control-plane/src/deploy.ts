@@ -20,6 +20,7 @@ import {
   type DeployStageInput,
   type DeployStageResult,
   type DestroyStageInput,
+  type ExpireStorageInput,
   type EngineLogEntry,
   type RollbackStageInput,
 } from '@ericminassian/platform-engine';
@@ -81,6 +82,8 @@ export class StageEngine extends Context.Service<
       platform: PlatformRuntimeConfig,
       log: (entry: EngineLogEntry) => void,
     ): Effect.Effect<Option.Option<RealtimeEdgeEntry>, DeployFailed>;
+    /** Deletes files their store's `expireAfterDays` no longer keeps; answers how many, by store. */
+    expireStorage(input: ExpireStorageInput): Effect.Effect<Record<string, number>, DeployFailed>;
   }
 >()('@ericminassian/platform-control-plane/StageEngine') {
   static readonly layer: Layer.Layer<StageEngine> = Layer.succeed(
@@ -106,6 +109,11 @@ export class StageEngine extends Context.Service<
           try: () => createEngine({ region: platform.region, log }).ensureRealtimePlatform(platform),
           catch: engineFailed,
         }).pipe(Effect.map(Option.fromUndefinedOr)),
+      expireStorage: (input) =>
+        Effect.tryPromise({
+          try: () => createEngine({ region: input.platform.region }).expireStorage(input),
+          catch: engineFailed,
+        }),
     }),
   );
 }

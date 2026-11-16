@@ -13,6 +13,7 @@ import { CostCollector } from './jobs/cost.ts';
 import { Pinger } from './jobs/pinger.ts';
 import { RealtimeKey } from './jobs/realtime.ts';
 import { Reaper } from './jobs/reaper.ts';
+import { StorageExpiry } from './jobs/storage.ts';
 import { Watchdog } from './jobs/watchdog.ts';
 import { BaseLive } from './layers.ts';
 import { aggregate, parseLogMessage } from './telemetry/aggregate.ts';
@@ -24,6 +25,7 @@ const WorkerLive = Layer.mergeAll(
   Pinger.layer,
   RealtimeKey.layer,
   Reaper.layer,
+  StorageExpiry.layer,
   TelemetryWriter.layer,
   Watchdog.layer,
 ).pipe(
@@ -61,6 +63,7 @@ export default defineWorker({
     cost: () => CostCollector.use((c) => c.run()),
     reaper: () => Reaper.use((r) => r.run),
     'realtime-key': () => RealtimeKey.use((k) => k.run),
+    'storage-expiry': () => StorageExpiry.use((s) => s.run),
   },
   logs: (batch) =>
     Effect.gen(function* () {

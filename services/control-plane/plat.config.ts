@@ -22,6 +22,8 @@ const app = defineApp({
     reaper: '0 8 * * *',
     // Extends realtime's public subscribe key (AppSync keys last at most a year).
     'realtime-key': '0 9 * * *',
+    // Deletes files of stores with `expireAfterDays`.
+    'storage-expiry': '30 9 * * *',
   },
 });
 

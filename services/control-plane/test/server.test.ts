@@ -1,5 +1,10 @@
 import { assert, describe, it } from '@effect/vitest';
-import type { AppRecord, LogLine, ResolvedManifest } from '@ericminassian/platform-core';
+import {
+  type AppRecord,
+  type LogLine,
+  parseManifest,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { Conflict } from '@ericminassian/platform-core/platform-api';
 import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import { Effect, Ref, Stream } from 'effect';
@@ -64,6 +69,7 @@ const liveDeployment = (manifest: Partial<ResolvedManifest> = {}): DeploymentIte
     events: [],
     crons: {},
     storage: [],
+    storageOptions: {},
     secrets: [],
     env: {},
     ...manifest,
@@ -793,6 +799,7 @@ describe('observability', () => {
                 events: [],
                 crons: {},
                 storage: [],
+                storageOptions: {},
                 secrets: [],
                 env: {},
                 realtime: { subscribe: 'public', channels: ['board'] },
@@ -979,6 +986,7 @@ describe('manage', () => {
                 events: [],
                 crons: {},
                 storage: [],
+                storageOptions: {},
                 secrets: ['STRIPE_KEY', 'MAIL_KEY'],
                 env: {},
               },
@@ -1123,6 +1131,57 @@ describe('manage', () => {
       assert.deepStrictEqual(yield* json(res), {
         error: { code: 'paused_by_aws', message: 'AWS paused sending' },
       });
+    }),
+  );
+
+  it.effect('lists stores with the public ones, and browses each where its files are', () =>
+    Effect.gen(function* () {
+      const asked: Array<{ store: string; public: boolean }> = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage()],
+          deployments: [
+            {
+              id: 'd1',
+              app: 'shop',
+              stage: 'prod',
+              status: 'succeeded',
+              actor: 'bob',
+              events: [],
+              createdAt: '2026-11-01T00:00:00.000Z',
+              manifest: parseManifest({
+                name: 'shop',
+                storage: { uploads: {}, snapshots: { public: true } },
+              }),
+            },
+          ],
+        }),
+        data: {
+          storage: (o) =>
+            Effect.sync(() => {
+              asked.push({ store: o.store, public: o.public });
+              return { objects: [] };
+            }),
+          downloadUrl: (o) =>
+            Effect.succeed(`https://s3.example/${o.public ? 'public' : 'private'}/${o.key}`),
+        },
+      });
+      const bob = yield* signIn('bob');
+      assert.deepStrictEqual(yield* json(yield* request('/v1/apps/shop/storage', { headers: bob })), {
+        stores: ['uploads', 'snapshots'],
+        public: ['snapshots'],
+      });
+      yield* request('/v1/apps/shop/storage?store=snapshots', { headers: bob });
+      yield* request('/v1/apps/shop/storage?store=uploads', { headers: bob });
+      assert.deepStrictEqual(asked, [
+        { store: 'snapshots', public: true },
+        { store: 'uploads', public: false },
+      ]);
+      assert.deepStrictEqual(
+        yield* json(yield* request('/v1/apps/shop/storage/url?store=snapshots&key=a.json', { headers: bob })),
+        { url: 'https://s3.example/public/a.json' },
+      );
     }),
   );
 });

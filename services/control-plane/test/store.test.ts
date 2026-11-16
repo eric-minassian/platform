@@ -61,6 +61,37 @@ describe('Store', () => {
     }),
   );
 
+  it.effect('keeps all of a route, so a rollback restores realtime and public stores', () =>
+    Effect.gen(function* () {
+      const route = {
+        v: 1 as const,
+        app: 'shop',
+        stage: 'prod',
+        d: 'd1',
+        o: 'fn.example',
+        s: 'shop/prod/d1',
+        r: ['/api/'],
+        spa: 1 as const,
+        rt: { n: 'shop--prod', m: 's' as const },
+        p: ['snapshots'],
+      };
+      const stage = {
+        app: 'shop',
+        stage: 'prod',
+        host: 'shop.example.com',
+        url: 'https://shop.example.com',
+        status: 'active' as const,
+        preview: false,
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+        route,
+        previousRoute: route,
+      };
+      const { use } = store(() => ({ Item: stageItem(stage) }));
+      assert.deepStrictEqual(yield* use((s) => s.getStage('shop', 'prod')), Option.some(stage));
+    }),
+  );
+
   it.effect('treats a malformed item as a defect', () =>
     Effect.gen(function* () {
       const { use } = store(() => ({ Item: { pk: 'APP#shop', sk: 'META', name: 'shop' } }));

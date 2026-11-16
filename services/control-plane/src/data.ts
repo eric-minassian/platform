@@ -20,6 +20,19 @@ import { Context, Effect, Layer } from 'effect';
 import { Aws, AwsError, tryAws } from './aws.ts';
 import { Settings } from './config.ts';
 
+/** A store of a stage; a public one's files are under the public prefix. */
+export interface StoreRef {
+  readonly app: string;
+  readonly stage: string;
+  readonly store: string;
+  readonly public: boolean;
+}
+
+const storePrefix = (s: StoreRef) =>
+  s.public
+    ? names.publicStoragePrefix(s.app, s.stage, s.store)
+    : names.storagePrefix(s.app, s.stage, s.store);
+
 const INTERNAL = new Set(['pk', 'sk', 'gsi1pk', 'gsi1sk', 'gsi2pk', 'gsi2sk', 'gsi3pk', 'gsi3sk', '_c']);
 
 /** An item as the browser shows it: internal attributes dropped, its key kept under `_key`. */
@@ -60,20 +73,11 @@ export class DataBrowser extends Context.Service<
       readonly cursor?: string | undefined;
       readonly limit?: number | undefined;
     }): Effect.Effect<DataPage, BadRequest | NotFound>;
-    storage(options: {
-      readonly app: string;
-      readonly stage: string;
-      readonly store: string;
-      readonly prefix?: string | undefined;
-      readonly cursor?: string | undefined;
-    }): Effect.Effect<StorageListing>;
+    storage(
+      options: StoreRef & { readonly prefix?: string | undefined; readonly cursor?: string | undefined },
+    ): Effect.Effect<StorageListing>;
     /** A presigned GET valid for five minutes. */
-    downloadUrl(options: {
-      readonly app: string;
-      readonly stage: string;
-      readonly store: string;
-      readonly key: string;
-    }): Effect.Effect<string>;
+    downloadUrl(options: StoreRef & { readonly key: string }): Effect.Effect<string>;
   }
 >()('@ericminassian/platform-control-plane/DataBrowser') {
   static readonly layer: Layer.Layer<DataBrowser, never, Aws | Settings> = Layer.effect(
@@ -173,15 +177,14 @@ export class DataBrowser extends Context.Service<
         Effect.catchTag('AwsError', Effect.die),
       );
 
-      const storage = Effect.fn('DataBrowser.storage')(function* (options: {
-        readonly app: string;
-        readonly stage: string;
-        readonly store: string;
-        readonly prefix?: string | undefined;
-        readonly cursor?: string | undefined;
-      }) {
+      const storage = Effect.fn('DataBrowser.storage')(function* (
+        options: StoreRef & {
+          readonly prefix?: string | undefined;
+          readonly cursor?: string | undefined;
+        },
+      ) {
         const { storageBucket } = yield* settings.runtime;
-        const base = names.storagePrefix(options.app, options.stage, options.store);
+        const base = storePrefix(options);
         const res = yield* tryAws(() =>
           aws.s3().send(
             new ListObjectsV2Command({
@@ -202,12 +205,9 @@ export class DataBrowser extends Context.Service<
         } satisfies StorageListing;
       }, Effect.orDie);
 
-      const downloadUrl = Effect.fn('DataBrowser.downloadUrl')(function* (options: {
-        readonly app: string;
-        readonly stage: string;
-        readonly store: string;
-        readonly key: string;
-      }) {
+      const downloadUrl = Effect.fn('DataBrowser.downloadUrl')(function* (
+        options: StoreRef & { readonly key: string },
+      ) {
         const { storageBucket } = yield* settings.runtime;
         if (options.key.includes('..')) return yield* Effect.die(new Error('invalid key'));
         return yield* tryAws(() =>
@@ -215,7 +215,7 @@ export class DataBrowser extends Context.Service<
             aws.s3(),
             new GetObjectCommand({
               Bucket: storageBucket,
-              Key: names.storagePrefix(options.app, options.stage, options.store) + options.key,
+              Key: storePrefix(options) + options.key,
             }),
             { expiresIn: 300 },
           ),

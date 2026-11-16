@@ -18,7 +18,14 @@ describe('control plane plat.config.ts', () => {
       serverRoutes: ['/v1/', '/auth/'],
     });
     expect(m.worker).toMatchObject({ entry: 'src/worker.ts', timeoutSeconds: 900, memoryMb: 1024 });
-    expect(Object.keys(m.crons).toSorted()).toEqual(['cost', 'pinger', 'realtime-key', 'reaper', 'watchdog']);
+    expect(Object.keys(m.crons).toSorted()).toEqual([
+      'cost',
+      'pinger',
+      'realtime-key',
+      'reaper',
+      'storage-expiry',
+      'watchdog',
+    ]);
     expect(m.auth.enabled).toBe(false);
   });
 });

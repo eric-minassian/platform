@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { Agent } from 'node:https';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import {
   type Bindings,
@@ -17,13 +19,15 @@ import {
   type Engine,
   type EngineLogEntry,
   emulatorChildEnv,
+  engineContext,
   ensureLocalPlatform,
+  errorName,
   type S3Location,
   startEmulator,
 } from '@ericminassian/platform-engine';
 import { bundleWorker, zipBundle } from '../build.ts';
 import { CliError } from '../util/output.ts';
-import { type LocalRealtime, localRealtime } from './router.ts';
+import { type LocalRealtime, localRealtime, type PublicFiles, type StoredFile } from './router.ts';
 
 /**
  * A stage running inside a private AWS Emulator: shared platform resources
@@ -42,6 +46,8 @@ export interface LocalStage {
   stage: string;
   /** Present when the manifest declares `realtime`: what the local router serves for it. */
   realtime?: LocalRealtime;
+  /** Present when the manifest has public stores: their files in the emulator, for the local router. */
+  publicFiles?: PublicFiles;
   stop(): Promise<void>;
 }
 
@@ -88,6 +94,9 @@ export async function startLocalStage(opts: StartLocalStageOptions): Promise<Loc
       deploymentId,
       stage: opts.stage,
       ...(realtime ? { realtime } : {}),
+      ...(result.bindings.storage?.public?.length
+        ? { publicFiles: emulatorFiles(engine, result.bindings.storage.bucket) }
+        : {}),
       stop: () => conn.stop(),
     };
   } catch (err) {
@@ -118,6 +127,40 @@ async function setUpRealtime(
     namespace: bindings.realtime.namespace,
     subscribe: bindings.realtime.subscribe,
   });
+}
+
+/** Public stores' files from the emulator's S3, as the edge reads them from the storage bucket. */
+function emulatorFiles(engine: Engine, bucket: string): PublicFiles {
+  const s3 = engineContext(engine).clients.s3;
+  return async (key, { range, ifNoneMatch }) => {
+    try {
+      const out = await s3.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          ...(range ? { Range: range } : {}),
+          ...(ifNoneMatch ? { IfNoneMatch: ifNoneMatch } : {}),
+        }),
+      );
+      const file: StoredFile = {
+        status: out.ContentRange ? 206 : 200,
+        headers: {
+          ...(out.ContentType ? { contentType: out.ContentType } : {}),
+          ...(out.CacheControl ? { cacheControl: out.CacheControl } : {}),
+          ...(out.ContentLength !== undefined ? { contentLength: out.ContentLength } : {}),
+          ...(out.ContentRange ? { contentRange: out.ContentRange } : {}),
+          ...(out.ETag ? { etag: out.ETag } : {}),
+          ...(out.LastModified ? { lastModified: out.LastModified } : {}),
+        },
+      };
+      return out.Body instanceof Readable ? { ...file, body: out.Body } : file;
+    } catch (e) {
+      const status = (e as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode;
+      if (status === 304) return { status: 304, headers: {} };
+      if (status === 404 || errorName(e) === 'NoSuchKey') return undefined;
+      throw e;
+    }
+  };
 }
 
 export async function uploadWorker(
