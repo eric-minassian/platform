@@ -9,6 +9,7 @@ import { aggregate, parseLogMessage, rollupUpdateInput } from '../src/telemetry/
 import {
   parseRange,
   summarizeHealth,
+  toCustomMetricStats,
   toJobStats,
   toLimitStats,
   toMetricsPoints,
@@ -183,6 +184,44 @@ describe('query mapping', () => {
     expect(jobs).toEqual([
       { kind: 'cron', name: 'nightly', ok: 1, error: 0, p95: null, lastRun: new Date(T).toISOString() },
       { kind: 'queue', name: 'emails', ok: 0, error: 0, p95: null },
+    ]);
+  });
+
+  it('sums custom metrics per name, zero-filled, with their latest unit', () => {
+    const range = {
+      from: Date.parse('2026-11-14T08:00:00Z'),
+      to: Date.parse('2026-11-14T09:30:00Z'),
+      res: '1h' as const,
+    };
+    const metrics = toCustomMetricStats(
+      [
+        { sk: '2026-11-14T08:00:00.000Z#signups', name: 'signups', unit: 'count', count: 3, sum: 3 },
+        { sk: '2026-11-14T09:00:00.000Z#cart.total', name: 'cart.total', unit: 'usd', count: 2, sum: 85 },
+        { sk: '2026-11-14T08:00:00.000Z#cart.total', name: 'cart.total', count: 1, sum: 10 },
+      ],
+      range,
+    );
+    expect(metrics).toEqual([
+      {
+        name: 'cart.total',
+        unit: 'usd',
+        count: 3,
+        sum: 95,
+        points: [
+          { ts: '2026-11-14T08:00:00.000Z', count: 1, sum: 10 },
+          { ts: '2026-11-14T09:00:00.000Z', count: 2, sum: 85 },
+        ],
+      },
+      {
+        name: 'signups',
+        unit: 'count',
+        count: 3,
+        sum: 3,
+        points: [
+          { ts: '2026-11-14T08:00:00.000Z', count: 3, sum: 3 },
+          { ts: '2026-11-14T09:00:00.000Z', count: 0, sum: 0 },
+        ],
+      },
     ]);
   });
 

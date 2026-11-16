@@ -1,4 +1,7 @@
-/** Observability endpoints: metrics, routes, jobs, queues, realtime, email, rate limits, errors, uptime, cost, logs, traces. */
+/**
+ * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
+ * custom metrics, rate limits, errors, uptime, cost, logs, traces.
+ */
 import type { JobStats } from '@ericminassian/platform-core';
 import { NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Cause, Clock, Effect, Option, Stream } from 'effect';
@@ -102,6 +105,12 @@ export const ObserveLive = HttpApiBuilder.group(
           const { app, stage } = yield* scope(params.app, query.stage);
           const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
           return yield* email.stats(app, stage, manifest?.email, yield* rangeOf(query));
+        }),
+
+      customMetrics: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return yield* telemetry.customMetrics(app, stage, yield* rangeOf(query));
         }),
 
       limits: ({ params, query }) =>

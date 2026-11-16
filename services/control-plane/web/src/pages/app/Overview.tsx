@@ -1,9 +1,11 @@
 import { useAtomValue } from '@effect/atom-react';
+import type { CustomMetricStats } from '@ericminassian/platform-core';
 import { Option } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
+import { useState } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, Lines, SERIES_COLORS, StackedArea } from '../../components/charts.tsx';
-import { Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
+import { Card, Loaded, Mono, Select, Stat, Table } from '../../components/ui.tsx';
 import { fmtMs, fmtNum, fmtPct } from '../../format.ts';
 import { type Scope, useApp } from '../AppLayout.tsx';
 
@@ -19,6 +21,12 @@ const realtimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }
   fresh(ApiClient.query('observe', 'realtime', { params: { app }, query: { stage, range }, timeToLive }), {
     every: '60 seconds',
   }),
+);
+const customMetricsAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(
+    ApiClient.query('observe', 'customMetrics', { params: { app }, query: { stage, range }, timeToLive }),
+    { every: '60 seconds' },
+  ),
 );
 const limitsAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
   fresh(ApiClient.query('observe', 'limits', { params: { app }, query: { stage, range }, timeToLive }), {
@@ -104,6 +112,7 @@ export function OverviewTab() {
               </Card>
             </div>
             <RealtimeSection app={app} scope={scope} />
+            <CustomMetricsSection app={app} scope={scope} />
             <RateLimitsSection app={app} scope={scope} />
           </div>
         );
@@ -201,6 +210,75 @@ function RateLimitsSection({ app, scope }: { app: string; scope: Scope }) {
             { key: 'denied', label: 'denied', color: SERIES_COLORS.s4xx },
           ]}
         />
+      </div>
+    </Card>
+  );
+}
+
+/** `metrics.count` records with unit `count`: its sum is the total. Other metrics are values to average. */
+const isCount = (m: CustomMetricStats) => m.unit === 'count';
+const unitOf = (m: CustomMetricStats) => (m.unit && !isCount(m) ? ` ${m.unit}` : '');
+
+/**
+ * The app's own `Metrics.count`/`value` series in the range, shown only when
+ * there are any: every metric in the table, and the one picked above it over
+ * time. Counts chart their total per bucket, values their average, so
+ * metrics of different units never share an axis.
+ */
+function CustomMetricsSection({ app, scope }: { app: string; scope: Scope }) {
+  const result = useAtomValue(customMetricsAtom({ app, ...scope }));
+  const [picked, setPicked] = useState<string>();
+  const r = Option.getOrUndefined(AsyncResult.value(result));
+  if (!r?.metrics.length) return null;
+  const shown = r.metrics.find((m) => m.name === picked) ?? r.metrics[0]!;
+  const data = shown.points.map((p) => ({
+    ts: p.ts,
+    value: isCount(shown) ? p.sum : p.count ? p.sum / p.count : null,
+  }));
+  // The unit goes in the label, not on the axis ticks, which have no room for it.
+  const label = (what: string) =>
+    `${shown.name} ${what}${shown.unit && !isCount(shown) ? ` (${shown.unit})` : ''}`;
+  return (
+    <Card
+      title="Custom metrics"
+      actions={
+        <Select
+          value={shown.name}
+          onChange={setPicked}
+          options={r.metrics.map((m) => ({ value: m.name, label: m.name }))}
+        />
+      }
+    >
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Table head={['Metric', 'Total', 'Average', 'Recorded']}>
+          {r.metrics.map((m) => (
+            <tr key={m.name}>
+              <td>
+                <Mono>{m.name}</Mono>
+              </td>
+              <td className="tabular-nums">{`${fmtNum(m.sum)}${unitOf(m)}`}</td>
+              <td className="tabular-nums">
+                {isCount(m) ? '—' : `${fmtNum(m.count ? m.sum / m.count : null)}${unitOf(m)}`}
+              </td>
+              <td className="tabular-nums">{fmtNum(m.count)}</td>
+            </tr>
+          ))}
+        </Table>
+        {isCount(shown) ? (
+          <Bars
+            data={data}
+            range={scope.range}
+            format={fmtNum}
+            series={[{ key: 'value', label: label('total'), color: SERIES_COLORS.value }]}
+          />
+        ) : (
+          <Lines
+            data={data}
+            range={scope.range}
+            format={fmtNum}
+            series={[{ key: 'value', label: label('average'), color: SERIES_COLORS.value }]}
+          />
+        )}
       </div>
     </Card>
   );

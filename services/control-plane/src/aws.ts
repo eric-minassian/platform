@@ -14,6 +14,7 @@ import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { SNSClient } from '@aws-sdk/client-sns';
 import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
+import { WAFV2Client } from '@aws-sdk/client-wafv2';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { Context, Data, Effect, Layer, Predicate } from 'effect';
 
@@ -57,6 +58,8 @@ export class Aws extends Context.Service<
     readonly sesv2: () => SESv2Client;
     /** Cost Explorer is a global service served from us-east-1. */
     readonly ce: () => CostExplorerClient;
+    /** CloudFront web ACLs (the router's) are managed in us-east-1. */
+    readonly wafv2: () => WAFV2Client;
   }
 >()('@ericminassian/platform-control-plane/Aws') {
   /** Region from the Lambda environment (`AWS_REGION`). */
@@ -84,6 +87,7 @@ export class Aws extends Context.Service<
       cloudwatch: lazy(() => new CloudWatchClient({ region })),
       sesv2: lazy(() => new SESv2Client({ region })),
       ce: lazy(() => new CostExplorerClient({ region: 'us-east-1' })),
+      wafv2: lazy(() => new WAFV2Client({ region: 'us-east-1' })),
     });
   });
 }
