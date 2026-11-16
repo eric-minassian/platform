@@ -5,6 +5,8 @@ import { CloudFrontKeyValueStoreClient } from '@aws-sdk/client-cloudfront-keyval
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { ECRClient } from '@aws-sdk/client-ecr';
+import { ECSClient } from '@aws-sdk/client-ecs';
 import { EventBridgeClient } from '@aws-sdk/client-eventbridge';
 import { IAMClient } from '@aws-sdk/client-iam';
 import { LambdaClient } from '@aws-sdk/client-lambda';
@@ -20,7 +22,7 @@ import { NodeHttpHandler } from '@smithy/node-http-handler';
 // CloudFront KeyValueStore requests are signed with SigV4a; this registers the
 // pure-JS signer with the SDK.
 import '@aws-sdk/signature-v4a';
-import { addEmulatorCompat } from './compat.ts';
+import { addEmulatorCompat, addEmulatorEcsCompat } from './compat.ts';
 
 export interface ClientOptions {
   region: string;
@@ -38,6 +40,8 @@ export interface AwsClients {
   readonly iam: IAMClient;
   readonly sts: STSClient;
   readonly dynamodb: DynamoDBClient;
+  readonly ecr: ECRClient;
+  readonly ecs: ECSClient;
   readonly sqs: SQSClient;
   readonly events: EventBridgeClient;
   readonly scheduler: SchedulerClient;
@@ -84,6 +88,16 @@ export function createClients(opts: ClientOptions): AwsClients {
     },
     get dynamodb() {
       return lazy('dynamodb', () => new DynamoDBClient(base));
+    },
+    get ecr() {
+      return lazy('ecr', () => new ECRClient(base));
+    },
+    get ecs() {
+      return lazy('ecs', () => {
+        const c = new ECSClient(base);
+        if (emulator) addEmulatorEcsCompat(c);
+        return c;
+      });
     },
     get sqs() {
       return lazy('sqs', () => new SQSClient(base));

@@ -1,6 +1,7 @@
 import {
   type EmailRuntimeConfig,
   emailFromAddress,
+  type ContainersRuntimeConfig,
   IAM_APP_PATH,
   names,
   type PlatformRuntimeConfig,
@@ -40,11 +41,14 @@ export function emailIdentityArn(region: string, accountId: string, identity: st
   return `arn:aws:ses:${region}:${accountId}:identity/${identity}`;
 }
 
-/** Trust for per-stage roles: the worker and Web Function (Lambda) and schedules (Scheduler). */
+/**
+ * Trust for per-stage roles: the worker and Web Function (Lambda), schedules
+ * (Scheduler) and long-running services (ECS tasks).
+ */
 export function stageTrustPolicy(): PolicyDocument {
   return policy({
     Effect: 'Allow',
-    Principal: { Service: ['lambda.amazonaws.com', 'scheduler.amazonaws.com'] },
+    Principal: { Service: ['lambda.amazonaws.com', 'scheduler.amazonaws.com', 'ecs-tasks.amazonaws.com'] },
     Action: 'sts:AssumeRole',
   });
 }
@@ -349,6 +353,10 @@ export function controlPlanePolicy(input: {
   > & {
     realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'>;
     email?: Pick<EmailRuntimeConfig, 'identityArn'>;
+    containers?: Pick<
+      ContainersRuntimeConfig,
+      'cluster' | 'repository' | 'executionRoleArn' | 'schedulerRoleArn'
+    >;
   };
 }): PolicyDocument {
   const { region, accountId: acct, runtime } = input;
@@ -565,6 +573,79 @@ export function controlPlanePolicy(input: {
       },
     );
   }
+  if (runtime.containers) {
+    const { cluster, repository, executionRoleArn, schedulerRoleArn } = runtime.containers;
+    statements.push(
+      {
+        // Stage services (deploy, destroy, start/stop/restart).
+        Sid: 'ContainerServices',
+        Effect: 'Allow',
+        Action: [
+          'ecs:CreateService',
+          'ecs:UpdateService',
+          'ecs:DeleteService',
+          'ecs:DescribeServices',
+          'ecs:TagResource',
+          'ecs:UntagResource',
+          'ecs:ListTagsForResource',
+        ],
+        Resource: `arn:aws:ecs:${region}:${acct}:service/${cluster}/*`,
+      },
+      {
+        // Task definitions, and the cluster's tasks and service listing, take no narrower resource.
+        Sid: 'ContainerTasks',
+        Effect: 'Allow',
+        Action: [
+          'ecs:RegisterTaskDefinition',
+          'ecs:DeregisterTaskDefinition',
+          'ecs:DeleteTaskDefinitions',
+          'ecs:DescribeTaskDefinition',
+          'ecs:ListTaskDefinitions',
+          'ecs:ListTaskDefinitionFamilies',
+          'ecs:TagResource',
+          'ecs:ListTagsForResource',
+          'ecs:ListServices',
+          'ecs:ListTasks',
+          'ecs:DescribeTasks',
+          'ecs:StopTask',
+        ],
+        Resource: '*',
+      },
+      {
+        // Images are built through the registry API (no Docker), so pushes are IAM calls.
+        Sid: 'ContainerImages',
+        Effect: 'Allow',
+        Action: [
+          'ecr:BatchCheckLayerAvailability',
+          'ecr:InitiateLayerUpload',
+          'ecr:UploadLayerPart',
+          'ecr:CompleteLayerUpload',
+          'ecr:PutImage',
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+          'ecr:DescribeImages',
+          'ecr:ListImages',
+          'ecr:BatchDeleteImage',
+        ],
+        Resource: `arn:aws:ecr:${region}:${acct}:repository/${repository}`,
+      },
+      {
+        Sid: 'ContainerRoles',
+        Effect: 'Allow',
+        Action: 'iam:PassRole',
+        Resource: [executionRoleArn, schedulerRoleArn],
+      },
+      {
+        // ECS manages task network interfaces through its service-linked role, which it creates on
+        // first use. A young account doesn't have it yet, so the first CreateService makes it.
+        Sid: 'ContainerServiceLinkedRole',
+        Effect: 'Allow',
+        Action: 'iam:CreateServiceLinkedRole',
+        Resource: `arn:aws:iam::${acct}:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS`,
+        Condition: { StringEquals: { 'iam:AWSServiceName': 'ecs.amazonaws.com' } },
+      },
+    );
+  }
   if (runtime.alertsTopicArn) {
     statements.push({
       Sid: 'Alerts',
@@ -574,6 +655,55 @@ export function controlPlanePolicy(input: {
     });
   }
   return policy(...statements);
+}
+
+/**
+ * What ECS needs to start a platform container: pull its image and ship its
+ * logs to the stage's service log groups (created by the engine). The app's
+ * own code runs as the stage role, never as this one.
+ */
+export function containerExecutionPolicy(input: {
+  region: string;
+  accountId: string;
+  repository: string;
+}): PolicyDocument {
+  const { region, accountId: acct } = input;
+  return policy(
+    {
+      Sid: 'PullImages',
+      Effect: 'Allow',
+      Action: ['ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability'],
+      Resource: `arn:aws:ecr:${region}:${acct}:repository/${input.repository}`,
+    },
+    { Sid: 'RegistryAuth', Effect: 'Allow', Action: 'ecr:GetAuthorizationToken', Resource: '*' },
+    {
+      Sid: 'ContainerLogs',
+      Effect: 'Allow',
+      Action: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      Resource: [
+        `arn:aws:logs:${region}:${acct}:log-group:/platform/apps/*/*/services/*`,
+        `arn:aws:logs:${region}:${acct}:log-group:/platform/apps/*/*/services/*:log-stream:*`,
+      ],
+    },
+  );
+}
+
+/**
+ * Assumed by EventBridge Scheduler for the one-shot schedules that stop a
+ * preview's services. It can only change a stage service's desired count
+ * (the schedule's input is fixed by the engine); app code never holds it.
+ */
+export function containerSchedulerPolicy(input: {
+  region: string;
+  accountId: string;
+  cluster: string;
+}): PolicyDocument {
+  return policy({
+    Sid: 'ScaleStageServices',
+    Effect: 'Allow',
+    Action: 'ecs:UpdateService',
+    Resource: `arn:aws:ecs:${input.region}:${input.accountId}:service/${input.cluster}/*--*`,
+  });
 }
 
 export function serviceTrustPolicy(...services: string[]): PolicyDocument {

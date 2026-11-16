@@ -28,6 +28,10 @@ import {
   aws_cognito as cognito,
   Duration,
   aws_dynamodb as dynamodb,
+  aws_ec2 as ec2,
+  aws_ecr as ecr,
+  aws_ecs as ecs,
+  Fn,
   aws_iam as iam,
   aws_lambda as lambda,
   aws_logs as logs,
@@ -83,7 +87,7 @@ export class FoundationStack extends Stack {
   constructor(scope: Construct, id: string, props: FoundationStackProps) {
     super(scope, id, {
       description:
-        'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, realtime, email, IAM',
+        'Platform shared resources: DNS, certificates, edge router, buckets, tables, Cognito, realtime, email, containers, IAM',
       terminationProtection: true,
       ...props,
     });
@@ -596,6 +600,97 @@ export class FoundationStack extends Stack {
       sourceArn: realtimeApi.attrApiArn,
     });
 
+    // ------------------------------------------------------------ containers
+    // Generic container compute (ECS on Fargate), first used by apps'
+    // long-running services. Nothing here costs anything at rest: tasks are
+    // billed while they run, plus each one's public IPv4 address.
+    //
+    // Public subnets only: a task gets a public IPv4 address for its egress
+    // instead of a NAT gateway (~$33/month each), and the security group
+    // takes no inbound traffic. S3 and DynamoDB are reached through free
+    // gateway endpoints. The default security group is left as AWS creates
+    // it, since restricting it takes a custom-resource Lambda.
+    const network = new ec2.Vpc(this, 'ContainerNetwork', {
+      vpcName: platformNames.containerNetwork,
+      maxAzs: 3,
+      natGateways: 0,
+      subnetConfiguration: [{ name: 'public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 20 }],
+      restrictDefaultSecurityGroup: false,
+      gatewayEndpoints: {
+        S3: { service: ec2.GatewayVpcEndpointAwsService.S3 },
+        DynamoDB: { service: ec2.GatewayVpcEndpointAwsService.DYNAMODB },
+      },
+    });
+    tag(network, 'containers');
+    const containerSecurityGroup = new ec2.SecurityGroup(this, 'ContainerSecurityGroup', {
+      vpc: network,
+      securityGroupName: platformNames.containerNetwork,
+      description: 'Platform containers: no inbound traffic, all outbound',
+      allowAllOutbound: true,
+    });
+    tag(containerSecurityGroup, 'containers');
+
+    const cluster = new ecs.Cluster(this, 'ContainerCluster', {
+      clusterName: platformNames.containerCluster,
+      vpc: network,
+      enableFargateCapacityProviders: true,
+      // Per-task metrics at a cost per metric; ECS's per-service CPU and memory are free.
+      containerInsightsV2: ecs.ContainerInsights.DISABLED,
+    });
+    tag(cluster, 'containers');
+
+    // Running services reference their images by digest, so the repository
+    // outlives the stack. The engine tags every image it keeps (the imported
+    // base image too); untagged ones are leftovers of replaced tags.
+    const repository = new ecr.Repository(this, 'ContainerRepository', {
+      repositoryName: platformNames.containerRepository,
+      imageScanOnPush: true,
+      lifecycleRules: [
+        {
+          description: 'Expire untagged images after a day',
+          tagStatus: ecr.TagStatus.UNTAGGED,
+          maxImageAge: Duration.days(1),
+        },
+      ],
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+    tag(repository, 'containers');
+
+    const containerExecutionRole = new iam.Role(this, 'ContainerExecutionRole', {
+      roleName: platformNames.containerExecutionRole,
+      path: '/platform/',
+      description: 'ECS: pulls platform container images and writes their logs',
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      inlinePolicies: {
+        execution: iam.PolicyDocument.fromJson(
+          policies.containerExecutionPolicy({
+            region: this.region,
+            accountId: this.account,
+            repository: repository.repositoryName,
+          }),
+        ),
+      },
+    });
+    tag(containerExecutionRole, 'containers');
+    const containerSchedulerRole = new iam.Role(this, 'ContainerSchedulerRole', {
+      roleName: platformNames.containerSchedulerRole,
+      path: '/platform/',
+      description: "EventBridge Scheduler: scales stages' containers (preview stop schedules)",
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com', {
+        conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
+      }),
+      inlinePolicies: {
+        scheduler: iam.PolicyDocument.fromJson(
+          policies.containerSchedulerPolicy({
+            region: this.region,
+            accountId: this.account,
+            cluster: cluster.clusterName,
+          }),
+        ),
+      },
+    });
+    tag(containerSchedulerRole, 'containers');
+
     // ---------------------------------------------------------------- alerts
     const alerts = new sns.Topic(this, 'Alerts', { topicName: platformNames.alertsTopic });
     // A fixed construct id: the default one would spell the address into the
@@ -649,6 +744,12 @@ export class FoundationStack extends Stack {
               realtime: { apiId: realtimeApi.attrApiId },
               email: { identityArn: mail.emailIdentityArn },
               ...(edgeWebAcl ? { edgeWebAclArn: edgeWebAcl.attrArn } : {}),
+              containers: {
+                cluster: cluster.clusterName,
+                repository: repository.repositoryName,
+                executionRoleArn: containerExecutionRole.roleArn,
+                schedulerRoleArn: containerSchedulerRole.roleArn,
+              },
             },
           }),
         ),
@@ -719,6 +820,15 @@ export class FoundationStack extends Stack {
         realtimeDomain: realtimeApi.attrDnsRealtime,
       },
       email: { domain: mailDomain, identityArn: mail.emailIdentityArn },
+      containers: {
+        cluster: cluster.clusterName,
+        subnets: network.publicSubnets.map((subnet) => subnet.subnetId),
+        securityGroups: [containerSecurityGroup.securityGroupId],
+        repository: repository.repositoryName,
+        repositoryUri: repository.repositoryUri,
+        executionRoleArn: containerExecutionRole.roleArn,
+        schedulerRoleArn: containerSchedulerRole.roleArn,
+      },
     };
     new ssm.StringParameter(this, 'RuntimeConfig', {
       parameterName: platformNames.runtimeConfigParameter,
@@ -730,6 +840,16 @@ export class FoundationStack extends Stack {
     new CfnOutput(this, 'CiRoleArn', { value: ciRole.roleArn });
     new CfnOutput(this, 'DistributionDomainName', { value: distribution.distributionDomainName });
     new CfnOutput(this, 'RealtimeApiId', { value: realtimeApi.attrApiId });
+  }
+
+  /**
+   * The region's first three availability zones, resolved by CloudFormation
+   * (`Fn::GetAZs`). CDK would otherwise look them up at synth time and cache
+   * them in cdk.context.json, a file that names the account, which this
+   * public repo doesn't commit.
+   */
+  override get availabilityZones(): string[] {
+    return [0, 1, 2].map((i) => Fn.select(i, Fn.getAzs()));
   }
 }
 
