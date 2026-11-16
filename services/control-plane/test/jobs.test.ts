@@ -1,5 +1,6 @@
 import type { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
+import type { InvokeCommandInput, LambdaClient } from '@aws-sdk/client-lambda';
 import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
@@ -20,6 +21,7 @@ import { waitForEdge } from '../src/edge.ts';
 import { AppEmail } from '../src/email.ts';
 import { PLATFORM_COST_KEY, parseCostResults, TOTAL_COST_KEY } from '../src/jobs/cost.ts';
 import { emailAlert, nextEmailState, nextUptimeState, Pinger } from '../src/jobs/pinger.ts';
+import { AppQueues } from '../src/jobs/queues.ts';
 import {
   AppRealtime,
   REALTIME_METRICS,
@@ -45,6 +47,45 @@ import { awsLayer, memoryStore, runtime, settingsLayer } from './support.ts';
 /** Effect's HTTP client over a fake `fetch`. */
 const fetchLayer = (fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) =>
   FetchHttpClient.layer.pipe(Layer.provideMerge(Layer.succeed(FetchHttpClient.Fetch, fetch)));
+
+describe('run cron now', () => {
+  effect.live('invokes the function the scheduler would: the cron’s own, or the worker', () =>
+    Effect.gen(function* () {
+      const invoked: InvokeCommandInput[] = [];
+      const lambda = {
+        send: async (command: { input: InvokeCommandInput }) => {
+          invoked.push(command.input);
+          return {};
+        },
+      } as unknown as LambdaClient;
+      const manifest = parseManifest({
+        name: 'atlas',
+        crons: { tick: 'rate(1 minute)', listen: { schedule: 'rate(1 minute)', memoryMb: 256 } },
+      });
+      yield* AppQueues.use((q) =>
+        Effect.all([
+          q.runCron('atlas', 'prod', manifest, 'listen'),
+          q.runCron('atlas', 'prod', manifest, 'tick'),
+        ]),
+      ).pipe(
+        Effect.provide(
+          AppQueues.layer.pipe(Layer.provide([awsLayer({ lambda: () => lambda }), settingsLayer()])),
+        ),
+      );
+      assert.deepStrictEqual(
+        invoked.map((i) => [
+          i.FunctionName,
+          i.InvocationType,
+          new TextDecoder().decode(i.Payload as Uint8Array),
+        ]),
+        [
+          ['atlas--prod--worker--cron-listen', 'Event', '{"__platform":"cron","name":"listen"}'],
+          ['atlas--prod--worker', 'Event', '{"__platform":"cron","name":"tick"}'],
+        ],
+      );
+    }),
+  );
+});
 
 describe('uptime state', () => {
   it('needs two failures before going down and alerts once', () => {
@@ -443,6 +484,7 @@ describe('pinger', () => {
     db: false,
     queues: {},
     events: [],
+    eventOptions: {},
     crons: {},
     storage: [],
     storageOptions: {},

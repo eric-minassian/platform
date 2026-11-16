@@ -1,17 +1,25 @@
-import { DescribeLogStreamsCommand, GetLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import {
+  DescribeLogGroupsCommand,
+  DescribeLogStreamsCommand,
+  GetLogEventsCommand,
+} from '@aws-sdk/client-cloudwatch-logs';
 import { DescribeTableCommand, DescribeTimeToLiveCommand } from '@aws-sdk/client-dynamodb';
-import { PutEventsCommand } from '@aws-sdk/client-eventbridge';
-import { GetRoleCommand } from '@aws-sdk/client-iam';
-import { SendMessageCommand } from '@aws-sdk/client-sqs';
+import { ListTargetsByRuleCommand, PutEventsCommand } from '@aws-sdk/client-eventbridge';
+import { GetRoleCommand, GetRolePolicyCommand } from '@aws-sdk/client-iam';
+import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
+import { GetScheduleCommand } from '@aws-sdk/client-scheduler';
+import { GetQueueAttributesCommand, GetQueueUrlCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   names,
   newDeploymentId,
   type PlatformRuntimeConfig,
   parseManifest,
+  type ResolvedManifest,
 } from '@ericminassian/platform-core';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { listEventSourceMappings, listPermissionIds } from '../../src/drivers/lambda.ts';
 import {
   createEngine,
   type EmulatorConnection,
@@ -51,6 +59,24 @@ const manifest = parseManifest({
 });
 const stage = 'itest1';
 
+/** The same app, with a queue, an event and a cron that each set their own memory or timeout. */
+const ownFunctions = parseManifest({
+  name: 'itest',
+  db: true,
+  auth: true,
+  queues: { jobs: { batchSize: 5, memoryMb: 256, timeoutSeconds: 20 } },
+  events: { 'thing.happened': { memoryMb: 256 } },
+  crons: { tick: { schedule: '*/5 * * * *', timeoutSeconds: 30 } },
+  storage: ['files'],
+  secrets: ['API_KEY'],
+  env: { GREETING: 'hi' },
+});
+const handlerFunctions = {
+  queue: names.handlerFunction('itest', stage, 'queue', 'jobs'),
+  event: names.handlerFunction('itest', stage, 'event', 'thing.happened'),
+  cron: names.handlerFunction('itest', stage, 'cron', 'tick'),
+};
+
 describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
   'deployStage on the AWS Emulator',
   () => {
@@ -77,9 +103,13 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
     async function workerLines(): Promise<string[]> {
       const ctx = engineContext(engine);
       const out: string[] = [];
+      // Lambda's default groups too, in case the emulator writes there.
+      const defaults = await ctx.clients.logs.send(
+        new DescribeLogGroupsCommand({ logGroupNamePrefix: `/aws/lambda/${names.base('itest', stage)}--` }),
+      );
       for (const group of [
         names.logGroup('itest', stage, 'worker'),
-        `/aws/lambda/${names.workerFunction('itest', stage)}`,
+        ...(defaults.logGroups ?? []).map((g) => g.logGroupName!),
       ]) {
         const streams = await ctx.clients.logs
           .send(new DescribeLogStreamsCommand({ logGroupName: group }))
@@ -108,7 +138,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       }
     }
 
-    async function deploy() {
+    async function deploy(m: ResolvedManifest = manifest) {
       const deploymentId = newDeploymentId();
       const zip = zipSync({ 'index.mjs': strToU8(WORKER) });
       const worker = await engine.putArtifact(
@@ -126,7 +156,7 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         staticZip,
       );
       return engine.deployStage({
-        manifest,
+        manifest: m,
         stage,
         deploymentId,
         platform,
@@ -214,7 +244,106 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       expect(again.bindings.stageKey).toBe(stageKey);
     });
 
-    it('destroys everything for the stage', async () => {
+    /** Where each trigger points now. */
+    async function triggers() {
+      const ctx = engineContext(engine);
+      // Mappings being deleted aren't listed.
+      const mappings = async (fn: string) =>
+        (await listEventSourceMappings(ctx, fn)).map((m) => m.sourceArn.split(':').pop());
+      const grants = async (fn: string) =>
+        (await listPermissionIds(ctx, fn)).filter((sid) => sid.startsWith('events-'));
+      const rule = await ctx.clients.events.send(
+        new ListTargetsByRuleCommand({
+          Rule: names.eventRule('itest', stage, 'thing.happened'),
+          EventBusName: names.eventBus('itest', stage),
+        }),
+      );
+      const schedule = await ctx.clients.scheduler.send(
+        new GetScheduleCommand({ GroupName: names.scheduleGroup('itest', stage), Name: 'tick' }),
+      );
+      const queue = await ctx.clients.sqs.send(
+        new GetQueueUrlCommand({ QueueName: names.queue('itest', stage, 'jobs') }),
+      );
+      const visibility = await ctx.clients.sqs.send(
+        new GetQueueAttributesCommand({ QueueUrl: queue.QueueUrl, AttributeNames: ['VisibilityTimeout'] }),
+      );
+      const worker = names.workerFunction('itest', stage);
+      return {
+        workerMappings: await mappings(worker),
+        queueFunctionMappings: await mappings(handlerFunctions.queue),
+        workerGrants: await grants(worker),
+        eventFunctionGrants: await grants(handlerFunctions.event),
+        ruleTargets: rule.Targets?.map((t) => t.Arn!.split(':').pop()),
+        scheduleTarget: schedule.Target?.Arn?.split(':').pop(),
+        visibility: Number(visibility.Attributes?.VisibilityTimeout),
+      };
+    }
+
+    it('runs handlers with their own memory or timeout in functions of their own', async () => {
+      const ctx = engineContext(engine);
+      const deployed = await deploy(ownFunctions);
+      expect(deployed.workerFunction?.name).toBe(names.workerFunction('itest', stage));
+
+      const functions = (await engine.listStageResources('itest', stage))
+        .filter((r) => r.type === 'function')
+        .map((r) => r.name)
+        .toSorted();
+      expect(functions).toEqual(
+        [...Object.values(handlerFunctions), names.workerFunction('itest', stage)].toSorted(),
+      );
+      const config = await ctx.clients.lambda.send(
+        new GetFunctionConfigurationCommand({ FunctionName: handlerFunctions.queue }),
+      );
+      expect([config.MemorySize, config.Timeout]).toEqual([256, 20]);
+      expect(config.LoggingConfig?.LogGroup).toBe(names.logGroup('itest', stage, 'worker'));
+      const cron = await ctx.clients.lambda.send(
+        new GetFunctionConfigurationCommand({ FunctionName: handlerFunctions.cron }),
+      );
+      // The setting a handler doesn't set is the worker's (default 512 MB).
+      expect([cron.MemorySize, cron.Timeout]).toEqual([512, 30]);
+
+      expect(await triggers()).toEqual({
+        workerMappings: [],
+        queueFunctionMappings: [names.queue('itest', stage, 'jobs')],
+        workerGrants: [],
+        eventFunctionGrants: ['events-itest--itest1--thing_happened'],
+        ruleTargets: [handlerFunctions.event],
+        scheduleTarget: handlerFunctions.cron,
+        // 6× the queue handler's timeout, lowered from the worker's 6× 60 s once nothing longer receives.
+        visibility: 120,
+      });
+
+      const role = await ctx.clients.iam.send(
+        new GetRolePolicyCommand({ RoleName: names.role('itest', stage), PolicyName: 'runtime' }),
+      );
+      expect(decodeURIComponent(role.PolicyDocument!)).toContain(`function:${handlerFunctions.cron}"`);
+
+      await ctx.clients.sqs.send(
+        new SendMessageCommand({ QueueUrl: deployed.bindings.queues.jobs!.url, MessageBody: '{"n":43}' }),
+      );
+      expect(await waitForLine('queue {"n":43}')).toContain('PLATFORM_TEST queue');
+    });
+
+    it('moves them back to the worker when their settings go, and removes their functions', async () => {
+      await deploy();
+      const functions = (await engine.listStageResources('itest', stage)).filter(
+        (r) => r.type === 'function',
+      );
+      expect(functions.map((r) => r.name)).toEqual([names.workerFunction('itest', stage)]);
+      const worker = names.workerFunction('itest', stage);
+      expect(await triggers()).toEqual({
+        workerMappings: [names.queue('itest', stage, 'jobs')],
+        queueFunctionMappings: [],
+        workerGrants: ['events-itest--itest1--thing_happened'],
+        eventFunctionGrants: [],
+        ruleTargets: [worker],
+        scheduleTarget: worker,
+        visibility: 360,
+      });
+    });
+
+    it('destroys everything for the stage, handlers’ own functions included', async () => {
+      await deploy(ownFunctions);
       await engine.destroyStage({ app: 'itest', stage, platform });
       const left = await engine.listStageResources('itest', stage);
       expect(left).toEqual([]);

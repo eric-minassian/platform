@@ -1,6 +1,7 @@
 import type { ApiKey, ChannelNamespace } from '@aws-sdk/client-appsync';
 import type { Tag } from '@aws-sdk/client-sesv2';
 import {
+  names,
   type PlatformRuntimeConfig,
   parseManifest,
   platformNames,
@@ -124,6 +125,41 @@ describe('stage role policy', () => {
       expect(d.Statement.flatMap((s) => [s.Action].flat())).not.toContain('logs:CreateLogGroup');
     }
     expect(bySid.Logs?.Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
+  });
+
+  it('lets Scheduler invoke a cron’s own function, and nothing else of a handler’s', () => {
+    const own = policies.stageRolePolicy({
+      app: 'atlas',
+      stage: 'prod',
+      region: 'us-east-1',
+      accountId: '1',
+      manifest: parseManifest({
+        name: 'atlas',
+        queues: { ais: { memoryMb: 256 } },
+        events: { 'ship.seen': { memoryMb: 256 } },
+        crons: { tick: 'rate(1 minute)', listen: { schedule: 'rate(1 minute)', timeoutSeconds: 90 } },
+      }),
+      platform: platform(),
+    });
+    expect(own.Statement.find((x) => x.Sid === 'InvokeWorker')?.Resource).toEqual([
+      'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker',
+      'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker--cron-listen',
+    ]);
+  });
+
+  it('bounds invokes to stage functions, handlers’ own (hashed ones too) included', () => {
+    const boundary = policies.boundaryPolicy({ region: 'us-east-1', accountId: '1', storageBucket: 'st' });
+    const fn = (name: string) => `arn:aws:lambda:us-east-1:1:function:${name}`;
+    const long = names.handlerFunction('a'.repeat(30), 'b'.repeat(20), 'cron', 'c'.repeat(20));
+    for (const name of [
+      'atlas--prod--worker',
+      names.handlerFunction('atlas', 'prod', 'cron', 'listen'),
+      long,
+    ]) {
+      expect(allows(boundary, 'lambda:InvokeFunction', fn(name)), name).toBe(true);
+    }
+    expect(long).not.toContain('--worker--');
+    expect(allows(boundary, 'lambda:InvokeFunction', fn(platformNames.realtimeAuthorizer))).toBe(false);
   });
 
   it('omits grants for features the app does not use', () => {

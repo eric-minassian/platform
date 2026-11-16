@@ -2,7 +2,12 @@
 import { GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { InvokeCommand } from '@aws-sdk/client-lambda';
 import { GetQueueAttributesCommand, StartMessageMoveTaskCommand } from '@aws-sdk/client-sqs';
-import { names, type QueueStats } from '@ericminassian/platform-core';
+import {
+  handlerFunctionName,
+  names,
+  type QueueStats,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { Clock, Context, Effect, Layer, Option } from 'effect';
 import { Aws, type AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
@@ -18,8 +23,11 @@ export class AppQueues extends Context.Service<
     ): Effect.Effect<ReadonlyArray<QueueStats>>;
     /** Moves dead-lettered messages back to their source queue; answers the move task's handle. */
     redrive(app: string, stage: string, queue: string): Effect.Effect<string, AwsError>;
-    /** Fires a cron on the app's worker now (async), with the payload the scheduler sends. */
-    runCron(app: string, stage: string, cron: string): Effect.Effect<void>;
+    /**
+     * Fires a cron now (async): the payload the scheduler sends, to the function it sends it to
+     * (the cron's own when it sets its memory or timeout, else the worker's).
+     */
+    runCron(app: string, stage: string, manifest: ResolvedManifest, cron: string): Effect.Effect<void>;
   }
 >()('@ericminassian/platform-control-plane/AppQueues') {
   static readonly layer: Layer.Layer<AppQueues, never, Aws | Settings> = Layer.effect(
@@ -141,11 +149,16 @@ export class AppQueues extends Context.Service<
         return res.TaskHandle;
       });
 
-      const runCron = Effect.fn('AppQueues.runCron')(function* (app: string, stage: string, cron: string) {
+      const runCron = Effect.fn('AppQueues.runCron')(function* (
+        app: string,
+        stage: string,
+        manifest: ResolvedManifest,
+        cron: string,
+      ) {
         yield* tryAws(() =>
           aws.lambda().send(
             new InvokeCommand({
-              FunctionName: names.workerFunction(app, stage),
+              FunctionName: handlerFunctionName(app, stage, manifest, 'cron', cron),
               InvocationType: 'Event',
               Payload: new TextEncoder().encode(JSON.stringify({ __platform: 'cron', name: cron })),
             }),

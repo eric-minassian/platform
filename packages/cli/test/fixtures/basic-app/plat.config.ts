@@ -7,6 +7,6 @@ export default {
   web: { server: 'src/server.ts', static: 'public', spa: true },
   db: true,
   queues: { jobs: {} },
-  crons: { tick: '*/5 * * * *' },
+  crons: { tick: { schedule: '*/5 * * * *', timeoutSeconds: 30 } },
   services: { ticker: { entry: 'src/ticker.ts' } },
 } satisfies AppConfig;
