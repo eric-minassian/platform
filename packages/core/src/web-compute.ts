@@ -27,13 +27,14 @@ export const WEB_COMPUTE_SETTINGS = ['auto', ...WEB_COMPUTE] as const;
 export type WebComputeSetting = (typeof WEB_COMPUTE_SETTINGS)[number];
 
 /**
- * Memory of a request-mode server unless `web.memoryMb` says otherwise.
- * Request mode runs quiet stages, where many requests start an environment,
- * and Lambda gives a function CPU in proportion to its memory: loading an
- * Effect server bundle is CPU-bound, so 1024 MB starts one in about half the
- * time 512 MB does for the same GB-seconds. Requests mostly wait on I/O, where
- * the larger size costs twice as much per millisecond, but a quiet stage's
- * month is a few thousand GB-seconds of the account's free 400,000.
+ * Memory of a request-mode server unless `web.memoryMb` says otherwise, from
+ * the template app's server bundle (2.1 MB, measured 2026-11-16). INIT took
+ * 460–650 ms at 512, 1024 and 1769 MB alike, but Lambda gives the handler CPU
+ * in proportion to memory: the first request after INIT took ~115 ms at
+ * 512 MB, ~60 ms at 1024 and ~40 ms at 1769, and warm requests 12–148 ms at
+ * 512 against 5–11 ms at the other two. So 1024 MB answers faster than 512 and
+ * costs less per warm request (the shorter time more than pays for the
+ * doubled rate); 1769 MB only costs more. Each environment used ~140 MB.
  */
 export const WEB_REQUEST_MEMORY_MB = 1024;
 
@@ -142,8 +143,12 @@ export const INSTANCE_IDLE_SECONDS = 290;
 export const REQUEST_IDLE_MINUTES = 5;
 /** A Web Function environment's memory when CloudWatch has none for the stage (measured: ~250 MB). */
 export const INSTANCE_DEFAULT_MEMORY_MB = 256;
-/** A cold start's INIT when the stage reported none (`env` lines' `initMs`). */
-export const DEFAULT_INIT_MS = 600;
+/**
+ * A cold start's INIT when the stage reported none (`env` lines' `initMs`,
+ * which came within ~30 ms of Lambda's own figure). Measured: 460–650 ms for
+ * the template app's server.
+ */
+export const DEFAULT_INIT_MS = 550;
 
 /** One minute of a stage's requests (the telemetry's whole-stage minute rollup). */
 export interface MinuteTraffic {

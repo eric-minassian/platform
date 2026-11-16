@@ -261,7 +261,8 @@ export function bucketStart(ts: number, res: Resolution): number {
  *
  * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold,
  *                                                  dur (ms handling them, summed), and process starts:
- *                                                  webStarts (webInitMs summed), workerStarts, serviceStarts
+ *                                                  webStarts (webInits of them reported webInitMs, summed),
+ *                                                  workerStarts, serviceStarts
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
  * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]; `service:<name>` rows also
  *                                                  count `starts` (containers of that service starting)
