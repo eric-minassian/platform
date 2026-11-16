@@ -14,8 +14,16 @@ export const RouteRecordSchema = Schema.Struct({
   stage: Schema.String,
   /** Deployment id currently live. */
   d: Schema.String,
-  /** Web Function endpoint domain. */
+  /** The server's domain: a Web Function endpoint's, or with `c` a function URL's. */
   o: Schema.optional(Schema.String),
+  /**
+   * `r`: `o` is a request-mode server (a function URL, `WebCompute`
+   * `request`), which the router calls without OAC, sending `k` in
+   * `ORIGIN_HEADER`. Absent: a Web Function endpoint, called with OAC.
+   */
+  c: Schema.optional(Schema.Literal('r')),
+  /** The request-mode server's `originSecret`. */
+  k: Schema.optional(Schema.String),
   /** Static prefix in the sites bucket (no leading slash). */
   s: Schema.optional(Schema.String),
   /** Server route prefixes (only meaningful when both `o` and `s` exist). */

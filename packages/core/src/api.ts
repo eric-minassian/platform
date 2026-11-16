@@ -11,6 +11,7 @@ import { Schema, SchemaGetter } from 'effect';
 import { MemberRole } from './config.ts';
 import { ResolvedManifest } from './manifest.ts';
 import { Resolution, TelemetryEvent } from './telemetry.ts';
+import { WEB_COMPUTE, WEB_COMPUTE_SETTINGS } from './web-compute.ts';
 
 const optional = Schema.optional;
 
@@ -33,6 +34,27 @@ export type AppRecord = typeof AppRecord.Type;
 export const StageStatus = Schema.Literals(['active', 'deploying', 'failed', 'destroying', 'destroyed']);
 export type StageStatus = typeof StageStatus.Type;
 
+/** How a server runs (`WebCompute`). */
+export const WebComputeMode = Schema.Literals(WEB_COMPUTE);
+
+/** Days in a row the other mode was cheaper enough to switch to (`ComputeStreak`). */
+export const ComputeStreakSchema = Schema.Struct({
+  to: WebComputeMode,
+  days: Schema.Finite,
+  day: Schema.String,
+});
+
+/** A prod stage's monthly cost in each mode, estimated daily from its traffic (`simulateWebCompute`). */
+export const ComputeEstimate = Schema.Struct({
+  at: Schema.String,
+  request: Schema.Struct({ monthlyUsd: Schema.Finite, coldStartsPerMonth: Schema.Finite }),
+  instance: Schema.Struct({ monthlyUsd: Schema.Finite, environmentHoursPerMonth: Schema.Finite }),
+  requestsPerMonth: Schema.Finite,
+  /** Days of traffic the month is extrapolated from. */
+  days: Schema.Finite,
+});
+export type ComputeEstimate = typeof ComputeEstimate.Type;
+
 export const StageRecord = Schema.Struct({
   app: Schema.String,
   stage: Schema.String,
@@ -42,9 +64,15 @@ export const StageRecord = Schema.Struct({
   preview: Schema.Boolean,
   currentDeployment: optional(Schema.String),
   previousDeployment: optional(Schema.String),
-  /** Web Function revision ids, for instant rollback. */
+  /** The server builds: Web Function revision ids, or request-mode function versions. */
   currentRevision: optional(Schema.String),
   previousRevision: optional(Schema.String),
+  /** How the live deployment's server runs. */
+  compute: optional(WebComputeMode),
+  /** Prod stages with a server: what each mode would cost a month. */
+  computeEstimate: optional(ComputeEstimate),
+  /** Set while the other mode is cheaper enough; at three days the platform switches. */
+  computeStreak: optional(ComputeStreakSchema),
   createdAt: Schema.String,
   updatedAt: Schema.String,
 });
@@ -82,6 +110,13 @@ export const DeploymentRecord = Schema.Struct({
   /** The `@ericminassian/platform` version its bundles were built with; absent before 0.4.0. */
   sdk: optional(Schema.String),
   manifest: optional(ResolvedManifest),
+  /** How it runs the server. */
+  compute: optional(WebComputeMode),
+  /**
+   * A switch of the server's mode that the platform made (actor `platform`):
+   * the deployment whose build this one runs again, in `compute`.
+   */
+  computeSwitchOf: optional(Schema.String),
   url: optional(Schema.String),
   error: optional(Schema.String),
   events: Schema.Array(DeploymentEventEntry),
@@ -590,6 +625,17 @@ export const AlwaysOnCost = Schema.Struct({
 });
 export type AlwaysOnCost = typeof AlwaysOnCost.Type;
 
+/** A non-preview stage's server: how it runs, and (prod) what each mode would cost. */
+export const StageCompute = Schema.Struct({
+  stage: Schema.String,
+  /** `web.compute` of the live deployment. */
+  setting: Schema.Literals(WEB_COMPUTE_SETTINGS),
+  compute: WebComputeMode,
+  estimate: optional(ComputeEstimate),
+  streak: optional(ComputeStreakSchema),
+});
+export type StageCompute = typeof StageCompute.Type;
+
 export const CostResponse = Schema.Struct({
   app: Schema.String,
   currency: Schema.Literal('USD'),
@@ -597,6 +643,8 @@ export const CostResponse = Schema.Struct({
   monthToDateUsd: Schema.Finite,
   /** Services of the app's non-preview stages (previews run theirs for minutes after a deploy). */
   alwaysOn: optional(Schema.Array(AlwaysOnCost)),
+  /** Servers of the app's non-preview stages (previews run request mode). */
+  compute: optional(Schema.Array(StageCompute)),
 });
 export type CostResponse = typeof CostResponse.Type;
 

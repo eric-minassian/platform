@@ -11,6 +11,7 @@ import {
   RESOURCE_KEY_PATTERN,
 } from './naming.ts';
 import { CHANNEL_DECLARATION_PATTERN, CHANNEL_MESSAGE, realtimeIssues } from './realtime.ts';
+import { WEB_COMPUTE_SETTINGS, WEB_REQUEST_MEMORY_MB, type WebComputeSetting } from './web-compute.ts';
 
 /**
  * The app's config file, at the app root. `plat` evaluates it and sends the
@@ -66,6 +67,9 @@ const WebSchema = Schema.Struct({
   serverRoutes: Schema.Array(Schema.String.check(Schema.isStartingWith('/'))).pipe(orElse(['/api/'])),
   timeoutSeconds: intBetween(3, 900).pipe(orElse(30)),
   concurrency: intBetween(1, 128).pipe(orElse(64)),
+  compute: Schema.Literals(WEB_COMPUTE_SETTINGS).pipe(orElse('auto')),
+  memoryMb: intBetween(128, 10240).pipe(orElse(WEB_REQUEST_MEMORY_MB)),
+  maxEnvironments: Schema.optional(intBetween(2, 10000)),
 }).check(
   Schema.makeFilter((w) =>
     w.server || w.static ? undefined : 'web needs a server, a static directory, or both',
@@ -236,8 +240,21 @@ export interface WebConfig {
   serverRoutes?: readonly string[];
   /** 3-900. Default 30. */
   timeoutSeconds?: number;
-  /** Max concurrent requests per Web Function environment, 1-128. Default 64. */
+  /** Max concurrent requests per Web Function environment (instance mode), 1-128. Default 64. */
   concurrency?: number;
+  /**
+   * How the server runs. `request`: one invocation per request, billed by the
+   * millisecond and nothing while idle. `instance`: a Web Function, whose
+   * environments serve many requests at once and are billed for their memory
+   * while they live (until about five minutes after the last request).
+   * `auto` (default): previews run `request`; prod starts on `request` and
+   * moves to whichever mode its traffic makes cheaper, checked daily.
+   */
+  compute?: WebComputeSetting;
+  /** Memory of the server in request mode, 128-10240 MB (CPU grows with it). Default 1024. */
+  memoryMb?: number;
+  /** Most environments prod's Web Function (instance mode) runs at once, 2-10000. Default 10; previews 2. */
+  maxEnvironments?: number;
 }
 
 export interface WorkerConfig {

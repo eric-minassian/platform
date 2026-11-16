@@ -147,6 +147,11 @@ export const EnvEvent = Schema.Struct({
   t: Schema.Literal('env'),
   event: Schema.Literals(['start', 'stop']),
   runtime: Schema.Literals(['web', 'worker', 'service']),
+  /**
+   * How a deployed server runs (`runtime: 'web'`): `request`, a function per
+   * request, or `instance`, a Web Function environment. Absent under `plat dev`.
+   */
+  compute: Schema.optional(Schema.Literals(['request', 'instance'])),
   /** The service's name (`runtime: 'service'`). */
   name: Schema.optional(Schema.String),
   /** Why it stopped, e.g. `SIGTERM`. */
@@ -255,7 +260,8 @@ export function bucketStart(ts: number, res: Resolution): number {
  * returns a time range.
  *
  * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold,
- *                                                  and process starts: webStarts, workerStarts, serviceStarts
+ *                                                  dur (ms handling them, summed), and process starts:
+ *                                                  webStarts (webInitMs summed), workerStarts, serviceStarts
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
  * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]; `service:<name>` rows also
  *                                                  count `starts` (containers of that service starting)

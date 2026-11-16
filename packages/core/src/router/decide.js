@@ -5,7 +5,9 @@
 // when inlined.
 //
 // rec: route record from the KeyValueStore (see RouteRecord in router.ts)
-//   o   - Web Function endpoint domain (server), optional
+//   o   - the server's domain, optional: a Web Function endpoint, or a function URL when c is 'r'
+//         (request mode). Which one only changes how the CloudFront Function calls it (OAC, or
+//         the origin secret k in a header); `plat dev` runs the server itself.
 //   s   - static key prefix in the sites bucket, e.g. "foo/prod/d01j..." , optional
 //   r   - server route prefixes when both o and s exist, e.g. ["/api/"]
 //   spa - 1 to serve index.html for unknown non-file paths

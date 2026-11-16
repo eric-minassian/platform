@@ -15,3 +15,4 @@ export * from './router.ts';
 export * from './runtime-config.ts';
 export * from './storage.ts';
 export * from './telemetry.ts';
+export * from './web-compute.ts';

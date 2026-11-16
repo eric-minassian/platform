@@ -13,6 +13,7 @@
  * Everything here is isomorphic (WebCrypto, no Node imports): the SDK, the
  * authorizer and the browser client share it.
  */
+import { base64url, fromBase64url } from './base64url.ts';
 
 /** Where browsers connect (WebSocket) and read their `RealtimeClientConfig` (GET). The router answers both. */
 export const REALTIME_PATH = '/__platform/realtime';
@@ -202,19 +203,6 @@ export const REALTIME_TOKEN_TTL_SECONDS = 15 * 60;
 const HKDF_INFO = 'platform:realtime-token:v1';
 
 const encoder = new TextEncoder();
-
-function base64url(bytes: Uint8Array): string {
-  let bin = '';
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function fromBase64url(s: string): Uint8Array<ArrayBuffer> {
-  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 
 /** The HMAC key for a stage's tokens, derived from its stage key (base64url) with HKDF. */
 async function tokenKey(stageKey: string) {
