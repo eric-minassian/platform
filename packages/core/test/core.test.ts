@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { buildRouterFunctionCode } from '../src/cloudfront-function.ts';
 import {
   decide,
+  definePlatformConfig,
   errorFingerprint,
   HEALTH_PATH,
   latencyBucket,
@@ -13,6 +14,7 @@ import {
   parseManifest,
   parseStageHost,
   percentile,
+  type PlatformConfig,
   publicStores,
   REALTIME_KVS_KEY,
   REALTIME_PATH,
@@ -412,5 +414,31 @@ describe('telemetry', () => {
   it('makes sortable deployment ids', () => {
     const a = newDeploymentId();
     expect(a).toMatch(/^d[0-9a-z]{26}$/);
+  });
+});
+
+describe('platform config', () => {
+  const base: PlatformConfig = {
+    domain: 'example.com',
+    region: 'us-east-1',
+    zone: 'platform.example.com',
+    consoleHost: 'platform.example.com',
+    edgeHost: 'edge.platform.example.com',
+    loginHost: 'login.platform.example.com',
+    github: { owner: 'o', repo: 'r', ownerId: 1, repoId: 2 },
+    members: [{ github: 'ada', role: 'admin' }],
+    reservedAppNames: [],
+    previewTtlDays: 7,
+    limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1 },
+    telemetry: { logRetentionDays: { prod: 1, other: 1 } },
+  };
+  const floor = (edgeRequestsPerMinute: number) =>
+    definePlatformConfig({ ...base, limits: { ...base.limits, edgeRequestsPerMinute } });
+
+  it('takes an edge floor WAF can enforce, or none', () => {
+    expect(definePlatformConfig(base).limits.edgeRequestsPerMinute).toBeUndefined();
+    expect(floor(1000).limits.edgeRequestsPerMinute).toBe(1000);
+    expect(() => floor(9)).toThrow(/at least 10/);
+    expect(() => floor(10.5)).toThrow(/at least 10/);
   });
 });

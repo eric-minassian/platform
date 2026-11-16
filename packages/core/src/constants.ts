@@ -54,6 +54,19 @@ export const VIEWER_COUNTRY_HEADER = 'cloudfront-viewer-country';
  */
 export const RATE_LIMIT_PK_PREFIX = '_rl#';
 
+/** How long the edge's request floor asks a client over it to wait: WAF counts the last minute. */
+export const EDGE_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * The body of the edge floor's 429 (`limits.edgeRequestsPerMinute`): the SDK's
+ * `RateLimited`, so a generated web client decodes it like an app's own 429.
+ */
+export const EDGE_RATE_LIMITED_BODY = {
+  _tag: 'RateLimited',
+  message: `Too many requests. Try again in ${EDGE_RETRY_AFTER_SECONDS} seconds.`,
+  retryAfter: EDGE_RETRY_AFTER_SECONDS,
+} as const;
+
 /** Tags on every AWS resource the engine creates. */
 export const TAGS = {
   managed: 'platform:managed',

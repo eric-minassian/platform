@@ -28,6 +28,8 @@ export interface PlatformRuntimeConfig {
   kvsArn?: string;
   /** The router distribution; Web Function resource policies trust only this. */
   distributionArn?: string;
+  /** The router's web ACL, the per-client request floor; absent without `limits.edgeRequestsPerMinute`. */
+  edgeWebAclArn?: string;
   /** Shared Cognito user pool for app end users. */
   userPoolId?: string;
   /** Hosted login origin, e.g. `https://login.platform.ericminassian.com`. */
