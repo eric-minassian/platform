@@ -65,7 +65,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 | `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented.             |
 | `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                                   |
 | `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                                    |
-| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper.                                                                                                                       |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper, storage expiry.                                                                                                       |
 | `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, the SES mail domain, IAM) as one CDK stack, and the deploy that brings up the control plane on them. |
 | `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                               |
 
@@ -92,7 +92,7 @@ const app = defineApp({
   queues: { emails: queue<EmailJob>({ batchSize: 10 }) },
   events: { 'todo.created': event<TodoCreated>() }, // event types the worker subscribes to
   crons: { cleanup: '0 3 * * *' }, // 5-field UTC cron or rate(...)
-  storage: ['uploads'],
+  storage: { uploads: {}, exports: { public: true, expireAfterDays: 7 } }, // or ['uploads']
   secrets: ['STRIPE_KEY'],
   env: { FEATURE_X: 'on' },
   realtime: {
@@ -121,7 +121,8 @@ declare module '@ericminassian/platform/config' {
 - **Typed code.** `Register` hands the literal config to the SDK
   (`packages/sdk/src/register.ts`). `plat.config.ts` augments it in
   `@ericminassian/platform/config`, the one SDK module every app imports.
-  - Queue, event, store and secret names must be declared ones.
+  - Queue, event, store and secret names must be declared ones, and only a
+    `public` store has a public URL.
   - Bodies and details must match `queue<T>()` / `event<T>()`.
   - Realtime channels must match a declared pattern (`board`, or `boards/*`
     for every channel below it), and their events `channel<T>()`, both where
@@ -155,6 +156,9 @@ declare module '@ericminassian/platform/config' {
 - **Rate limits**: `RateLimits` checks limits in the server and worker, and
   `RateLimits.middleware` puts one in front of `HttpApi` endpoints. See
   [Rate limits](#rate-limits).
+- **Storage**: the `Storage` service's stores; browsers fetch a public store's
+  files with `storageUrl` from `@ericminassian/platform/client`. See
+  [Storage](#storage).
 - **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
   `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
   against both it and DynamoDB in the emulator.
@@ -193,7 +197,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                                                                                                                     |
 | Stage key    | `/platform/apps/todo/prod/stage-key`                                                                                                                                  |
 | Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`                                                                                                       |
-| Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`                                                                                                            |
+| Storage      | `s3://platform-<acct>-<region>-storage/todo/prod/<store>/`; public stores `…-storage/_public/todo/prod/<store>/`                                                      |
 
 ## Routing
 
@@ -214,6 +218,8 @@ used by `plat dev`):
   (the route record's `rt`). A WebSocket handshake goes to the AppSync
   realtime endpoint (no OAC); a plain GET is answered with the browser's
   connection settings. See [Realtime](#realtime).
+- `/__platform/storage/<store>/<key>` belongs to the router: a store in the
+  route record's `p` is served from the storage bucket, anything else is a 404. See [Storage](#storage).
 - A stage without a server has nothing to answer `/__platform/health`, so the
   function answers it from the route record (`revision` is the record's
   deployment id). Every routed stage reports which deployment it serves, for
@@ -227,6 +233,80 @@ Host). Hashed assets are immutable; `index.html` revalidates.
 
 A new app or preview is a single KVS entry: no DNS, certificate or
 distribution change. Rollback is pointing the entry back.
+
+## Storage
+
+Named file stores in one shared bucket. A private store is reached through
+presigned URLs; a **public** store (`{ public: true }`) is served from the edge
+on the app's own host, with no Web Function in the path, for large read-mostly
+files such as feed snapshots.
+
+```
+worker   storage.store('exports').put('fires/1105.json', body, { cacheControl: 'public, max-age=31536000, immutable' })
+           → s3://…-storage/_public/todo/prod/exports/fires/1105.json   (Content-Type, Cache-Control on the object)
+browser  GET /__platform/storage/exports/fires/1105.json              (storageUrl('exports', key), same origin)
+           → behavior /__platform/storage/* → router: 'exports' is in the route's `p`
+           → /todo/prod/exports/fires/1105.json; query string, cookies, Authorization dropped
+           → edge cache, else S3 through OAC with origin path /_public
+```
+
+- **Isolation.** Public stores live under `_public/` (no app name starts with
+  `_`), and the bucket policy lets the router distribution read and list
+  `_public/` and nothing else, so a routing mistake can't expose a private
+  store or its key names. Listing makes a missing file a 404 rather than S3's 403.
+- **The router.** The same function runs on a second cache behavior,
+  `/__platform/storage/*`, whose origin is the storage bucket. It refuses keys
+  with `.` or `..` segments (also percent-encoded) and drops the query string:
+  CloudFront signs OAC requests, so S3 would honor `response-content-type` and
+  the other `response-*` overrides. The key stays percent-encoded; S3 decodes
+  it.
+- **Its own cache entries.** CloudFront's cache key is the rewritten URI plus
+  `x-platform-host`, not the behavior or origin, and a server-only app's
+  server gets `/<app>/<stage>/<store>/<key>` unchanged. So the router sets
+  `x-platform-host` to a value no host has (`STORAGE_CACHE_HOST`) for a public
+  store's file: otherwise a request to that path could put the server's
+  response in the file's place. The router sets the header on every request
+  it forwards, so a client can't choose it.
+- **Headers.** A response headers policy on that behavior only adds
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: script-src
+  'none'`, so a file a user uploaded can't run script on the app's origin,
+  where its session cookie lives (`sandbox` would also keep PDFs from opening
+  in Chrome). A file without its own `Cache-Control` gets `no-cache`.
+- **Caching.** Objects carry their own `Content-Type` (from the key's extension
+  unless given) and `Cache-Control` (`put`/`uploadUrl` take both), and the
+  edge caches by it, so a versioned key can be immutable for a year. With the
+  cache policy's default TTL of 0, a file without one is revalidated against
+  S3 on each request. CloudFront compresses JSON and text up to 10 MB. A
+  missing file's 404 is cached for about 10 s (the distribution's error
+  caching), so a key asked for before it's written can stay missing that
+  long.
+- **Lifecycle.** The route's `p` changes at the flip, like the rest of the
+  route: a store is served once the deployment that makes it public is live,
+  and stops being served when one that doesn't is, even for files cached for a
+  year, because the router runs before the cache. Rollback restores the
+  earlier route's `p`. A stage with public stores is routed even without
+  `web`; a stage left with nothing to serve loses its route.
+- **Changing visibility.** A store's files are where its kind is read, so a
+  store with files can't switch between public and private: deploy refuses
+  it, before changing anything, and asks for a new store. Moving the files
+  during the deploy would race the live deployment, which keeps writing to the
+  old place until the edges switch. The live route's `p` says what each store
+  was.
+- **Expiry.** `expireAfterDays` (any store) is a daily control-plane job,
+  `storage-expiry`, that deletes files not written for that many days in the
+  stores of every live stage: a LIST per 1,000 files a day, and deletes are
+  free. Not S3 lifecycle rules: a bucket has one lifecycle document, shared by
+  every app, which concurrent deploys would rewrite with no conditional write
+  (a dropped rule keeps data, a resurrected one deletes it), and the
+  foundation's drift-reverting deploys own that bucket's configuration.
+- **Abuse.** Reads never reach the app, so rate limits don't cover them,
+  as with static files. A cached file costs only CloudFront; since query
+  strings are dropped, only a key that isn't cached costs an S3 GET, and a
+  missing one's 404 is cached for about 10 s. Writes always go through the
+  app: an endpoint that hands out `uploadUrl` for a public store should be
+  rate-limited, since whatever is uploaded is served to anyone.
+- **`plat dev`** serves public stores from the emulator's bucket with the same
+  headers, `Range` and `If-None-Match`.
 
 ## Realtime
 
@@ -399,10 +479,10 @@ telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> ro
   would attach it, so apps declare and fail with one class. A `cost` above
   `max`, a bad name or `per`, and a missing `db` are defects naming the fix.
 - **No platform-wide floor yet.** An AWS WAF web ACL with a rate-based rule
-  on the router would cover every app, static files included, but costs about
+  on the router would cover every app, static and public files included, but costs about
   $6 a month fixed (roughly three times the platform's baseline) plus $0.60
   per million requests, and counts per IP over 1–10 minute windows: too coarse
-  to replace per-app limits. Revisit if a flood hits static files.
+  to replace per-app limits. Revisit if a flood hits static or public files.
 
 ## Deploy flow
 
@@ -463,7 +543,8 @@ comments the URL on the PR.
 4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
    Realtime runs on the emulator's Event API: the router answers the config
    and tunnels `/__platform/realtime` WebSockets to the emulator's realtime
-   port. Email goes to the CLI's inbox at `/__platform/mail`.
+   port. Email goes to the CLI's inbox at `/__platform/mail`. Public stores'
+   files come from the emulator's storage bucket.
 5. The worker runs as a local Node process with hot reload.
    - The engine still creates the real worker Lambda, queues, event source
      mappings and rules in the emulator, so provisioning is exercised.
@@ -570,9 +651,11 @@ writing any instrumentation:
   - can't create log groups. The engine creates them, so logs still in
     flight when a stage is destroyed can't bring its groups back;
   - publishes only to its own channel namespace. Browsers never publish;
+  - reaches its stores under `<app>/<stage>/` and `_public/<app>/<stage>/`;
   - sends email only from its own address, through its own SES tenant.
 - Web Functions use `IamAuth` endpoints, and their resource policy trusts only
   the router distribution (`aws:SourceArn`).
+- The router distribution reads the storage bucket's `_public/` prefix only.
 - CI tokens are bound to a repo and a stage (prod only from main).
 - The platform's own CI role trusts only `eric-minassian/platform` on `main`.
 - This repo is public: no account ids, ARNs or emails are committed. They
@@ -609,6 +692,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50)                                      |
 | Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
 | Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
+| Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
 Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
@@ -708,8 +792,28 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     verified addresses and the user pool keeps Cognito's sender. See
     `docs/SETUP.md` step 11.
 - **Rate limits have no platform-wide floor.** Per-app limits run in the
-  Web Function, so a flood still reaches it (and static files aren't
-  covered). The WAF option is in [Rate limits](#rate-limits).
+  Web Function, so a flood still reaches it (and static files and public
+  stores' files aren't covered). The WAF option is in [Rate limits](#rate-limits).
+- **Public stores, verified 2026-11-16 on a throwaway bucket and
+  distribution.**
+  - A public file is served with its own `Content-Type` and `Cache-Control`
+    and cached by it; the headers policy also covers S3's errors, the
+    router's 404s and 304s. A 57 KB JSON file came back as 5.6 KB with brotli.
+  - A missing file is a 404 with the listing scoped to `_public/`; listing
+    anything else is refused.
+  - CloudFront resolves `..` and `%2e` before choosing a behavior, and refuses
+    (400) a function's URI that climbs above `/`. The function sees the raw
+    URI, and S3 doesn't resolve dot segments, so the router's check is what
+    keeps them out. No path reached a file outside `_public/`.
+  - S3 honors `response-content-type` on the OAC-signed request, hence the
+    dropped query string.
+  - A Range request that also accepts gzip gets the whole compressed file
+    (200), as CloudFront does for compressed responses.
+  - `cf.updateRequestOrigin` to an S3 origin failed (502), so public stores
+    have their own behavior instead of an origin switch.
+  - The cache key ignores behavior and origin: a file and another behavior's
+    response for the same URI and headers shared an entry until the router
+    gave the file its own `x-platform-host`.
 - **Custom domains** (non-`ericminassian.com`) need their own certificate.
   The plan is a second, multi-tenant (SaaS Manager) distribution reusing the
   same function and KVS.
@@ -739,4 +843,7 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                   |
 | The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                     |
 | Rate limits: a sliding window in the stage's table, no WAF                            | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically. WAF would triple the fixed cost for coarse per-IP counts.       |
+| Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                   |
+| Store expiry is a daily control-plane sweep, not S3 lifecycle rules                   | One lifecycle document per bucket, shared by every app, can't be updated safely by concurrent deploys, and the foundation stack owns that bucket's configuration. The sweep touches only the stores that ask for it, for a LIST per 1,000 files a day.                                                                                                                                                                        |
+| A store with files can't switch between public and private                            | Its files would have to move while the live deployment keeps writing to the old place until every edge switches, so some writes could be lost. A new store name is a one-line change.                                                                                                                                                                                                                                         |
 | us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |
