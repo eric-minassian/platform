@@ -4,9 +4,13 @@
  * filter forwards the interesting kinds to the telemetry processor, which
  * aggregates rollups into the telemetry table. Logs Insights covers the rest
  * (search, traces) on demand. No CloudWatch custom metrics are ever created.
+ *
+ * CloudWatch Logs bills every byte ingested, so lines leave out what a reader
+ * can tell without it (a `path` equal to its `route`, a first `attempt`), and
+ * most requests and jobs fold their spans into a count (`traceSampled`).
  */
 import { Schema } from 'effect';
-import { fingerprint } from './fingerprint.ts';
+import { fingerprint, fnv1a } from './fingerprint.ts';
 
 export const TelemetryKind = Schema.Literals(['req', 'err', 'job', 'span', 'log', 'metric', 'limit', 'env']);
 export type TelemetryKind = typeof TelemetryKind.Type;
@@ -25,13 +29,24 @@ const base = {
   parent: Schema.optional(Schema.String),
 };
 
+/**
+ * On a `req` or `job` line: the spans it made (SDK calls, `fetch`es, `traced`
+ * units) that weren't written as `span` lines, how many and their total ms.
+ * Absent when every span was written. See `TRACE_SAMPLE_RATE`.
+ */
+const unwrittenSpans = {
+  calls: Schema.optional(Schema.Finite),
+  callMs: Schema.optional(Schema.Finite),
+};
+
 export const RequestEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('req'),
   method: Schema.String,
-  /** Route pattern when known (`/api/todos/:id`), else the raw path. */
+  /** Route pattern when known (`/api/todos/:id`), else the raw path with ids as `:id`. */
   route: Schema.String,
-  path: Schema.String,
+  /** The raw path, when it isn't `route`. */
+  path: Schema.optional(Schema.String),
   status: Schema.Finite,
   /** Duration in ms. */
   dur: Schema.Finite,
@@ -40,6 +55,7 @@ export const RequestEvent = Schema.Struct({
   /** Hashed user id when signed in. */
   user: Schema.optional(Schema.String),
   cold: Schema.optional(Schema.Boolean),
+  ...unwrittenSpans,
 });
 export type RequestEvent = typeof RequestEvent.Type;
 
@@ -69,12 +85,18 @@ export const JobEvent = Schema.Struct({
   name: Schema.String,
   status: Schema.Literals(['ok', 'error']),
   dur: Schema.Finite,
+  /** A queue message's, event's or cron run's attempt, when it isn't the first. */
   attempt: Schema.optional(Schema.Finite),
   /** What happens after a failed run: tried again later, or moved to the dead-letter queue. */
   next: Schema.optional(Schema.Literals(['retry', 'dead'])),
+  ...unwrittenSpans,
 });
 export type JobEvent = typeof JobEvent.Type;
 
+/**
+ * A call a request or job made, written only when its request or job keeps its
+ * spans (`TRACE_SAMPLE_RATE`); `parent` is that request's or job's `span`.
+ */
 export const SpanEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('span'),
@@ -149,6 +171,32 @@ export type TelemetryEvent = typeof TelemetryEvent.Type;
 /** Account-level subscription filter: only aggregate-worthy kinds reach the processor. */
 export const TELEMETRY_FILTER_PATTERN =
   '{ ($._p = 1) && (($.t = "req") || ($.t = "err") || ($.t = "job") || ($.t = "metric") || ($.t = "limit") || ($.t = "env")) }';
+
+// ---------------------------------------------------------------------------
+// Span sampling
+// ---------------------------------------------------------------------------
+
+/**
+ * A request or job writes its spans when it fails (a 5xx, a failed job, or an
+ * `err` line while it runs), takes `SLOW_TRACE_MS` or longer, or its trace is
+ * in this share of traces (`traceSampled`). The rest write only their own
+ * line, with the spans counted on it (`calls`, `callMs`).
+ */
+export const TRACE_SAMPLE_RATE = 1 / 20;
+
+/** A request or job that takes this long (ms) or longer writes its spans. */
+export const SLOW_TRACE_MS = 1_000;
+
+/**
+ * Whether `trace` is one of the sampled traces. It depends on the trace id
+ * alone, so every hop of a trace (server → queue → worker) makes the same
+ * choice. Any string works: a client can send its own `x-platform-trace`.
+ */
+export function traceSampled(trace: string): boolean {
+  // Comparing the hash with a threshold (not `% 20`) keeps a trace sampled at
+  // one rate sampled at any higher rate.
+  return fnv1a(trace) < TRACE_SAMPLE_RATE * 2 ** 32;
+}
 
 export function isTelemetryEvent(v: unknown): v is TelemetryEvent {
   return (
