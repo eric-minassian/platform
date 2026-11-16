@@ -554,7 +554,9 @@ Fargate      one task per stage, public subnet + public IPv4, no inbound; stdout
   later), up to 6 minutes. ECS's circuit
   breaker returns a service that can't start to its previous build; the
   engine fails fast after two failed tasks, and the deployment's error
-  carries the task's stop reason, exit code and last log lines.
+  carries the task's stop reason, exit code and last log lines. Since the
+  old task stops first, a failed service deploy leaves a gap of about four
+  minutes until the previous build runs again (measured 2026-11-16).
 - **Previews.** A preview runs each service for `previewMinutes` (30) after
   each deploy; a one-shot EventBridge Scheduler schedule (universal target
   `ecs:updateService`, assumed as the platform's scheduler role, so app code
