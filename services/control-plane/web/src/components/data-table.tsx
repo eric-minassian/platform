@@ -13,6 +13,7 @@ import {
   sortFn_alphanumeric,
   sortFn_basic,
   sortFn_datetime,
+  sortFn_text,
   tableFeatures,
   useTable,
 } from '@tanstack/react-table';
@@ -33,7 +34,13 @@ declare module '@tanstack/react-table' {
 export const tableFeatureSet = tableFeatures({
   rowSortingFeature,
   sortedRowModel: createSortedRowModel(),
-  sortFns: { basic: sortFn_basic, alphanumeric: sortFn_alphanumeric, datetime: sortFn_datetime },
+  sortFns: {
+    basic: sortFn_basic,
+    alphanumeric: sortFn_alphanumeric,
+    datetime: sortFn_datetime,
+    // What string columns sort by when they name no `sortFn`.
+    text: sortFn_text,
+  },
 });
 
 export type TableFeatureSet = typeof tableFeatureSet;

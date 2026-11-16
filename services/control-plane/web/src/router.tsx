@@ -31,15 +31,21 @@ declare module '@tanstack/react-router' {
   }
 }
 
+// A page declares its component's return type: inferred, it would make the router's type depend on
+// the page, whose route hooks read the router's type, and type-aware lint would see them as `any`.
 const page = <K extends string>(load: () => Promise<Record<K, React.ComponentType>>, name: K) =>
   lazyRouteComponent(load, name);
 
 const rootRoute = createRootRoute({ component: Outlet, notFoundComponent: NotFoundPage });
 
-const loginRoute = createRoute({
+export const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/login',
-  validateSearch: searchSchema({ redirect: Schema.String }),
+  // `denied`: the GitHub login the server turned away (not a member); a number when it's all digits.
+  validateSearch: searchSchema({
+    redirect: Schema.String,
+    denied: Schema.Union([Schema.String, Schema.Finite]),
+  }),
   component: page(() => import('./pages/login.tsx'), 'LoginPage'),
 });
 
@@ -169,6 +175,32 @@ export const alertsRoute = createRoute({
   component: page(() => import('./pages/app/alerts.tsx'), 'AlertsPage'),
 });
 
+export const databaseRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: 'database',
+  staticData: { title: 'Database' },
+  // `partition`: a partition key value the items are narrowed to.
+  validateSearch: searchSchema({ collection: Schema.String, partition: Schema.String }),
+  component: page(() => import('./pages/app/database.tsx'), 'DatabasePage'),
+});
+
+export const storageRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: 'storage',
+  staticData: { title: 'Storage' },
+  validateSearch: searchSchema({ store: Schema.String, prefix: Schema.String }),
+  component: page(() => import('./pages/app/storage.tsx'), 'StoragePage'),
+});
+
+export const deploymentsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: 'deployments',
+  staticData: { title: 'Deployments' },
+  // `deployment`: the one whose detail is open.
+  validateSearch: searchSchema({ deployment: Schema.String }),
+  component: page(() => import('./pages/app/deployments.tsx'), 'DeploymentsPage'),
+});
+
 const appDashboardsRoute = child(
   'dashboards',
   'Dashboards',
@@ -228,21 +260,9 @@ const routeTree = rootRoute.addChildren([
           time: true,
         },
       ),
-      child(
-        'database',
-        'Database',
-        page(() => import('./pages/app/database.tsx'), 'DatabasePage'),
-      ),
-      child(
-        'storage',
-        'Storage',
-        page(() => import('./pages/app/storage.tsx'), 'StoragePage'),
-      ),
-      child(
-        'deployments',
-        'Deployments',
-        page(() => import('./pages/app/deployments.tsx'), 'DeploymentsPage'),
-      ),
+      databaseRoute,
+      storageRoute,
+      deploymentsRoute,
       child(
         'secrets',
         'Secrets',
