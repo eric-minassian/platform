@@ -321,7 +321,9 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
      ```
   - `run` runs until the platform stops it. When it fails or ends, it is reported (an error group for a
     failure) and run again after a backoff, 1 s growing to 1 min. So let errors out instead of retrying
-    inside, and end the stream when the source goes quiet.
+    inside, and end the stream when the source goes quiet. A source that drops connections as a matter of
+    course would raise an error group (and its alert) for it; end the run on that error instead
+    (`Stream.catchTag('SocketError', () => Stream.empty)`), which reruns it with a warning line.
   - One instance runs per stage, but a deploy, a crash or a Spot reclaim (two minutes' notice) replaces
     it, with a gap of about a minute and possibly a brief overlap. Write idempotently: overwrite
     snapshots, key documents by the source's ids.
