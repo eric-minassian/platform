@@ -3,6 +3,7 @@ import type { Authentication } from './api.ts';
 import { Db } from './db.ts';
 import { AuthenticationLayer } from './http.ts';
 import { type MemoryOptions, layerMemory as memory, type PlatformMemory } from './memory.ts';
+import { RateLimits } from './rate-limit.ts';
 import {
   AppInfo,
   Auth,
@@ -38,6 +39,7 @@ export type Services =
   | Jobs
   | Metrics
   | Queues
+  | RateLimits
   | Realtime
   | Secrets
   | Storage;
@@ -51,6 +53,7 @@ export const layer: Layer.Layer<Services> = Layer.mergeAll(
   Jobs.layer,
   Metrics.layer,
   Queues.layer,
+  RateLimits.layer,
   Realtime.layer,
   Secrets.layer,
   Storage.layer,
