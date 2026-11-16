@@ -13,6 +13,7 @@ import {
   names,
   newDeploymentId,
   normalizeErrorMessage,
+  ORIGIN_HEADER,
   ownFunctionHandlers,
   parseManifest,
   parseStageHost,
@@ -116,6 +117,28 @@ describe('manifest', () => {
     expect(m.queues.emails).toEqual({ maxAttempts: 5 });
     expect(m.auth).toEqual({ enabled: false, required: false });
     expect(m.web?.serverRoutes).toEqual(['/api/']);
+    expect(m.web).toMatchObject({ compute: 'auto', memoryMb: 1024 });
+    expect(m.web?.maxEnvironments).toBeUndefined();
+  });
+
+  it('takes how the server runs', () => {
+    const m = parseManifest({
+      name: 'todo',
+      web: { server: 'src/server.ts', compute: 'instance', memoryMb: 512, maxEnvironments: 40 },
+    });
+    expect(m.web).toMatchObject({ compute: 'instance', memoryMb: 512, maxEnvironments: 40 });
+    expect(() => parseManifest({ name: 'todo', web: { server: 's.ts', compute: 'lambda' } })).toThrow(
+      /web\.compute/,
+    );
+    expect(() => parseManifest({ name: 'todo', web: { server: 's.ts', maxEnvironments: 1 } })).toThrow(
+      /web\.maxEnvironments/,
+    );
+    // Deployments recorded before the setting existed decode as `auto`.
+    const stored = Schema.decodeUnknownSync(ResolvedManifest)({
+      ...parseManifest({ name: 'todo', web: { server: 's.ts' } }),
+      web: { server: 's.ts', spa: true, serverRoutes: ['/api/'], timeoutSeconds: 30, concurrency: 64 },
+    });
+    expect(stored.web).toMatchObject({ compute: 'auto', memoryMb: 1024 });
   });
 
   it('reports readable errors', () => {
@@ -487,6 +510,34 @@ describe('router decide', () => {
       'x-platform-host': { value: STORAGE_CACHE_HOST },
     });
     expect(forged.headers['x-platform-host']?.value).toBe('feeds.example.com');
+  });
+
+  it('calls a request-mode server with the stage’s secret instead of OAC', async () => {
+    const quiet: RouteRecord = { ...both, app: 'quiet', o: 'abc.lambda-url.example', c: 'r', k: 'secret-1' };
+    const { request, origins, originConfigs } = edge({
+      'quiet.example.com': quiet,
+      'shop.example.com': both,
+    });
+
+    const res = await request('quiet.example.com', '/api/todos', {
+      [ORIGIN_HEADER]: { value: 'forged' },
+    });
+    expect(origins).toEqual(['abc.lambda-url.example']);
+    expect(originConfigs[0]).toMatchObject({
+      originAccessControlConfig: { enabled: false },
+      customHeaders: { [ORIGIN_HEADER]: 'secret-1' },
+    });
+    // A viewer's copy never reaches the server; the origin's custom header carries the secret.
+    expect(res.headers[ORIGIN_HEADER]).toBeUndefined();
+    expect(res.headers['x-platform-host']?.value).toBe('quiet.example.com');
+
+    // A Web Function endpoint keeps OAC, and gets no secret either.
+    const instance = await request('shop.example.com', '/api/todos', { [ORIGIN_HEADER]: { value: 'x' } });
+    expect(instance.headers[ORIGIN_HEADER]).toBeUndefined();
+    expect(originConfigs[1]).toMatchObject({
+      originAccessControlConfig: { enabled: true, originType: 'lambda' },
+    });
+    expect(originConfigs[1]).not.toHaveProperty('customHeaders');
   });
 
   it('answers 404 for realtime until the platform entry exists', async () => {

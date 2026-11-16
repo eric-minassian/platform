@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { HOST_HEADER } from './constants.ts';
+import { HOST_HEADER, ORIGIN_HEADER } from './constants.ts';
 import { APPSYNC_REALTIME_PATH, REALTIME_KVS_KEY } from './realtime.ts';
 import { PUBLIC_STORAGE_ROOT, STORAGE_CACHE_HOST, STORAGE_PATH } from './storage.ts';
 
@@ -7,7 +7,8 @@ import { PUBLIC_STORAGE_ROOT, STORAGE_CACHE_HOST, STORAGE_PATH } from './storage
  * Builds the CloudFront Function (JavaScript runtime 2.0) that routes every
  * request on `*.<domain>`: look up the host in the KeyValueStore, then either
  * rewrite the URI into the sites bucket (the distribution's default S3 origin)
- * or switch the origin to the stage's Lambda Web Function with OAC signing.
+ * or switch the origin to the stage's server: a Lambda Web Function with OAC
+ * signing, or a request-mode function URL with the stage's origin secret.
  * `REALTIME_PATH` is answered here (the browser's config) or passed to the
  * AppSync realtime endpoint (a WebSocket). The `STORAGE_PATH` behavior runs
  * it too: a public store's file is rewritten into that behavior's origin.
@@ -90,6 +91,20 @@ async function handler(event) {
     req.querystring = {};
     req.cookies = {};
     delete req.headers['authorization'];
+    return req;
+  }
+  // A viewer's copy of the origin header never reaches a server.
+  delete req.headers[${JSON.stringify(ORIGIN_HEADER)}];
+  if (rec.c === 'r') {
+    // Request mode: a function URL, which anyone may call, so the server only answers requests
+    // carrying the stage's secret. OAC would make clients hash POST bodies (x-amz-content-sha256).
+    cf.updateRequestOrigin({
+      domainName: rec.o,
+      originAccessControlConfig: { enabled: false },
+      customOriginConfig: { port: 443, protocol: 'https', sslProtocols: ['TLSv1.2'] },
+      customHeaders: { ${JSON.stringify(ORIGIN_HEADER)}: rec.k },
+      timeouts: { readTimeout: ${readTimeout} }
+    });
     return req;
   }
   cf.updateRequestOrigin({

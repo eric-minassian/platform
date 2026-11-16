@@ -94,11 +94,19 @@ export function parseStageHost(host: string, domain: string): { app: string; sta
 export const names = {
   base: (app: string, stage: string) => `${app}--${stage}`,
   table: (app: string, stage: string) => `${app}--${stage}`,
+  /** The server's Lambda Web Function (instance mode). */
   webFunction: (app: string, stage: string) => `${app}--${stage}`,
   /**
-   * The Web Function's two endpoints, each pinned to one revision. Neither
-   * name means "current": a deploy uses whichever the live route doesn't
-   * (`live` predates the second one).
+   * The server's Lambda function in request mode. Not a worker function,
+   * though it shares their `<app>--<stage>--` prefix: a handler's own
+   * function is `…--worker--…`, or a cut of that ending in `-<hash>`.
+   */
+  requestFunction: (app: string, stage: string) => `${app}--${stage}--web`,
+  /**
+   * The Web Function's two endpoints, and the request-mode function's two
+   * aliases (each with a function URL), each pinned to one revision or
+   * version. Neither name means "current": a deploy uses whichever the live
+   * route doesn't (`live` predates the second one).
    */
   webEndpoints: () => ['live', 'live-b'] as const,
   workerFunction: (app: string, stage: string) => `${app}--${stage}--worker`,

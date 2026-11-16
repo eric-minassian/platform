@@ -38,10 +38,18 @@ export const HOST_HEADER = 'x-platform-host';
 export const TRACE_HEADER = 'x-platform-trace';
 
 /**
+ * The secret the router sends a request-mode server (a function URL anyone
+ * can call) with each request: the stage's `originSecret`. The SDK answers
+ * 403 to a request without it before any app code runs.
+ */
+export const ORIGIN_HEADER = 'x-platform-origin';
+
+/**
  * The client's `ip:port` as the edge saw the connection; IPv6 is unbracketed
  * (`2001:db8::7:51234`). CloudFront sets it and replaces any copy a client
- * sends (so does `plat dev`), and Web Function endpoints only take requests
- * signed by the edge, so apps can trust it.
+ * sends (so does `plat dev`), and servers only take requests from the edge
+ * (Web Function endpoints signed ones, request-mode servers those carrying
+ * `ORIGIN_HEADER`), so apps can trust it.
  */
 export const VIEWER_ADDRESS_HEADER = 'cloudfront-viewer-address';
 /** The client's country (ISO 3166-1 alpha-2), from the edge; absent locally. */
@@ -87,7 +95,7 @@ export const PROD_STAGE = 'prod';
 /** Stage name used by `plat dev` against the AWS Emulator. */
 export const LOCAL_STAGE = 'local';
 
-/** Lambda runtime for both Web Functions and worker (Event) Functions. */
+/** Lambda runtime for Web Functions, request-mode servers and worker (Event) Functions. */
 export const NODE_RUNTIME = 'nodejs24.x';
 
 /**
