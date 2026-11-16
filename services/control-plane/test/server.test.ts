@@ -831,6 +831,39 @@ describe('observability', () => {
     }),
   );
 
+  it.effect('reads rate limit checks for a member’s stage', () =>
+    Effect.gen(function* () {
+      const seen: Array<{ app: string; stage: string; res: string }> = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop], stages: [prodStage()] }),
+        telemetry: {
+          limits: (app, stage, range) =>
+            Effect.sync(() => {
+              seen.push({ app, stage, res: range.res });
+              return {
+                app,
+                stage,
+                res: '1h' as const,
+                limits: [{ name: 'signups', allowed: 3, denied: 9, points: [] }],
+              };
+            }),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/limits?stage=pr-4&range=7d', {
+        headers: yield* signIn('bob'),
+      });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(yield* json(res), {
+        app: 'shop',
+        stage: 'pr-4',
+        res: '1h',
+        limits: [{ name: 'signups', allowed: 3, denied: 9, points: [] }],
+      });
+      assert.deepStrictEqual(seen, [{ app: 'shop', stage: 'pr-4', res: '1h' }]);
+      assert.strictEqual((yield* request('/v1/apps/shop/limits')).status, 401);
+    }),
+  );
+
   it.effect('reads email for the live manifest’s tenant', () =>
     Effect.gen(function* () {
       const seen: Array<{ stage: string; email: unknown; res: string }> = [];

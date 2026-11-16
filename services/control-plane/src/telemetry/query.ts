@@ -11,6 +11,9 @@ import {
   type ErrorStatus,
   type JobStats,
   LATENCY_BUCKETS_MS,
+  type LimitPoint,
+  type LimitsResponse,
+  type LimitStats,
   type MetricsPoint,
   type MetricsResponse,
   percentile,
@@ -174,6 +177,40 @@ export function toJobStats(
   }));
 }
 
+/**
+ * Per-limit totals and zero-filled series from rate limit items
+ * (sk = `<iso>#<limit>`), most denied first.
+ */
+export function toLimitStats(items: readonly Item[], range: TimeRange): LimitStats[] {
+  const byLimit = new Map<string, Map<string, Item>>();
+  for (const i of items) {
+    const sk = String(i.sk);
+    const at = sk.indexOf('#');
+    const name = str(i.name, sk.slice(at + 1));
+    const buckets = byLimit.get(name) ?? new Map<string, Item>();
+    buckets.set(sk.slice(0, at), i);
+    byLimit.set(name, buckets);
+  }
+  const step = RESOLUTION_MS[range.res];
+  const end = bucketStart(range.to, range.res);
+  return [...byLimit]
+    .map(([name, buckets]) => {
+      const points: LimitPoint[] = [];
+      for (let t = bucketStart(range.from, range.res); t <= end && points.length < 2000; t += step) {
+        const ts = telemetryKeys.time(t);
+        const i = buckets.get(ts);
+        points.push({ ts, allowed: num(i?.allowed), denied: num(i?.denied) });
+      }
+      return {
+        name,
+        allowed: points.reduce((a, p) => a + p.allowed, 0),
+        denied: points.reduce((a, p) => a + p.denied, 0),
+        points,
+      };
+    })
+    .toSorted((x, y) => y.denied - x.denied || y.allowed - x.allowed || x.name.localeCompare(y.name));
+}
+
 export function toErrorGroup(i: Item): ErrorGroup {
   return {
     fingerprint: String(i.sk),
@@ -214,7 +251,7 @@ const isoRange = (r: TimeRange): [string, string] => [
   `${telemetryKeys.time(r.to)}\uffff`,
 ];
 
-/** Routes/jobs/metrics series only exist at 1h and 1d. */
+/** Routes/jobs/metrics/limits series only exist at 1h and 1d. */
 const seriesRange = (r: TimeRange): TimeRange => ({ ...r, res: r.res === '1m' ? '1h' : r.res });
 
 /** Cost items: pk `cost#<app>` (or `cost#_total`), sk `YYYY-MM-DD`, written by the cost job. */
@@ -234,6 +271,8 @@ export class TelemetryQuery extends Context.Service<
       range: TimeRange,
       declared: ReadonlyArray<{ kind: JobStats['kind']; name: string }>,
     ): Effect.Effect<ReadonlyArray<JobStats>>;
+    /** Rate limit checks per limit, at 1h or 1d. */
+    limits(app: string, stage: string, range: TimeRange): Effect.Effect<LimitsResponse>;
     /** Most recently seen first. */
     errors(app: string, stage: string): Effect.Effect<ReadonlyArray<ErrorGroup>>;
     /** Triage from the console (the one write the API makes here); false when there's no such group. */
@@ -311,6 +350,17 @@ export class TelemetryQuery extends Context.Service<
         const r = seriesRange(range);
         const [a, b] = isoRange(r);
         return toJobStats(yield* queryRange(telemetryKeys.job(app, stage, r.res), a, b), declared);
+      }, Effect.orDie);
+
+      const limits = Effect.fn('TelemetryQuery.limits')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const r = seriesRange(range);
+        const [a, b] = isoRange(r);
+        const items = yield* queryRange(telemetryKeys.limit(app, stage, r.res), a, b);
+        return { app, stage, res: r.res, limits: toLimitStats(items, r) } satisfies LimitsResponse;
       }, Effect.orDie);
 
       const errors = Effect.fn('TelemetryQuery.errors')(function* (app: string, stage: string) {
@@ -392,7 +442,17 @@ export class TelemetryQuery extends Context.Service<
         return summarizeHealth(toMetricsPoints(items, range), items, up);
       }, Effect.orDie);
 
-      return TelemetryQuery.of({ metrics, routes, jobs, errors, setErrorStatus, uptime, cost, health });
+      return TelemetryQuery.of({
+        metrics,
+        routes,
+        jobs,
+        limits,
+        errors,
+        setErrorStatus,
+        uptime,
+        cost,
+        health,
+      });
     }),
   );
 }

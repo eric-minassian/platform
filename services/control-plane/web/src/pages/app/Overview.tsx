@@ -3,7 +3,7 @@ import { Option } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, Lines, SERIES_COLORS, StackedArea } from '../../components/charts.tsx';
-import { Card, Loaded, Stat } from '../../components/ui.tsx';
+import { Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
 import { fmtMs, fmtNum, fmtPct } from '../../format.ts';
 import { type Scope, useApp } from '../AppLayout.tsx';
 
@@ -17,6 +17,11 @@ const uptimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) 
 );
 const realtimeAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
   fresh(ApiClient.query('observe', 'realtime', { params: { app }, query: { stage, range }, timeToLive }), {
+    every: '60 seconds',
+  }),
+);
+const limitsAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
+  fresh(ApiClient.query('observe', 'limits', { params: { app }, query: { stage, range }, timeToLive }), {
     every: '60 seconds',
   }),
 );
@@ -99,6 +104,7 @@ export function OverviewTab() {
               </Card>
             </div>
             <RealtimeSection app={app} scope={scope} />
+            <RateLimitsSection app={app} scope={scope} />
           </div>
         );
       }}
@@ -147,6 +153,52 @@ function RealtimeSection({ app, scope }: { app: string; scope: Scope }) {
             { key: 'events', label: 'events', color: SERIES_COLORS.value },
             { key: 'subscribes', label: 'subscribes', color: SERIES_COLORS.p50 },
             { key: 'errors', label: 'errors', color: SERIES_COLORS.s5xx },
+          ]}
+        />
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Checks of the app's `RateLimits` in the range, shown only when there were
+ * any: allowed and denied per limit, and all of them over time. Denials are a
+ * 4xx answer, so they take the 4xx color, beside allowed checks in the 2xx one.
+ */
+function RateLimitsSection({ app, scope }: { app: string; scope: Scope }) {
+  const result = useAtomValue(limitsAtom({ app, ...scope }));
+  const r = Option.getOrUndefined(AsyncResult.value(result));
+  if (!r?.limits.length) return null;
+  // Every limit has one point per bucket of the same range, so they sum by position.
+  const data = r.limits[0]!.points.map((p, i) => ({
+    ts: p.ts,
+    allowed: r.limits.reduce((a, l) => a + (l.points[i]?.allowed ?? 0), 0),
+    denied: r.limits.reduce((a, l) => a + (l.points[i]?.denied ?? 0), 0),
+  }));
+  return (
+    <Card title="Rate limits" actions={<span className="text-[11px] text-muted">{r.res} buckets</span>}>
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <Table head={['Limit', 'Allowed', 'Denied', 'Denied %']}>
+          {r.limits.map((l) => (
+            <tr key={l.name}>
+              <td>
+                <Mono>{l.name}</Mono>
+              </td>
+              <td className="tabular-nums">{fmtNum(l.allowed)}</td>
+              <td className={l.denied ? 'font-medium text-warn tabular-nums' : 'tabular-nums'}>
+                {fmtNum(l.denied)}
+              </td>
+              <td className="tabular-nums">{fmtPct(l.denied / (l.allowed + l.denied))}</td>
+            </tr>
+          ))}
+        </Table>
+        <StackedArea
+          data={data}
+          range={scope.range}
+          format={fmtNum}
+          series={[
+            { key: 'allowed', label: 'allowed', color: SERIES_COLORS.s2xx },
+            { key: 'denied', label: 'denied', color: SERIES_COLORS.s4xx },
           ]}
         />
       </div>

@@ -12,6 +12,7 @@ import {
   type DataCollections,
   type DataPage,
   names,
+  RATE_LIMIT_PK_PREFIX,
   type StoredObjectInfo,
 } from '@ericminassian/platform-core';
 import { BadRequest, NotFound } from '@ericminassian/platform-core/platform-api';
@@ -92,7 +93,10 @@ export class DataBrowser extends Context.Service<
                 new ScanCommand({
                   TableName: names.table(app, stage),
                   ProjectionExpression: '#c',
-                  ExpressionAttributeNames: { '#c': '_c' },
+                  // Rate-limit counters aren't documents: one per client, they'd crowd the sample.
+                  FilterExpression: 'NOT begins_with(#pk, :rl)',
+                  ExpressionAttributeNames: { '#c': '_c', '#pk': 'pk' },
+                  ExpressionAttributeValues: { ':rl': RATE_LIMIT_PK_PREFIX },
                   ExclusiveStartKey,
                   Limit: 1000,
                 }),

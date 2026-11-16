@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import type { DataCollections, LogLine, TelemetryEvent } from '@ericminassian/platform-core';
+import type { DataCollections, LimitsResponse, LogLine, TelemetryEvent } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { formatEvent } from '../dev/pretty.ts';
@@ -8,6 +8,23 @@ import { shortTime, sinceRange } from '../util/time.ts';
 import { action, apiFor, appFor, type CommonOpts, withTarget } from './common.ts';
 
 type TargetOpts = CommonOpts & { stage: string };
+
+/** `plat metrics`' rate limits: checks per limit, most denied first, with denials over time. */
+export function formatLimits(limits: LimitsResponse['limits']): string[] {
+  const pct = (denied: number, total: number) => (total ? `${((denied / total) * 100).toFixed(1)}%` : '-');
+  return [
+    pc.bold('rate limits'),
+    table(
+      limits.map((l) => ({
+        limit: l.name,
+        allowed: l.allowed,
+        denied: l.denied ? pc.yellow(String(l.denied)) : 0,
+        'denied %': pct(l.denied, l.allowed + l.denied),
+        'denied over time': sparkline(l.points.map((p) => p.denied)),
+      })),
+    ),
+  ];
+}
 
 export function registerObserve(program: Command): void {
   withTarget(
@@ -69,14 +86,14 @@ export function registerObserve(program: Command): void {
   withTarget(
     program
       .command('metrics')
-      .description('requests, errors, latency, jobs and realtime for a stage')
+      .description('requests, errors, latency, jobs, realtime and rate limits for a stage')
       .option('--since <duration>', 'time range', '6h'),
   ).action(
     action(async (opts: TargetOpts & { since: string }) => {
       const api = apiFor(opts);
       const app = await appFor(opts);
       const range = sinceRange(opts.since);
-      const [metrics, routes, jobs, realtime] = await Promise.all([
+      const [metrics, routes, jobs, realtime, limits] = await Promise.all([
         api.metrics(app, { stage: opts.stage, ...range }),
         api.routes(app, { stage: opts.stage, from: range.from, to: range.to }).catch(() => []),
         api
@@ -84,8 +101,17 @@ export function registerObserve(program: Command): void {
           .catch(() => ({ jobs: [], queues: [] })),
         // Control planes from before realtime answer 404.
         api.realtime(app, { stage: opts.stage, ...range }).catch(() => undefined),
+        // Likewise for rate limits.
+        api.limits(app, { stage: opts.stage, from: range.from, to: range.to }).catch(() => undefined),
       ]);
-      result({ metrics, routes, ...jobs, ...(realtime?.enabled ? { realtime } : {}) }, (v) => {
+      const shown = {
+        metrics,
+        routes,
+        ...jobs,
+        ...(realtime?.enabled ? { realtime } : {}),
+        rateLimits: limits?.limits ?? [],
+      };
+      result(shown, (v) => {
         const pts = v.metrics.points;
         const total = pts.reduce((a, p) => a + p.req, 0);
         const errors = pts.reduce((a, p) => a + p.s5xx, 0);
@@ -141,6 +167,7 @@ export function registerObserve(program: Command): void {
             `  errors    ${String(rt.totals.errors).padStart(8)}  ${pc.red(sparkline(rtPts.map((p) => p.errors)))}`,
           );
         }
+        if (v.rateLimits.length) lines.push('', ...formatLimits(v.rateLimits));
         if (v.queues.length) {
           lines.push(
             '',

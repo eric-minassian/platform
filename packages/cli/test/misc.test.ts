@@ -1,7 +1,8 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripVTControlCharacters } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { formatCollections, parsePartition } from '../src/commands/observe.ts';
+import { formatCollections, formatLimits, parsePartition } from '../src/commands/observe.ts';
 import { nextRun } from '../src/dev/crons.ts';
 import { readDotEnv } from '../src/dev/local-stage.ts';
 import { prettyLine } from '../src/dev/pretty.ts';
@@ -92,5 +93,27 @@ describe('dev helpers', () => {
     expect(prettyLine('plain text')).toBe('plain text');
     const lambdaPrefixed = `2026-11-14T00:00:00Z\tabc\tINFO\t${JSON.stringify({ _p: 1, t: 'log', ts: 1, app: 'a', stage: 's', rev: 'd', level: 'info', msg: 'hi' })}`;
     expect(prettyLine(lambdaPrefixed)).toContain('hi');
+  });
+
+  it('prints rate limit refusals only', () => {
+    const limit = (ok: boolean) =>
+      JSON.stringify({ _p: 1, t: 'limit', ts: 1, app: 'a', stage: 'local', rev: 'd', name: 'signups', ok });
+    expect(stripVTControlCharacters(prettyLine(limit(false)) ?? '')).toBe('rate limit signups: over');
+    expect(prettyLine(limit(true))).toBeNull();
+  });
+});
+
+describe('plat metrics rate limits', () => {
+  it('lists each limit with its denials over time, most denied first as the API sorts them', () => {
+    const point = (denied: number) => ({ ts: '2026-11-15T10:00:00.000Z', allowed: 1, denied });
+    const lines = formatLimits([
+      { name: 'signups', allowed: 30, denied: 10, points: [point(0), point(4), point(6)] },
+      { name: 'writes', allowed: 500, denied: 0, points: [point(0), point(0), point(0)] },
+    ]).map((l) => stripVTControlCharacters(l));
+    expect(lines[0]).toBe('rate limits');
+    const rows = lines[1]!.split('\n').map((r) => r.trimEnd());
+    expect(rows[0]).toMatch(/^limit\s+allowed\s+denied\s+denied %\s+denied over time$/);
+    expect(rows[1]).toMatch(/^signups\s+30\s+10\s+25\.0%\s+▁▆█$/);
+    expect(rows[2]).toMatch(/^writes\s+500\s+0\s+0\.0%\s+▁▁▁$/);
   });
 });

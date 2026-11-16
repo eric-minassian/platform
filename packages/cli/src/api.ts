@@ -20,6 +20,7 @@ import {
   type EmailStatsResponse,
   type ErrorGroup,
   type JobStats,
+  type LimitsResponse,
   type LogLine,
   type LogsResponse,
   type MeResponse,
@@ -255,6 +256,9 @@ export class ApiClient {
   }
   realtime(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
     return this.request<RealtimeStatsResponse>('GET', `/v1/apps/${enc(app)}/realtime`, { query: q });
+  }
+  limits(app: string, q: { stage: string; from: number; to: number }) {
+    return this.request<LimitsResponse>('GET', `/v1/apps/${enc(app)}/limits`, { query: q });
   }
   async errors(app: string, q: { stage: string }): Promise<ErrorGroup[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/errors`, { query: q }), 'errors');
