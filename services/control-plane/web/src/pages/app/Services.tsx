@@ -5,13 +5,14 @@ import type { ReactNode } from 'react';
 import { ApiClient, failure, fresh, timeToLive } from '../../client.ts';
 import { Lines, SERIES_COLORS } from '../../components/charts.tsx';
 import { Badge, Button, Card, Empty, ErrorBox, Loaded, Mono, type Tone } from '../../components/ui.tsx';
-import { fmtDateTime, fmtNum, fmtUsd, relTime, shortId } from '../../format.ts';
+import { fmtDateTime, fmtNum, fmtUsdCents, relTime, shortId } from '../../format.ts';
 import { type Scope, useApp } from '../AppLayout.tsx';
 
 /** Reactivity key of an app's services: starting, stopping or restarting one refetches them. */
 const servicesChanged = (app: string) => [`services:${app}`];
 
-const settling: ReadonlySet<ServiceState> = new Set(['starting', 'failing']);
+// A failing service stays failing until someone changes it, so only a start is followed closely.
+const settling: ReadonlySet<ServiceState> = new Set(['starting']);
 
 const servicesAtom = Atom.family(({ app, stage, range }: Scope & { app: string }) =>
   fresh(
@@ -92,9 +93,9 @@ function ServiceCard({
           </Fact>
           <Fact label="If always on">
             <span
-              title={`${fmtUsd(s.monthly.computeUsd)} compute + ${fmtUsd(s.monthly.publicIpv4Usd)} public IPv4`}
+              title={`${fmtUsdCents(s.monthly.computeUsd)} compute + ${fmtUsdCents(s.monthly.publicIpv4Usd)} public IPv4`}
             >
-              ≈ {fmtUsd(s.monthly.totalUsd)}/month
+              ≈ {fmtUsdCents(s.monthly.totalUsd)}/month
             </span>
           </Fact>
         </dl>
@@ -135,7 +136,7 @@ function ServiceCard({
               <ul className="space-y-1 font-mono text-[11px]">
                 {events.map((e) => (
                   <li key={`${e.at}${e.message}`} className="flex gap-2">
-                    <span className="shrink-0 text-muted" title={fmtDateTime(e.at)}>
+                    <span className="w-16 shrink-0 text-muted" title={fmtDateTime(e.at)}>
                       {relTime(e.at)}
                     </span>
                     <span className="min-w-0 break-words">{e.message}</span>
