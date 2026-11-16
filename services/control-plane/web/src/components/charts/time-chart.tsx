@@ -11,7 +11,7 @@ import { scaleLinear } from '@tanstack/charts/scales/linear';
 import { tooltip } from '@tanstack/charts/tooltip';
 import { scaleLog, scaleTime, scaleUtc } from 'd3-scale';
 import { useMemo } from 'react';
-import { axisTimeFormat, bucketFormat } from '../../lib/time.ts';
+import { axisTimeFormat, bucketFormat, timeFormat } from '../../lib/time.ts';
 import { useChartGroup } from './chart-group.tsx';
 import { ChartOverlay, usePlotGeometry, useZoomDrag } from './overlay.tsx';
 
@@ -126,12 +126,17 @@ export function TimeChart({
           ])
           .clamp(true)
       : scaleLinear().domain([0, niceTop(top)]);
-    const bucket = bucketFormat(span, group.utc);
+    // A UTC day bucket starts at midnight, so its date alone names it (in local time it may not).
+    const bucket =
+      stepMs >= 86_400_000 && group.utc
+        ? timeFormat(true, { month: 'short', day: 'numeric' })
+        : bucketFormat(span, group.utc);
 
     const data =
       kind === 'bar'
         ? barY(rows, {
-            x: 't',
+            // barY centers a bar on x: at the bucket's middle it fills the bucket, not half the one before.
+            x: (d) => new Date(d.t.getTime() + stepMs / 2),
             y: 'v',
             z: 'key',
             fill: (d) => d.color,
