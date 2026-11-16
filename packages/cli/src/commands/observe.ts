@@ -1,11 +1,24 @@
 import { readFileSync } from 'node:fs';
 import {
+  checkSeriesQuery,
   type CustomMetricsResponse,
   type DataCollections,
+  describeQuery,
   type LimitsResponse,
   type LogLine,
+  METRIC_STATS,
+  QueryResolution,
   RESOURCE_KEY_PATTERN,
+  STATUS_CLASSES,
+  type SeriesFilter,
+  SeriesGroupBy,
+  SeriesMetric,
+  SeriesOutcome,
+  type SeriesQuery,
+  type SeriesResponse,
+  SeriesStat,
   SLOW_TRACE_MS,
+  type StatusClass,
   type TelemetryEvent,
   TRACE_SAMPLE_RATE,
 } from '@ericminassian/platform-core';
@@ -57,6 +70,127 @@ export function formatLimits(limits: LimitsResponse['limits']): string[] {
       })),
     ),
   ];
+}
+
+/** The flags that make one explorer query (`plat metrics --metric`, `plat alerts create`). */
+export interface SeriesFlags {
+  metric?: string;
+  stat?: string;
+  filter?: string[];
+  by?: string;
+}
+
+const usage = (message: string) => new CliError(message, { exitCode: EXIT.usage });
+
+const oneOf = <L extends string>(literals: readonly L[], value: string, flag: string): L => {
+  const found = literals.find((l) => l === value);
+  if (found === undefined) throw usage(`${flag} is one of ${literals.join(', ')}, not "${value}"`);
+  return found;
+};
+
+/**
+ * `--filter key=value` flags as a query's filter: `route`, `status`, `job`
+ * and `name` may repeat (any of them matches), `outcome` and `measure` can't.
+ */
+export function parseSeriesFilter(pairs: readonly string[]): SeriesFilter | undefined {
+  const routes: string[] = [];
+  const status: StatusClass[] = [];
+  const jobs: string[] = [];
+  const names: string[] = [];
+  let outcome: SeriesOutcome | undefined;
+  let measure: string | undefined;
+  for (const pair of pairs) {
+    const at = pair.indexOf('=');
+    const key = pair.slice(0, Math.max(at, 0)).trim();
+    const value = pair.slice(at + 1).trim();
+    if (at <= 0 || !value) throw usage(`--filter expects key=value, got "${pair}"`);
+    if (key === 'route') routes.push(value);
+    else if (key === 'status') status.push(oneOf(STATUS_CLASSES, value, 'status'));
+    else if (key === 'job') jobs.push(value);
+    else if (key === 'name') names.push(value);
+    else if ((key === 'outcome' && outcome) || (key === 'measure' && measure))
+      throw usage(`--filter ${key} can be given once`);
+    else if (key === 'outcome') outcome = oneOf(SeriesOutcome.literals, value, 'outcome');
+    else if (key === 'measure') measure = value;
+    else throw usage(`--filter keys are route, status, job, name, outcome and measure, not "${key}"`);
+  }
+  const filter: SeriesFilter = {
+    ...(routes.length ? { routes } : {}),
+    ...(status.length ? { status } : {}),
+    ...(jobs.length ? { jobs } : {}),
+    ...(names.length ? { names } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(measure ? { measure } : {}),
+  };
+  return Object.keys(filter).length ? filter : undefined;
+}
+
+/**
+ * The query the flags describe, checked as the API would (`alert`: as a
+ * rule's). Over `base` (a rule being changed), what isn't given stays as it
+ * was while the metric does.
+ */
+export function seriesQueryOf(
+  flags: SeriesFlags,
+  options: { readonly alert?: boolean; readonly base?: SeriesQuery } = {},
+): SeriesQuery {
+  const { base } = options;
+  const given = flags.metric ?? base?.metric;
+  if (given === undefined) throw usage('--metric is required');
+  const metric = oneOf(SeriesMetric.literals, given, '--metric');
+  const kept = metric === base?.metric ? base : undefined;
+  const stat =
+    flags.stat === undefined
+      ? (kept?.stat ?? METRIC_STATS[metric][0]!)
+      : oneOf(SeriesStat.literals, flags.stat, '--stat');
+  const filter = flags.filter?.length ? parseSeriesFilter(flags.filter) : kept?.filter;
+  const groupBy = flags.by === undefined ? kept?.groupBy : oneOf(SeriesGroupBy.literals, flags.by, '--by');
+  const query: SeriesQuery = { metric, stat, ...(filter ? { filter } : {}), ...(groupBy ? { groupBy } : {}) };
+  const problem = checkSeriesQuery(query, options);
+  if (problem) throw usage(problem);
+  return query;
+}
+
+export const resolutionOf = (res: string): QueryResolution => oneOf(QueryResolution.literals, res, '--res');
+
+const UNIT_SUFFIX: Record<string, string> = { percent: '%', ms: ' ms', per_second: '/s', count: '' };
+
+/** A value with its unit: `2.5%`, `120 ms`, `0.4/s`, `12 usd`. */
+export function formatSeriesValue(v: number | null | undefined, unit: string): string {
+  if (v === null || v === undefined) return '-';
+  const n = Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+  return `${n}${UNIT_SUFFIX[unit] ?? ` ${unit}`}`;
+}
+
+/**
+ * `plat metrics --metric`: what the query measures, then a line per series
+ * with its total (counts and sums) or average, its highest bucket and a
+ * sparkline, and why the answer differs from what was asked.
+ */
+export function formatSeries(r: SeriesResponse, query: SeriesQuery, heading: string): string {
+  const additive = query.stat === 'count' || query.stat === 'sum' || query.stat === 'histogram';
+  const unit = query.stat === 'histogram' ? 'count' : r.unit;
+  const rows = r.series.map((s) => {
+    const values = s.values.filter((v): v is number => v !== null);
+    const total = values.reduce((a, b) => a + b, 0);
+    return {
+      series: s.key,
+      [additive ? 'total' : 'avg']: values.length
+        ? formatSeriesValue(additive ? total : total / values.length, unit)
+        : '-',
+      max: values.length ? formatSeriesValue(Math.max(...values), unit) : '-',
+      'over time': sparkline([...s.values]),
+    };
+  });
+  const lines = [
+    heading,
+    `${describeQuery(query)} ${pc.dim(`· ${r.res} buckets`)}`,
+    '',
+    rows.length ? table(rows) : pc.dim('(no data)'),
+  ];
+  if (query.stat === 'histogram') lines.push(pc.dim('each bucket’s latency histogram is in --json'));
+  if (r.note) lines.push(pc.dim(`note: ${r.note}`));
+  return lines.join('\n');
 }
 
 export function registerObserve(program: Command): void {
@@ -128,12 +262,36 @@ export function registerObserve(program: Command): void {
   withTarget(
     program
       .command('metrics')
-      .description('requests, errors, latency, jobs, realtime, custom metrics and rate limits for a stage')
-      .option('--since <duration>', 'time range', '6h'),
+      .description(
+        'requests, errors, latency, jobs, realtime, custom metrics and rate limits for a stage, or with --metric one query (a line per group)',
+      )
+      .option('--since <duration>', 'time range', '6h')
+      .option('--metric <metric>', `query one metric: ${SeriesMetric.literals.join(', ')}`)
+      .option('--stat <stat>', "how each bucket is summarized (default: the metric's own, e.g. count or p95)")
+      .option(
+        '--filter <key=value>',
+        'route, status, job, name (repeatable), outcome or measure',
+        (value: string, previous: string[] | undefined) => [...(previous ?? []), value],
+      )
+      .option('--by <dimension>', `one line per ${SeriesGroupBy.literals.join(', ')}`)
+      .option('--res <res>', `bucket size: ${QueryResolution.literals.join(', ')}`),
   ).action(
-    action(async (opts: TargetOpts & { since: string }) => {
+    action(async (opts: TargetOpts & SeriesFlags & { since: string; res?: string }) => {
       const api = apiFor(opts);
       const app = await appFor(opts);
+      if (opts.metric === undefined) {
+        if (opts.stat || opts.filter?.length || opts.by || opts.res)
+          throw new CliError('--stat, --filter, --by and --res go with --metric', { exitCode: EXIT.usage });
+      } else {
+        const query = seriesQueryOf(opts);
+        const res = opts.res === undefined ? undefined : resolutionOf(opts.res);
+        const { from, to } = sinceRange(opts.since);
+        const r = await api.series(app, { stage: opts.stage, query, from, to, ...(res ? { res } : {}) });
+        result(r, (v) =>
+          formatSeries(v, query, `${pc.bold(app)} ${pc.dim(`${opts.stage} · last ${opts.since}`)}`),
+        );
+        return;
+      }
       const range = sinceRange(opts.since);
       const [metrics, routes, jobs, realtime, custom, limits] = await Promise.all([
         api.metrics(app, { stage: opts.stage, ...range }),
