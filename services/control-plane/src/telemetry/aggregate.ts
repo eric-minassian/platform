@@ -15,9 +15,13 @@ import {
 } from '@ericminassian/platform-core';
 import { Option, Predicate, Schema } from 'effect';
 
-/** Whole-stage HTTP series get minute resolution; per-route/job/metric series start at hourly. */
-const STAGE_RES: readonly Resolution[] = ['1m', '1h', '1d'];
-const SERIES_RES: readonly Resolution[] = ['1h', '1d'];
+/**
+ * Every series at every resolution: the explorer charts and alert rules watch
+ * routes, jobs, custom metrics and rate limits by the minute too. A batch
+ * writes one row per series and bucket, so writes follow traffic and an idle
+ * stage writes nothing.
+ */
+const RESOLUTIONS: readonly Resolution[] = ['1m', '1h', '1d'];
 
 export interface RollupUpdate {
   pk: string;
@@ -26,6 +30,8 @@ export interface RollupUpdate {
   add: Record<string, number>;
   /** Attributes to `SET` (labels, last-run times). */
   set: Record<string, string | number>;
+  /** Attributes that keep the largest value written (custom metrics' `max`); see `rollupUpdateInput`. */
+  max?: Record<string, number>;
   /** Epoch seconds (DynamoDB TTL attribute `ttl`). */
   ttl: number;
 }
@@ -93,6 +99,7 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
     bucket: number,
     add: Record<string, number>,
     set: Record<string, string | number> = {},
+    max: Record<string, number> = {},
   ) => {
     const key = `${pk}\u0000${sk}`;
     let u = rollups.get(key);
@@ -101,6 +108,10 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
       rollups.set(key, u);
     }
     for (const [k, v] of Object.entries(add)) u.add[k] = (u.add[k] ?? 0) + v;
+    for (const [k, v] of Object.entries(max)) {
+      u.max ??= {};
+      u.max[k] = Math.max(u.max[k] ?? v, v);
+    }
     for (const [k, v] of Object.entries(set)) {
       // For timestamps keep the latest; for labels the value is constant anyway.
       const prev = u.set[k];
@@ -122,14 +133,14 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         const add: Record<string, number> = { req: 1, dur: e.dur, [`l${latencyBucket(e.dur)}`]: 1 };
         if (cls) add[cls] = 1;
         if (e.cold) add.cold = 1;
-        for (const res of STAGE_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, add);
         }
         const routeAdd: Record<string, number> = { req: 1, [`l${latencyBucket(e.dur)}`]: 1 };
-        if (e.status >= 500) routeAdd.s5xx = 1;
-        else if (e.status >= 400) routeAdd.s4xx = 1;
-        for (const res of SERIES_RES) {
+        if (cls) routeAdd[cls] = 1;
+        if (e.cold) routeAdd.cold = 1;
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(
             telemetryKeys.route(app, stage, res),
@@ -147,7 +158,7 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
           [e.status === 'ok' ? 'ok' : 'error']: 1,
           [`l${latencyBucket(e.dur)}`]: 1,
         };
-        for (const res of SERIES_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(
             telemetryKeys.job(app, stage, res),
@@ -165,7 +176,7 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         break;
       }
       case 'metric': {
-        for (const res of SERIES_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(
             telemetryKeys.metric(app, stage, res),
@@ -174,12 +185,13 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
             b,
             { count: 1, sum: e.value },
             { name: e.name, ...(e.unit ? { unit: e.unit } : {}) },
+            { max: e.value },
           );
         }
         break;
       }
       case 'limit': {
-        for (const res of SERIES_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(
             telemetryKeys.limit(app, stage, res),
@@ -198,13 +210,13 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         // A server's INIT, for the compute chooser's cold starts.
         const init: Record<string, number> =
           e.runtime === 'web' && e.initMs !== undefined ? { webInitMs: e.initMs, webInits: 1 } : {};
-        for (const res of STAGE_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { [field]: 1, ...init });
         }
         // A service's container starts sit next to its runs, on its job series.
         if (e.runtime === 'service' && e.name) {
-          for (const res of SERIES_RES) {
+          for (const res of RESOLUTIONS) {
             const b = bucketStart(ts, res);
             bump(
               telemetryKeys.job(app, stage, res),
@@ -219,7 +231,7 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         break;
       }
       case 'err': {
-        for (const res of STAGE_RES) {
+        for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { errors: 1 });
         }
@@ -268,7 +280,12 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
   return { rollups: [...rollups.values()], errors: [...errors.values()], events: events.length };
 }
 
-/** DynamoDB UpdateItem input for one rollup: `SET ttl, labels ADD counters`. */
+/**
+ * DynamoDB UpdateItem input for one rollup: `SET ttl, labels ADD counters`.
+ * An update can't keep a maximum, so `max` attributes are only set when the
+ * row has none, and the update returns the row: `maxFollowUps` then raises
+ * those the batch beat, which after a bucket's first few batches is rare.
+ */
 export function rollupUpdateInput(table: string, u: RollupUpdate) {
   const names: Record<string, string> = { '#ttl': 'ttl' };
   const values: Record<string, unknown> = { ':ttl': u.ttl };
@@ -284,11 +301,39 @@ export function rollupUpdateInput(table: string, u: RollupUpdate) {
     values[`:s${i}`] = v;
     sets.push(`#s${i} = :s${i}`);
   });
+  const max = Object.entries(u.max ?? {});
+  max.forEach(([k, v], i) => {
+    names[`#x${i}`] = k;
+    values[`:x${i}`] = v;
+    sets.push(`#x${i} = if_not_exists(#x${i}, :x${i})`);
+  });
   return {
     TableName: table,
     Key: { pk: u.pk, sk: u.sk },
     UpdateExpression: `SET ${sets.join(', ')}${adds.length ? ` ADD ${adds.join(', ')}` : ''}`,
     ExpressionAttributeNames: names,
     ExpressionAttributeValues: values,
+    ...(max.length ? { ReturnValues: 'ALL_NEW' as const } : {}),
   };
+}
+
+/**
+ * The updates that raise a rollup's `max` attributes to the batch's, given
+ * the row `rollupUpdateInput` returned. Each applies only while the stored
+ * value is still lower, so concurrent batches keep the largest.
+ */
+export function maxFollowUps(table: string, u: RollupUpdate, row: Record<string, unknown> | undefined) {
+  return Object.entries(u.max ?? {})
+    .filter(([k, v]) => {
+      const stored = row?.[k];
+      return typeof stored === 'number' && stored < v;
+    })
+    .map(([k, v]) => ({
+      TableName: table,
+      Key: { pk: u.pk, sk: u.sk },
+      UpdateExpression: 'SET #m = :m',
+      ConditionExpression: '#m < :m',
+      ExpressionAttributeNames: { '#m': k },
+      ExpressionAttributeValues: { ':m': v },
+    }));
 }

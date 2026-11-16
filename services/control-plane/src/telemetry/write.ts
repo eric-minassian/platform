@@ -5,11 +5,11 @@
 import { PublishCommand } from '@aws-sdk/client-sns';
 import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { Cause, Context, Effect, Layer, Option } from 'effect';
-import { Aws, tryAws } from '../aws.ts';
+import { Aws, AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 import { GitHub } from '../github.ts';
 import { Store } from '../store.ts';
-import { type Aggregation, type ErrorGroupUpdate, rollupUpdateInput } from './aggregate.ts';
+import { type Aggregation, type ErrorGroupUpdate, maxFollowUps, rollupUpdateInput } from './aggregate.ts';
 
 /** Where the console shows an error group. */
 export function errorGroupUrl(consoleUrl: string, g: Pick<ErrorGroupUpdate, 'app' | 'stage' | 'sk'>): string {
@@ -129,7 +129,21 @@ export class TelemetryWriter extends Context.Service<
         const { telemetryTable } = yield* settings.runtime;
         yield* Effect.forEach(
           aggregation.rollups,
-          (u) => tryAws(() => aws.ddb().send(new UpdateCommand(rollupUpdateInput(telemetryTable, u)))),
+          (u) =>
+            Effect.gen(function* () {
+              const res = yield* tryAws(() =>
+                aws.ddb().send(new UpdateCommand(rollupUpdateInput(telemetryTable, u))),
+              );
+              // A concurrent batch that raised it further already wrote the larger value.
+              yield* Effect.forEach(
+                maxFollowUps(telemetryTable, u, res.Attributes),
+                (input) =>
+                  tryAws(() => aws.ddb().send(new UpdateCommand(input))).pipe(
+                    Effect.catchIf(AwsError.is('ConditionalCheckFailedException'), () => Effect.void),
+                  ),
+                { discard: true },
+              );
+            }),
           { concurrency: 16, discard: true },
         ).pipe(Effect.orDie);
 
