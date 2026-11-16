@@ -2,9 +2,9 @@
 
 A personal, AI-first PaaS on a single AWS account. An agent (or a person) can
 take an idea to `https://<app>.ericminassian.com` with auth, a database,
-queues, events, cron, file storage, live updates to browsers, email, CI/CD,
-preview environments and built-in observability, with no setup per app. Idle apps cost
-about nothing.
+queues, events, cron, file storage, live updates to browsers, email,
+long-running services, CI/CD, preview environments and built-in observability,
+with no setup per app. Idle apps cost about nothing.
 
 Status: scaffold (November 2026). Decisions below were made with Eric; the
 "Decision log" at the end records why.
@@ -17,8 +17,10 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
   cloud-neutral `plat.config.ts`. No CloudFormation, CDK or AWS SDK calls in
   apps; the platform's control plane provisions everything with direct AWS API
   calls. Apps stay portable.
-- **Cheap at rest.** Everything scales to zero. No VPCs, NAT gateways, load
-  balancers, customer-managed KMS keys or Secrets Manager by default.
+- **Cheap at rest.** Everything scales to zero. No NAT gateways, load
+  balancers, customer-managed KMS keys or Secrets Manager. The one exception
+  is opt-in: a long-running service an app declares bills while it runs. Its
+  network (a VPC with public subnets, no NAT) is free.
 - **Single AWS account** (`platform-prod` in Eric's existing organization; no
   per-app accounts). DynamoDB only for now.
 - **Observability built in.** Every request, job and error is instrumented by
@@ -48,7 +50,7 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
      │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  ├─┘
      │             group · worker Lambda (queues/events/crons) · Cognito client ·  │
      │             channel namespace · SES tenant · IAM role (scoped, boundary) ·  ├──► SES (mail.platform…,
-     │             log groups                                                      │     a tenant per stage)
+     │             log groups · ECS services (Fargate, opt-in) ──► WebSocket/SSE   │     a tenant per stage)
      └──────────────────────────────────────┬─────────────────────────────────────┘
                                             │ stdout JSON telemetry
                               CloudWatch Logs ──(account-level subscription)──► telemetry processor
@@ -59,15 +61,15 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 
 ### Components
 
-| Component                                  | What it is                                                                                                                                                                                                                            |
-| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, and the control plane API (`PlatformApi`), all as Effect schemas. Isomorphic.                                                 |
-| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented.             |
-| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                                   |
-| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                                    |
-| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper, storage expiry.                                                                                                       |
-| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, the SES mail domain, IAM) as one CDK stack, and the deploy that brings up the control plane on them. |
-| `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                               |
+| Component                                  | What it is                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, and the control plane API (`PlatformApi`), all as Effect schemas. Isomorphic.                                                                                          |
+| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented.                                                      |
+| `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                                                                            |
+| `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                                                                             |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper, storage expiry.                                                                                                                                                |
+| `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, the SES mail domain, container network, cluster and registry, IAM) as one CDK stack, and the deploy that brings up the control plane on them. |
+| `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                                                        |
 
 ## The app contract
 
@@ -100,6 +102,7 @@ const app = defineApp({
     channels: { 'user/*': channel<TodoChanged>() }, // browsers subscribe; server and worker publish
   },
   email: { name: 'Todo', dailyLimit: 500 }, // or `true`; sends from todo@mail.platform.ericminassian.com
+  services: { firehose: { entry: 'src/firehose.ts' } }, // long-running; cpu, memoryMb, spot, previewMinutes
 });
 export default app;
 
@@ -159,6 +162,9 @@ declare module '@ericminassian/platform/config' {
 - **Storage**: the `Storage` service's stores; browsers fetch a public store's
   files with `storageUrl` from `@ericminassian/platform/client`. See
   [Storage](#storage).
+- **Services**: `export default defineService({ layer, run })`. `run` holds a
+  connection open and writes what arrives through the same SDK services. See
+  [Long-running services](#long-running-services).
 - **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
   `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
   against both it and DynamoDB in the emulator.
@@ -189,11 +195,13 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Table        | `todo--prod`                                                                                                                                                          |
 | Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                                                                                                                       |
 | Bus / rules  | `todo--prod` / `todo--prod--<event>`                                                                                                                                  |
-| Schedules    | group `todo--prod`                                                                                                                                                    |
+| Schedules    | group `todo--prod` (crons; `<service>--stop` for preview services)                                                                                                    |
+| Services     | ECS service and task definition family `todo--prod--<service>`                                                                                                        |
+| Images       | `platform-containers:todo--prod--<service>--<deploymentId>`                                                                                                           |
 | Channels     | namespace `todo--prod` in `platform-realtime` (hashed past 50)                                                                                                        |
 | Email        | `todo@mail.platform.ericminassian.com` (previews `todo--pr-12@…`); SES tenant and configuration set `todo--prod`; usage rows `mail#todo#prod` in `platform-telemetry` |
 | Role         | `/platform/apps/todo--prod`                                                                                                                                           |
-| Logs         | `/platform/apps/todo/prod/{web,web.local,worker}`                                                                                                                     |
+| Logs         | `/platform/apps/todo/prod/{web,web.local,worker,services/<name>}`                                                                                                     |
 | Secrets      | `/platform/apps/todo/{prod,_shared}/secrets/NAME`                                                                                                                     |
 | Stage key    | `/platform/apps/todo/prod/stage-key`                                                                                                                                  |
 | Static files | `s3://platform-<acct>-<region>-sites/todo/prod/<deploymentId>/`                                                                                                       |
@@ -502,16 +510,77 @@ telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> ro
   It costs about $6 a month plus $0.60 per million requests; without the
   setting the stack has no web ACL.
 
+## Long-running services
+
+Processes that hold a connection open: WebSocket and server-sent event
+sources (ship positions, lightning, firehoses), or polling faster than a cron
+can. Lambda stops at 15 minutes and crons fire at most once a minute, so a
+reconnecting cron would drop data at every reconnect and still pay for a
+full-time function.
+
+```
+plat build   services.zip: <service>/index.mjs (+ map), bundled like the worker
+deployer     node:24-slim (arm64, pinned digest, copied from ECR Public once)
+             + a layer with the bundle ──ECR layer API──► platform-containers:<app>--<stage>--<svc>--<deployment>
+             task definition (stage role, bindings, PLATFORM_SERVICE) → ECS service in cluster `platform`
+Fargate      one task per stage, public subnet + public IPv4, no inbound; stdout → /platform/apps/…/services/<svc>
+```
+
+- **Container compute is generic.** The foundation's network, cluster and
+  registry (`platformNames.container*`), the engine's image builder
+  (`images.ts`, `drivers/ecr.ts`: OCI images through ECR's API, no Docker)
+  and its Fargate driver (`drivers/ecs.ts`) don't know about services; other
+  container workloads can use them.
+- **Runtime.** `defineService({ layer, run })` builds `layer` once per
+  container. `run` should never finish. When it fails or returns, the SDK
+  reports it (a `job` line kind `service`, and an error group for a failure)
+  and runs it again in the same process after a backoff: 1 s, doubling to
+  60 s, reset after a run of 5 minutes. A reconnect costs a second, not a new
+  task. A process crash restarts the container in place if it had run 60 s
+  (ECS restart policy), otherwise ECS replaces the task. SIGTERM (deploy,
+  stop, Spot reclaim) interrupts `run`, so finalizers flush, within 25 s.
+- **Units of work.** A service has no request or job to hang a trace on, so
+  `traced(name)` gives a unit (a batch written) its own trace and a `job`
+  line `service:<service>/<name>`. Inside a request or job it is a span.
+- **At most one instance.** Deploys stop the old task before starting the
+  new one (minimum healthy 0%, maximum 100%), so sources that allow one
+  connection per key keep working; a deploy leaves a gap of about a minute.
+  A Spot reclaim or a crash can briefly overlap or gap too, so services
+  write idempotently.
+- **Deploy.** Images and task definitions are built after the worker; the
+  rollouts run while the static files and web revision go up, and the deploy
+  waits for them (up to 6 minutes) before the route flip. ECS's circuit
+  breaker returns a service that can't start to its previous build; the
+  engine fails fast after two failed tasks, and the deployment's error
+  carries the task's stop reason, exit code and last log lines.
+- **Previews.** A preview runs each service for `previewMinutes` (30) after
+  each deploy; a one-shot EventBridge Scheduler schedule (universal target
+  `ecs:updateService`, assumed as the platform's scheduler role, so app code
+  can't scale its own service) then sets the desired count to 0.
+  `previewMinutes: 0` creates it stopped. `plat services start` runs it again.
+- **Rollback** points each service the target deployment had at that
+  deployment's build (images and task definitions of the newest three
+  deployments, the previous live one and whatever runs are kept), without
+  waiting. Unlike the worker, which stays on the latest code.
+- **Opt-in and cost.** Declaring `services` is the opt-in; `limits.servicesPerApp`
+  (3) caps a manifest. `plat deploy`, `plat services` and the console's Cost
+  tab show an estimate (core `estimateContainerCost`), because Cost Explorer
+  lags a day and doesn't attribute a task's public IPv4 address to the app.
+- **Spot by default.** Fargate Spot on ARM is about 70% cheaper; AWS reclaims
+  it with two minutes' notice and ECS starts a replacement. `spot: false`
+  opts out.
+
 ## Deploy flow
 
 ```
-app CI ── plat build ──► server.zip, worker.zip, static.zip, manifest.json
+app CI ── plat build ──► server.zip, worker.zip, static.zip, services.zip, manifest.json
        ── plat deploy ─► POST /v1/apps/:app/deployments   (GitHub Actions OIDC token)
                          ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
 control plane ─ worker job "deploy" ─ engine.deployStage():
    role → log groups → table → queues/DLQs → bus/rules → Cognito client → channel namespace
-   → SES tenant → worker Lambda → ESMs/rules targets/schedules → static files → Web Function revision
-   → the endpoint the live route doesn't use → resource policy → KVS route (last step)
+   → SES tenant → worker Lambda → ESMs/rules targets/schedules → service images, task
+   definitions, ECS rollouts → static files → Web Function revision → the endpoint the live
+   route doesn't use → resource policy → services running → KVS route (last step) → old builds cleaned up
 CI polls, streams events, waits until its nearest edge serves the deployment,
 comments the URL on the PR.
 ```
@@ -563,7 +632,9 @@ comments the URL on the PR.
    and tunnels `/__platform/realtime` WebSockets to the emulator's realtime
    port. Email goes to the CLI's inbox at `/__platform/mail`. Public stores'
    files come from the emulator's storage bucket.
-5. The worker runs as a local Node process with hot reload.
+5. The worker and each service run as local Node processes with hot reload.
+   The engine deploys with `servicesMode: 'external'`, so no image is built;
+   a service process that exits is restarted with a backoff, as ECS would.
    - The engine still creates the real worker Lambda, queues, event source
      mappings and rules in the emulator, so provisioning is exercised.
    - The emulator's `nodejs24.x` Lambda is a restricted JS sandbox (no
@@ -578,7 +649,7 @@ comments the URL on the PR.
 in CI.
 
 Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
-2026-11-15):
+2026-11-15, ECS, ECR and one-shot schedules on 2026-11-16):
 
 | Works                                                                               | Missing, so the wrapper fills in                                                                    |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -589,6 +660,8 @@ Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
 | S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                       |
 | Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                    |
 | AppSync Events: Event APIs, namespaces, API keys, IAM publish, handlers, wildcards  | Lambda authorizer never invoked (any token passes): signed-in subscribe tokens go unchecked locally |
+| ECS (Fargate tasks simulated once the VPC has an internet route), ECR layer uploads | Default VPC has no internet gateway: `ensureLocalPlatform` adds one and a default route             |
+| Scheduler one-shot schedules with universal targets (`ecs:updateService`)           | ECS timestamps carry 9 decimals, which the JS SDK rejects: engine compat middleware                 |
 | SESv2: identities, configuration sets, tenants and their associations               | `SendEmail` as a tenant is NotImplemented and sent mail can't be read back: the CLI's inbox         |
 |                                                                                     | In-memory only: re-provisioned on each start (seconds)                                              |
 
@@ -630,6 +703,9 @@ writing any instrumentation:
     - Logs search plus live tail (CloudWatch Live Tail over SSE).
     - Trace waterfalls; grouped errors.
     - Jobs: queue depth, DLQ redrive, cron run-now.
+    - Services: state from ECS, container starts and failed runs (telemetry),
+      CPU and memory (ECS's free per-service metrics), recent ECS events and
+      the last stop reason; restart, start and stop.
     - Realtime (stages that declare it): publishes, subscribes and errors,
       from AppSync's per-namespace CloudWatch metrics. Deliveries and
       connections are only reported for the whole API, so they aren't shown
@@ -664,6 +740,10 @@ writing any instrumentation:
 ## Isolation and security
 
 - App repos have no AWS access. Only the control plane provisions.
+  - is also what a service's container runs as. ECS pulls images and ships
+    logs as a separate execution role; preview stop schedules run as a
+    scheduler role that can only change a stage service's desired count.
+- Service tasks accept no inbound traffic (a security group with no ingress).
 - Each stage's runtime role:
   - lives under `/platform/apps/` with the platform permission boundary;
   - is scoped to that stage's table, queues, bus, storage prefix and secrets
@@ -700,7 +780,10 @@ The root zone `ericminassian.com` stays in Eric's management account
 
 ## Cost model
 
-| Item                                                | Monthly                                                                                                                      |
+| Item | Monthly |
+| Long-running service (opt-in, 0.25 vCPU, 512 MB) | ~$5.90 on Spot, ~$10.90 on-demand, of which $3.65 is the task's public IPv4 address |
+
+| Container network, cluster, registry                | $0 (no NAT); images cents                                                                                                    |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Hosted zone (delegated)                             | $0.50                                                                                                                        |
 | CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                                                         |
@@ -729,7 +812,8 @@ permissions. Moving an app to its own account is therefore re-hosting:
 - copy the data;
 - switch DNS.
 
-App code is unchanged. Because it's rare, it's a manual runbook,
+App code is unchanged. A service's image runs anywhere with the same
+environment. Because it's rare, it's a manual runbook,
 [`docs/MOVE-APP.md`](MOVE-APP.md), not tooling.
 
 ## Repo layout
@@ -796,6 +880,14 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     Raise "Event APIs - Channel namespaces per API" before apps run into it.
   - 2,000 request tokens per second are shared by every Event API in the
     account and region.
+- **Long-running services.**
+  - Fargate quotas of a young account (vCPUs for on-demand and Spot) are
+    low; check them in Service Quotas before many apps declare services.
+  - Subnets take the region's first three zones. Fargate hasn't always run
+    in every zone (`use1-az3`); pin subnets by zone id if one is refused.
+  - A public IPv4 address per task is most of a Spot service's cost.
+    IPv6-only tasks would avoid it but can't reach IPv4-only sources without
+    a NAT gateway.
 - **Email, verified 2026-11-15 on throwaway resources.**
   - One domain identity can be associated with several tenants.
   - A role pinned to a from address, a tenant and a configuration set could
@@ -840,6 +932,11 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
   same function and KVS.
 - **Workflows.** Lambda durable functions (`app.workflow()`) are not wired yet.
   The deployer is a plain async job with idempotent steps.
+  | Long-running services on ECS Fargate (ARM, Spot by default) | Eric's call (#46). Streams need a process that outlives Lambda's 15 minutes. Fargate is per task and opt-in, with no hosts to patch; a Lambda relay would still reconnect every 15 minutes, and EC2 means a fixed instance to manage. Spot is ~70% cheaper and its reclaim looks like any restart. |
+  | Service images built through ECR's API from a pinned Node base | No Docker in CI or the control plane, an image per deployment (immutable, rollback-able, portable at graduation), and nothing fetched at container start, which an S3-fetching init container would need (and artifacts expire after 90 days). |
+  | A failing `run` is rerun in the same container | Most failures are a dropped connection: a rerun takes a second, while a new task takes about a minute and pulls the image again. Crashes still get a new container. |
+  | At most one service instance; deploys stop then start | Sources that allow one connection per key keep working, and apps never see two writers from a deploy. The cost is a gap of about a minute per deploy. |
+  | Rollback moves services to that deployment's build | Rolling back should undo a bad ingest as well as a bad page. Builds of recent deployments are kept for it. |
 
 ## Decision log
 
