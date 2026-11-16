@@ -1,5 +1,6 @@
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { buildApp } from '../src/build.ts';
 import { CliError } from '../src/util/output.ts';
@@ -43,6 +44,31 @@ describe('buildApp', () => {
     expect(built.manifest.name).toBe('basic-app');
     expect(built.resolved.worker.entry).toBe('src/worker.ts');
     expect(built.build.files).toEqual(['server.zip', 'worker.zip', 'services.zip', 'static.zip']);
+  });
+
+  it('builds one server bundle that listens as a Web Function and exports a request-mode handler', async () => {
+    const root = copyFixture('basic-app');
+    await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true, minify: false, only: ['server'] });
+    const bundle = pathToFileURL(join(root, '.plat/build/server/index.mjs')).href;
+    const g = globalThis as { __platStubHandler?: unknown };
+    const endpoint = process.env.AWS_LAMBDA_HTTP_ENDPOINT;
+    try {
+      delete process.env.AWS_LAMBDA_HTTP_ENDPOINT;
+      g.__platStubHandler = undefined;
+      const request = (await import(`${bundle}?request`)) as { handler?: { requestMode?: unknown } };
+      expect(request.handler?.requestMode).toBeDefined();
+      expect(g.__platStubHandler).toBeUndefined();
+
+      process.env.AWS_LAMBDA_HTTP_ENDPOINT = '127.0.0.1:9001';
+      const instance = (await import(`${bundle}?instance`)) as { handler?: unknown };
+      expect(instance.handler).toBeUndefined();
+      // Each import evaluates its own copy of the bundle, app included.
+      expect(typeof g.__platStubHandler).toBe(typeof request.handler?.requestMode);
+      expect(g.__platStubHandler).toBeDefined();
+    } finally {
+      if (endpoint === undefined) delete process.env.AWS_LAMBDA_HTTP_ENDPOINT;
+      else process.env.AWS_LAMBDA_HTTP_ENDPOINT = endpoint;
+    }
   });
 
   it('each service bundle runs its definition with the SDK service runtime', async () => {
