@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import {
-  EDGE_RATE_LIMITED_BODY,
+  EDGE_FLOOR_JOB,
   emailDomain,
   emailMailFromDomain,
   type PlatformConfig,
@@ -551,92 +551,110 @@ describe('foundation stack', () => {
   });
 
   describe('edge floor', () => {
-    const acl = () => logicalId('AWS::WAFv2::WebACL', { Name: platformNames.edgeWebAcl });
+    const distribution = () => logicalId('AWS::CloudFront::Distribution', {});
+    const worker = `arn:aws:lambda:${config.region}:${account}:function:platform--prod--worker`;
 
-    it('answers a client over the limit for one host with a RateLimited 429', () => {
-      expect(config.limits.edgeRequestsPerMinute).toBe(1000);
-      template.hasResourceProperties('AWS::WAFv2::WebACL', {
-        Name: platformNames.edgeWebAcl,
-        Scope: 'CLOUDFRONT',
-        DefaultAction: { Allow: {} },
-        CustomResponseBodies: {
-          'rate-limited': {
-            ContentType: 'APPLICATION_JSON',
-            Content: JSON.stringify(EDGE_RATE_LIMITED_BODY),
-          },
-        },
-        Rules: [
-          {
-            Name: platformNames.edgeFloorRule,
-            Priority: 0,
-            Statement: {
-              RateBasedStatement: {
-                Limit: 1000,
-                EvaluationWindowSec: 60,
-                AggregateKeyType: 'CUSTOM_KEYS',
-                CustomKeys: [
-                  { IP: {} },
-                  { Header: { Name: 'host', TextTransformations: [{ Priority: 0, Type: 'LOWERCASE' }] } },
-                ],
-              },
-            },
-            Action: {
-              Block: {
-                CustomResponse: {
-                  ResponseCode: 429,
-                  CustomResponseBodyKey: 'rate-limited',
-                  ResponseHeaders: [{ Name: 'retry-after', Value: '60' }],
-                },
-              },
-            },
-            VisibilityConfig: {
-              CloudWatchMetricsEnabled: true,
-              MetricName: platformNames.edgeFloorRule,
-              SampledRequestsEnabled: true,
-            },
-          },
-        ],
-      });
+    it('leaves the web ACL to the control plane, which attaches it only while the floor is on', () => {
+      template.resourceCountIs('AWS::WAFv2::WebACL', 0);
       template.hasResourceProperties('AWS::CloudFront::Distribution', {
-        DistributionConfig: Match.objectLike({ WebACLId: { 'Fn::GetAtt': [acl(), 'Arn'] } }),
+        DistributionConfig: Match.objectLike({ WebACLId: Match.absent() }),
       });
     });
 
-    it('lets the control plane read its samples, and names it in the runtime config', () => {
-      template.hasResourceProperties('AWS::IAM::Role', {
-        RoleName: platformNames.controlPlaneRole,
-        Policies: [
+    it('goes off when the router serves edgeFloorAt requests in a minute', () => {
+      expect(config.limits.edgeFloorAt).toBe(1000);
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        AlarmName: platformNames.edgeFloorAlarm,
+        Namespace: 'AWS/CloudFront',
+        MetricName: 'Requests',
+        Dimensions: Match.arrayWith([
+          { Name: 'DistributionId', Value: { Ref: distribution() } },
+          { Name: 'Region', Value: 'Global' },
+        ]),
+        Statistic: 'Sum',
+        Period: 60,
+        Threshold: 1000,
+        ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+        EvaluationPeriods: 1,
+        DatapointsToAlarm: 1,
+        TreatMissingData: 'notBreaching',
+        // State changes reach EventBridge without an action.
+        AlarmActions: Match.absent(),
+      });
+    });
+
+    it('runs the control plane worker’s edge-floor job when it goes off', () => {
+      const alarm = logicalId('AWS::CloudWatch::Alarm', { AlarmName: platformNames.edgeFloorAlarm });
+      template.hasResourceProperties('AWS::Events::Rule', {
+        Name: platformNames.edgeFloorAlarm,
+        EventPattern: {
+          source: ['aws.cloudwatch'],
+          'detail-type': ['CloudWatch Alarm State Change'],
+          resources: [{ 'Fn::GetAtt': [alarm, 'Arn'] }],
+          detail: { state: { value: ['ALARM'] } },
+        },
+        Targets: [
           Match.objectLike({
-            PolicyDocument: Match.objectLike({
-              Statement: Match.arrayWith([
-                {
-                  Sid: 'EdgeFloor',
-                  Effect: 'Allow',
-                  Action: 'wafv2:GetSampledRequests',
-                  Resource: { 'Fn::GetAtt': [acl(), 'Arn'] },
-                },
-              ]),
-            }),
+            Arn: worker,
+            Input: JSON.stringify({ __platform: 'invoke', name: EDGE_FLOOR_JOB, payload: {} }),
+            RetryPolicy: { MaximumEventAgeInSeconds: 900 },
           }),
         ],
+      });
+      // The worker is deployed after this stack, which grants it nothing (src/deploy.ts does).
+      expect(
+        template.findResources('AWS::Lambda::Permission', {
+          Properties: { Principal: 'events.amazonaws.com' },
+        }),
+      ).toEqual({});
+    });
+
+    it('lets the control plane run the web ACL on the router, and names the alarm in the runtime config', () => {
+      const policy = template.findResources('AWS::IAM::Role', {
+        Properties: { RoleName: platformNames.controlPlaneRole },
+      });
+      const statements = (
+        Object.values(policy)[0] as {
+          Properties: { Policies: Array<{ PolicyDocument: { Statement: Array<Record<string, unknown>> } }> };
+        }
+      ).Properties.Policies[0]!.PolicyDocument.Statement;
+      expect(statements.find((st) => st.Sid === 'EdgeFloorDistribution')).toEqual({
+        Sid: 'EdgeFloorDistribution',
+        Effect: 'Allow',
+        Action: ['cloudfront:GetDistributionConfig', 'cloudfront:UpdateDistribution'],
+        Resource: {
+          'Fn::Join': ['', [`arn:aws:cloudfront::${account}:distribution/`, { Ref: distribution() }]],
+        },
       });
       const runtime = JSON.stringify(
         template.findResources('AWS::SSM::Parameter', {
           Properties: { Name: platformNames.runtimeConfigParameter },
         }),
       );
-      expect(runtime).toContain('"edgeWebAclArn\\":\\"');
-      expect(runtime).toContain(`{"Fn::GetAtt":["${acl()}","Arn"]}`);
+      const alarm = logicalId('AWS::CloudWatch::Alarm', { AlarmName: platformNames.edgeFloorAlarm });
+      const rule = logicalId('AWS::Events::Rule', { Name: platformNames.edgeFloorAlarm });
+      expect(runtime).toContain('"edgeFloor\\":{\\"alarmArn\\":\\"');
+      expect(runtime).toContain(`{"Fn::GetAtt":["${alarm}","Arn"]}`);
+      expect(runtime).toContain(`{"Fn::GetAtt":["${rule}","Arn"]}`);
+      expect(runtime).not.toContain('edgeWebAclArn');
     });
 
-    it('has no web ACL without edgeRequestsPerMinute', () => {
-      const { edgeRequestsPerMinute: _, ...limits } = config.limits;
+    it('has no alarm or trigger without the setting, and still lets a floor left on be taken down', () => {
+      const { edgeRequestsPerMinute: _, edgeFloorAt: __, ...limits } = config.limits;
       const bare = synth({ config: { ...config, limits } });
-      bare.resourceCountIs('AWS::WAFv2::WebACL', 0);
-      bare.hasResourceProperties('AWS::CloudFront::Distribution', {
-        DistributionConfig: Match.objectLike({ WebACLId: Match.absent() }),
+      bare.resourceCountIs('AWS::CloudWatch::Alarm', 0);
+      bare.resourceCountIs('AWS::Events::Rule', 0);
+      expect(JSON.stringify(bare.toJSON())).not.toContain('"edgeFloor\\"');
+      bare.hasResourceProperties('AWS::IAM::Role', {
+        RoleName: platformNames.controlPlaneRole,
+        Policies: [
+          Match.objectLike({
+            PolicyDocument: Match.objectLike({
+              Statement: Match.arrayWith([Match.objectLike({ Sid: 'EdgeFloorWebAcl' })]),
+            }),
+          }),
+        ],
       });
-      expect(JSON.stringify(bare.toJSON())).not.toContain('edgeWebAclArn');
     });
   });
 

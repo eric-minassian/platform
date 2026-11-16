@@ -28,12 +28,16 @@ export default definePlatformConfig({
     'simply-personalized-beta',
   ],
   previewTtlDays: 7,
-  // edgeRequestsPerMinute: the WAF floor for every app (per client and host); remove it to drop the web ACL.
   limits: {
     appsPerMember: 50,
     stagesPerApp: 20,
     emailsPerDay: 2000,
+    // The edge floor: once the whole edge sees `edgeFloorAt` requests in a minute, a WAF web ACL
+    // answers a client sending one host more than `edgeRequestsPerMinute` a minute with a 429,
+    // until an hour after traffic drops back. Equal, so the floor is on whenever a single client
+    // could be over its limit; the busiest minute before it (2026-11) was 748. Remove both for no floor.
     edgeRequestsPerMinute: 1000,
+    edgeFloorAt: 1000,
     servicesPerApp: 3,
   },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },

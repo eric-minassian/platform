@@ -392,7 +392,7 @@ export function controlPlanePolicy(input: {
     | 'userPoolId'
     | 'boundaryPolicyArn'
     | 'alertsTopicArn'
-    | 'edgeWebAclArn'
+    | 'distributionArn'
   > & {
     realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'>;
     email?: Pick<EmailRuntimeConfig, 'identityArn'>;
@@ -526,14 +526,49 @@ export function controlPlanePolicy(input: {
       Resource: runtime.kvsArn,
     });
   }
-  if (runtime.edgeWebAclArn) {
-    statements.push({
-      // The console's list of requests the edge floor blocked.
-      Sid: 'EdgeFloor',
-      Effect: 'Allow',
-      Action: ['wafv2:GetSampledRequests'],
-      Resource: runtime.edgeWebAclArn,
-    });
+  if (runtime.distributionArn) {
+    // The edge floor (control plane edge-floor.ts): its web ACL exists only while it's on, so the
+    // control plane creates, attaches, detaches and deletes it. Granted with or without
+    // `limits.edgeFloorAt`, so a floor that was on when the setting went can still be taken down.
+    // UpdateDistribution can change the whole router config, as writing the route store can
+    // already route any host anywhere.
+    const webAcl = `arn:aws:wafv2:us-east-1:${acct}:global/webacl/${platformNames.edgeWebAcl}/*`;
+    statements.push(
+      {
+        Sid: 'EdgeFloorDistribution',
+        Effect: 'Allow',
+        Action: ['cloudfront:GetDistributionConfig', 'cloudfront:UpdateDistribution'],
+        Resource: runtime.distributionArn,
+      },
+      {
+        // GetWebACL is also what CloudFront checks when a distribution is pointed at a web ACL.
+        Sid: 'EdgeFloorWebAcl',
+        Effect: 'Allow',
+        Action: [
+          'wafv2:CreateWebACL',
+          'wafv2:GetWebACL',
+          'wafv2:UpdateWebACL',
+          'wafv2:DeleteWebACL',
+          'wafv2:TagResource',
+          'wafv2:GetSampledRequests',
+        ],
+        Resource: webAcl,
+      },
+      {
+        // Finds the web ACL's id and lock token by name; the action takes no resource.
+        Sid: 'EdgeFloorLookup',
+        Effect: 'Allow',
+        Action: 'wafv2:ListWebACLs',
+        Resource: '*',
+      },
+      {
+        // The alarm on the router's requests per minute that turns it on (foundation stack).
+        Sid: 'EdgeFloorAlarm',
+        Effect: 'Allow',
+        Action: 'cloudwatch:DescribeAlarms',
+        Resource: `arn:aws:cloudwatch:${region}:${acct}:alarm:${platformNames.edgeFloorAlarm}`,
+      },
+    );
   }
   if (runtime.userPoolId) {
     statements.push({

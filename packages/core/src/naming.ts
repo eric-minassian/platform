@@ -212,10 +212,20 @@ export const platformNames = {
   controlPlaneRole: 'platform-control-plane',
   ciRole: 'platform-ci',
   alertsTopic: 'platform-alerts',
-  /** The router's AWS WAF web ACL (`limits.edgeRequestsPerMinute`); also its CloudWatch metric name. */
-  edgeWebAcl: 'platform-edge',
+  /**
+   * The edge floor's AWS WAF web ACL, which the control plane creates and attaches to the router
+   * while the floor is on; also its CloudWatch metric name. Not `platform-edge`, the always-on web
+   * ACL the foundation stack used to own: the stack deletes that one only after updating the
+   * distribution, so the two names can't collide while it goes.
+   */
+  edgeWebAcl: 'platform-edge-floor',
   /** Its rate-based rule, and that rule's metric name. */
   edgeFloorRule: 'requests-per-client',
+  /**
+   * The CloudWatch alarm on the router's requests per minute (`limits.edgeFloorAt`) that turns the
+   * floor on, and the EventBridge rule that tells the control plane when it goes off.
+   */
+  edgeFloorAlarm: 'platform-edge-floor',
   runtimeConfigParameter: '/platform/config/runtime',
   sessionKeyParameter: '/platform/config/session-key',
   githubAppParameterPrefix: '/platform/config/github-app/',

@@ -4,6 +4,7 @@
  * either handle (`ConditionalCheckFailedException`, `ResourceNotFoundException`)
  * or turn into a defect.
  */
+import { CloudFrontClient } from '@aws-sdk/client-cloudfront';
 import { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { CostExplorerClient } from '@aws-sdk/client-cost-explorer';
@@ -62,6 +63,8 @@ export class Aws extends Context.Service<
     readonly ce: () => CostExplorerClient;
     /** CloudFront web ACLs (the router's) are managed in us-east-1. */
     readonly wafv2: () => WAFV2Client;
+    /** The router distribution (CloudFront is a global service served from us-east-1). */
+    readonly cloudfront: () => CloudFrontClient;
   }
 >()('@ericminassian/platform-control-plane/Aws') {
   /** Region from the Lambda environment (`AWS_REGION`). */
@@ -91,6 +94,7 @@ export class Aws extends Context.Service<
       sesv2: lazy(() => new SESv2Client({ region })),
       ce: lazy(() => new CostExplorerClient({ region: 'us-east-1' })),
       wafv2: lazy(() => new WAFV2Client({ region: 'us-east-1' })),
+      cloudfront: lazy(() => new CloudFrontClient({ region: 'us-east-1' })),
     });
   });
 }

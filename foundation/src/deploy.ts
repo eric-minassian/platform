@@ -5,7 +5,8 @@
  *                    key, a generated secret CloudFormation can't hold
  *  2. control-plane  services/control-plane as the `platform` app, through
  *                    the engine like any other app; then realtime's public
- *                    subscribe key and route-store entry
+ *                    subscribe key and route-store entry, and the edge
+ *                    floor alarm's permission to invoke the worker
  *  3. telemetry      the account-level log subscription, which targets the
  *                    control plane's worker and so comes after it
  *
@@ -35,12 +36,15 @@ import {
   ensureParameterOnce,
   ensurePermission,
   getParameter,
+  removePermission,
 } from '@ericminassian/platform-engine';
 import config from '../../platform.config.ts';
 import { deployControlPlane } from './control-plane.ts';
 import { CONTROL_PLANE_APP, FOUNDATION_STACK } from './stack.ts';
 
 const PHASES = ['foundation', 'control-plane', 'telemetry'] as const;
+/** The worker's resource-policy statement that lets the edge floor's trigger invoke it. */
+const EDGE_FLOOR_PERMISSION = 'platform-edge-floor';
 type Phase = (typeof PHASES)[number];
 
 const foundationDir = fileURLToPath(new URL('..', import.meta.url));
@@ -128,6 +132,20 @@ async function main(): Promise<void> {
       repoRoot,
     });
     console.log(`    control plane ${result.deploymentId} → ${result.url}`);
+    // The edge floor's trigger (stack.ts) invokes the worker, which only exists from here on.
+    // The sid doesn't start with `events-`: the engine prunes those it didn't make for the stage.
+    if (runtime.edgeFloor) {
+      await ensurePermission(ctx, {
+        functionName: names.workerFunction(CONTROL_PLANE_APP, PROD_STAGE),
+        statementId: EDGE_FLOOR_PERMISSION,
+        principal: 'events.amazonaws.com',
+        action: 'lambda:InvokeFunction',
+        sourceArn: runtime.edgeFloor.ruleArn,
+      });
+      console.log('    edge floor: its alarm can reach the worker');
+    } else {
+      await removePermission(ctx, names.workerFunction(CONTROL_PLANE_APP, PROD_STAGE), EDGE_FLOOR_PERMISSION);
+    }
     // The public subscribe key and the router's realtime entry live outside the stack (the
     // control plane extends the key nightly); make sure both exist as soon as the API does.
     if (await engine.ensureRealtimePlatform(runtime))

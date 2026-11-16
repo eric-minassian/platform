@@ -17,6 +17,7 @@
     "api:dev": "node src/dev.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.1169.0",
     "@aws-sdk/client-cloudwatch": "^3.1169.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.1169.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",

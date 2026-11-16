@@ -40,13 +40,19 @@ export interface PlatformConfig {
     /** Highest `email.dailyLimit` an app may declare (recipients per UTC day). */
     emailsPerDay: number;
     /**
-     * The edge's floor for every app: requests one client (IP address) may
-     * send one host per minute before the router answers 429 for a while.
-     * An AWS WAF rate-based rule (about $6 a month, plus $0.60 per million
-     * requests); unset, there is no web ACL. Apps set finer limits with
-     * `RateLimits`.
+     * The edge floor's limit for every app: requests one client (IP address)
+     * may send one host per minute before the edge answers 429 for a while.
+     * Enforced only while the floor is on (`edgeFloorAt`); apps set finer
+     * limits with `RateLimits`.
      */
     edgeRequestsPerMinute?: number;
+    /**
+     * Requests per minute across the whole edge, every app together, that
+     * turn the floor on: the control plane attaches an AWS WAF web ACL with
+     * the `edgeRequestsPerMinute` rule, and removes it after an hour under
+     * this rate. Set both or neither; without them there is no floor.
+     */
+    edgeFloorAt?: number;
     /** Long-running services one stage's plat.config.ts may declare: the one resource billed while idle. */
     servicesPerApp: number;
   };
@@ -54,10 +60,15 @@ export interface PlatformConfig {
 }
 
 export function definePlatformConfig(config: PlatformConfig): PlatformConfig {
-  const floor = config.limits.edgeRequestsPerMinute;
+  const { edgeRequestsPerMinute: perClient, edgeFloorAt: at } = config.limits;
   // WAF's rate-based rules count from 10 requests.
-  if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 10))
-    throw new Error(`limits.edgeRequestsPerMinute must be an integer of at least 10, not ${floor}`);
+  if (perClient !== undefined && (!Number.isSafeInteger(perClient) || perClient < 10))
+    throw new Error(`limits.edgeRequestsPerMinute must be an integer of at least 10, not ${perClient}`);
+  if (at !== undefined && (!Number.isSafeInteger(at) || at < 1))
+    throw new Error(`limits.edgeFloorAt must be a positive integer, not ${at}`);
+  // One without the other is a floor that never turns on, or one with no limit to enforce.
+  if ((perClient === undefined) !== (at === undefined))
+    throw new Error('limits.edgeRequestsPerMinute and limits.edgeFloorAt are set together, or neither');
   const seen = new Set<string>();
   for (const m of config.members) {
     const key = m.github.toLowerCase();

@@ -430,6 +430,9 @@ importers:
 
   services/control-plane:
     dependencies:
+      '@aws-sdk/client-cloudfront':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-cloudwatch':
         specifier: ^3.1169.0
         version: 3.1169.0
@@ -645,6 +648,10 @@ packages:
 
   '@aws-sdk/client-cloudfront-keyvaluestore@3.1169.0':
     resolution: {integrity: sha512-xPPSdlTN3tzdYewHd8D9mSzjPMcjdmyspN817XFm/CI6ZULZEYkKZS4g3GsscgBrabRvdUs38XlXBNLJ6kcfCQ==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-cloudfront@3.1169.0':
+    resolution: {integrity: sha512-WTApNj+nbEu2xKsBsWjODypbm7ZSV+dllV7SzfRmR+wh21HqjJLLExtmywgAQje1/UC/AROBtbghIjE3MpXQrw==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-cloudwatch-logs@3.1169.0':
@@ -2394,6 +2401,17 @@ snapshots:
       '@aws-sdk/core': 3.981.0
       '@aws-sdk/credential-provider-node': 3.972.97
       '@aws-sdk/signature-v4-multi-region': 3.996.52
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@aws-sdk/client-cloudfront@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
       '@aws-sdk/types': 3.975.1
       '@smithy/core': 3.40.0
       '@smithy/fetch-http-handler': 5.8.1

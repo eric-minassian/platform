@@ -58,6 +58,12 @@ export const RATE_LIMIT_PK_PREFIX = '_rl#';
 export const EDGE_RETRY_AFTER_SECONDS = 60;
 
 /**
+ * The control plane worker's invoke job that the edge floor's alarm runs when
+ * it goes off (an EventBridge rule in the foundation stack): it turns the floor on.
+ */
+export const EDGE_FLOOR_JOB = 'edge-floor';
+
+/**
  * The body of the edge floor's 429 (`limits.edgeRequestsPerMinute`): the SDK's
  * `RateLimited`, so a generated web client decodes it like an app's own 429.
  */
