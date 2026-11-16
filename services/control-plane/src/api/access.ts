@@ -123,9 +123,10 @@ export const publicStage = ({
   ...stage
 }: StageItem): StageRecord => stage;
 
-/** What the API shows of a deployment: no route record or revision. */
+/** What the API shows of a deployment: no route record (it holds the origin secret) or server build. */
 export const publicDeployment = ({
   route: _r,
-  revisionId: _v,
+  revisionId: _rv,
+  version: _v,
   ...deployment
 }: DeploymentItem): DeploymentRecord => deployment;

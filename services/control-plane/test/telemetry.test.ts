@@ -84,6 +84,8 @@ describe('aggregate', () => {
     const minute = agg.rollups.find((r) => r.pk === 'm#todo#prod#1m');
     expect(minute).toMatchObject({ sk: '2026-11-14T10:15:00.000Z' });
     expect(minute!.add).toMatchObject({ req: 3, s2xx: 1, s4xx: 1, s5xx: 1, cold: 1, l0: 1, l3: 1, l7: 1 });
+    // Handling time, summed: what the compute chooser reads concurrency from.
+    expect(minute!.add.dur).toBe(42 + 900 + 3);
     expect(agg.rollups.filter((r) => r.pk.startsWith('m#'))).toHaveLength(3);
     const routes = agg.rollups.filter((r) => r.pk === 'r#todo#prod#1h');
     expect(routes.map((r) => r.sk).toSorted()).toEqual([
@@ -98,7 +100,8 @@ describe('aggregate', () => {
     const health = { route: '/__platform/health', path: '/__platform/health' };
     const agg = aggregate([req(health), req({ ...health, status: 500, cold: true }), req()]);
     const minute = agg.rollups.find((r) => r.pk === 'm#todo#prod#1m');
-    expect(minute!.add).toEqual({ req: 1, s2xx: 1, l3: 1 });
+    // Only the app's request counts, its handling time included (the compute chooser reads `dur`).
+    expect(minute!.add).toEqual({ req: 1, dur: 42, s2xx: 1, l3: 1 });
     expect(agg.rollups.filter((r) => r.pk.startsWith('r#')).map((r) => r.sk)).toEqual([
       '2026-11-14T10:00:00.000Z#GET /api/todos',
       '2026-11-14T00:00:00.000Z#GET /api/todos',
@@ -117,7 +120,12 @@ describe('aggregate', () => {
     expect(job!.add).toMatchObject({ ok: 1, error: 1 });
     expect(job!.set).toMatchObject({ kind: 'queue', name: 'emails', lastRun: T + 1000 });
     expect(agg.rollups.find((r) => r.pk === 'c#todo#prod#1d')!.add).toEqual({ count: 1, sum: 2 });
-    expect(agg.rollups.find((r) => r.pk === 'm#todo#prod#1m')!.add).toEqual({ webStarts: 1 });
+    // A server's start carries its INIT, for the compute chooser's cold starts.
+    expect(agg.rollups.find((r) => r.pk === 'm#todo#prod#1m')!.add).toEqual({
+      webStarts: 1,
+      webInitMs: 120,
+      webInits: 1,
+    });
   });
 
   it('counts rate limit checks per limit, allowed apart from denied', () => {

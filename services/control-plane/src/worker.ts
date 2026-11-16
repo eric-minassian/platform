@@ -12,6 +12,7 @@ import { EdgeFloor } from './edge-floor.ts';
 import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
 import { StageJob, WorkerJobs } from './jobs/call.ts';
+import { ComputeChooser } from './jobs/compute.ts';
 import { CostCollector } from './jobs/cost.ts';
 import { Pinger } from './jobs/pinger.ts';
 import { RealtimeKey } from './jobs/realtime.ts';
@@ -24,6 +25,7 @@ import { TelemetryQuery } from './telemetry/query.ts';
 import { TelemetryWriter } from './telemetry/write.ts';
 
 const WorkerLive = Layer.mergeAll(
+  ComputeChooser.layer,
   CostCollector.layer,
   Deployer.layer,
   EdgeFloor.layer,
@@ -85,6 +87,10 @@ export default defineWorker({
         return yield* Exit.asVoidAll([deployments, floor]);
       }),
     cost: () => CostCollector.use((c) => c.run()),
+    compute: () =>
+      ComputeChooser.use((c) => c.run).pipe(
+        Effect.flatMap((r) => Effect.logInfo('compute estimated').pipe(Effect.annotateLogs(r))),
+      ),
     reaper: () => Reaper.use((r) => r.run),
     'realtime-key': () => RealtimeKey.use((k) => k.run),
     'storage-expiry': () => StorageExpiry.use((s) => s.run),

@@ -16,6 +16,9 @@ export const fmtPct = (n: number | null | undefined, digits = 1): string =>
 export const fmtUsd = (n: number | null | undefined): string =>
   n === null || n === undefined ? '—' : `$${n < 10 ? n.toFixed(2) : n.toFixed(0)}`;
 
+/** A monthly estimate, which for a quiet server can be a fraction of a cent. */
+export const fmtUsdEstimate = (n: number): string => (n > 0 && n < 0.01 ? '< $0.01' : fmtUsd(n));
+
 /** Always to the cent: for estimates shown as parts and their sum, which must visibly add up. */
 export const fmtUsdCents = (n: number): string => `$${n.toFixed(2)}`;
 

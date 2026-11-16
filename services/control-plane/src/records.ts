@@ -17,6 +17,7 @@ import {
   DeploymentRecord,
   RouteRecordSchema,
   StageRecord,
+  type WebCompute,
 } from '@ericminassian/platform-core';
 import { Schema } from 'effect';
 
@@ -48,7 +49,9 @@ export type StageItem = typeof StageItem.Type;
 export const DeploymentItem = Schema.Struct({
   ...DeploymentRecord.fields,
   route: Schema.optional(StoredRoute),
+  /** Its server build: a Web Function revision (instance mode) or a function version (request mode). */
   revisionId: Schema.optional(Schema.String),
+  version: Schema.optional(Schema.String),
 });
 export type DeploymentItem = typeof DeploymentItem.Type;
 
@@ -65,6 +68,16 @@ export const EdgeFloorItem = Schema.Struct({
 export type EdgeFloorItem = typeof EdgeFloorItem.Type;
 
 export const edgeFloorKey = { pk: 'PLATFORM', sk: 'EDGE_FLOOR' } as const;
+
+/**
+ * How a stage's server runs. Stages deployed before servers had modes
+ * recorded none: their route tells (only request-mode routes carry `c`).
+ */
+export function stageCompute(stage: Pick<StageItem, 'compute' | 'route'>): WebCompute | undefined {
+  if (stage.compute) return stage.compute;
+  if (!stage.route?.o) return undefined;
+  return stage.route.c === 'r' ? 'request' : 'instance';
+}
 
 export const appKey = (name: string) => ({ pk: `APP#${name}`, sk: 'META' });
 export const stageKey = (app: string, stage: string) => ({ pk: `APP#${app}`, sk: `STAGE#${stage}` });

@@ -19,6 +19,7 @@ import {
   type LimitStats,
   type MetricsPoint,
   type MetricsResponse,
+  type MinuteTraffic,
   percentile,
   RESOLUTION_MS,
   type Resolution,
@@ -105,6 +106,36 @@ export function toMetricsPoints(items: readonly Item[], range: TimeRange): Metri
   }
   return points;
 }
+
+/**
+ * A stage's busy minutes, as the compute chooser simulates them, and its
+ * servers' average INIT (none until a start reported one). Rows written
+ * before minute rollups summed handling time (`dur`) get it from their
+ * latency histogram: each bucket's requests at its midpoint.
+ */
+export function toStageTraffic(items: readonly Item[]): { minutes: MinuteTraffic[]; initMs?: number } {
+  let inits = 0;
+  let initMs = 0;
+  const minutes: MinuteTraffic[] = [];
+  for (const i of items) {
+    inits += num(i.webInits);
+    initMs += num(i.webInitMs);
+    const req = num(i.req);
+    if (req <= 0) continue;
+    const durMs =
+      typeof i.dur === 'number'
+        ? i.dur
+        : histogramOf(i).reduce((sum, n, b) => sum + n * HIST_MIDPOINTS_MS[b]!, 0);
+    minutes.push({ ts: Date.parse(String(i.sk)), req, durMs });
+  }
+  return { minutes, ...(inits > 0 ? { initMs: Math.round(initMs / inits) } : {}) };
+}
+
+/** Each latency bucket's midpoint; the open last one at 1.5× its lower bound. */
+const HIST_MIDPOINTS_MS = [...LATENCY_BUCKETS_MS, LATENCY_BUCKETS_MS.at(-1)! * 2].map((upper, b, all) => {
+  const lower = b === 0 ? 0 : all[b - 1]!;
+  return b === all.length - 1 ? lower * 1.5 : (lower + upper) / 2;
+});
 
 /** Sums per-route items across buckets (sk = `<iso>#<METHOD> <route>`). */
 export function toRouteStats(items: readonly Item[]): RouteStats[] {
@@ -377,6 +408,13 @@ export class TelemetryQuery extends Context.Service<
     cost(app: string, days?: number): Effect.Effect<CostResponse>;
     /** Last-hour health of an app's prod stage. */
     health(app: string, up: boolean | null): Effect.Effect<NonNullable<AppSummary['health']>>;
+    /** The stage's busy minutes in `from`..`to` (`toStageTraffic`), from its minute rollups. */
+    stageTraffic(
+      app: string,
+      stage: string,
+      from: number,
+      to: number,
+    ): Effect.Effect<{ readonly minutes: ReadonlyArray<MinuteTraffic>; readonly initMs?: number }>;
   }
 >()('@ericminassian/platform-control-plane/TelemetryQuery') {
   static readonly layer: Layer.Layer<TelemetryQuery, never, Aws | Settings> = Layer.effect(
@@ -569,7 +607,18 @@ export class TelemetryQuery extends Context.Service<
         return summarizeHealth(toMetricsPoints(items, range), items, up);
       }, Effect.orDie);
 
+      const stageTraffic = Effect.fn('TelemetryQuery.stageTraffic')(function* (
+        app: string,
+        stage: string,
+        from: number,
+        to: number,
+      ) {
+        const [a, b] = isoRange({ from, to, res: '1m' });
+        return toStageTraffic(yield* queryRange(telemetryKeys.stage(app, stage, '1m'), a, b));
+      }, Effect.orDie);
+
       return TelemetryQuery.of({
+        stageTraffic,
         metrics,
         routes,
         jobs,
