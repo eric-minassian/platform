@@ -234,6 +234,7 @@ export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => 
       ssm: missing('ssm'),
       lambda: missing('lambda'),
       sqs: missing('sqs'),
+      scheduler: missing('scheduler'),
       sns: missing('sns'),
       logs: missing('logs'),
       cloudwatch: missing('cloudwatch'),
@@ -301,8 +302,8 @@ export const testServices = (options: TestServices = {}) => {
     Layer.mock(EdgeFloor, options.edge ?? {}),
     Layer.mock(Artifacts, options.artifacts ?? {}),
     Layer.mock(WorkerJobs, {
-      invoke: (name, payload) =>
-        options.jobs ? Ref.update(options.jobs, (jobs) => [...jobs, { name, payload }]) : Effect.void,
+      start: ({ kind, ...payload }) =>
+        options.jobs ? Ref.update(options.jobs, (jobs) => [...jobs, { name: kind, payload }]) : Effect.void,
       ...(options.call ? { call: options.call } : {}),
     }),
   ).pipe(Layer.provideMerge(settingsLayer(options.settings)));

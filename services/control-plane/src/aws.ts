@@ -10,6 +10,7 @@ import { CostExplorerClient } from '@aws-sdk/client-cost-explorer';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { LambdaClient } from '@aws-sdk/client-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
+import { SchedulerClient } from '@aws-sdk/client-scheduler';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
 import { SNSClient } from '@aws-sdk/client-sns';
 import { SQSClient } from '@aws-sdk/client-sqs';
@@ -52,6 +53,7 @@ export class Aws extends Context.Service<
     readonly ssm: () => SSMClient;
     readonly lambda: () => LambdaClient;
     readonly sqs: () => SQSClient;
+    readonly scheduler: () => SchedulerClient;
     readonly sns: () => SNSClient;
     readonly logs: () => CloudWatchLogsClient;
     readonly cloudwatch: () => CloudWatchClient;
@@ -82,6 +84,7 @@ export class Aws extends Context.Service<
       ssm: lazy(() => new SSMClient({ region })),
       lambda: lazy(() => new LambdaClient({ region })),
       sqs: lazy(() => new SQSClient({ region })),
+      scheduler: lazy(() => new SchedulerClient({ region })),
       sns: lazy(() => new SNSClient({ region })),
       logs: lazy(() => new CloudWatchLogsClient({ region })),
       cloudwatch: lazy(() => new CloudWatchClient({ region })),

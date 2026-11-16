@@ -218,10 +218,8 @@ export function registerObserve(program: Command): void {
             table(
               v.queues.map((q) => ({
                 queue: q.name,
-                visible: q.visible,
-                inFlight: q.inFlight,
-                dlq: q.deadLetter,
-                oldest: q.oldestAgeSeconds ?? '-',
+                scheduled: q.scheduled,
+                dead: q.deadLetter,
               })),
             ),
           );

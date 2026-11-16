@@ -21,14 +21,14 @@ process.env.PLATFORM_LOG_PRETTY ??= '1';
 // The platform's server wrapper serves a stage described by its bindings;
 // outside `plat dev` there is none, so describe this local API.
 process.env[BINDINGS_ENV] ??= JSON.stringify({
-  v: 1,
+  v: 2,
   app: 'platform',
   stage: 'local',
   host: `127.0.0.1:${port}`,
   url: `http://127.0.0.1:${port}`,
   revision: 'dev',
   region: process.env.AWS_REGION ?? 'us-east-1',
-  queues: {},
+  account: '000000000000',
   secrets: {
     path: names.secretsPath('platform', 'local'),
     sharedPath: names.sharedSecretsPath('platform'),

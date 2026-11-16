@@ -1,4 +1,5 @@
-import { defineApp } from '@ericminassian/platform/config';
+import { defineApp, queue } from '@ericminassian/platform/config';
+import type { StageJob } from './src/jobs/call.ts';
 
 const app = defineApp({
   name: 'platform',
@@ -12,8 +13,15 @@ const app = defineApp({
     serverRoutes: ['/v1/', '/auth/'],
     timeoutSeconds: 120,
   },
-  // Deploys run here (see src/jobs/call.ts), so the worker gets the full Lambda timeout.
-  worker: { entry: 'src/worker.ts', timeoutSeconds: 900, memoryMb: 1024 },
+  // The telemetry processor, crons and rollbacks: mostly waiting on DynamoDB and HTTP, so little
+  // memory (Lambda bills GB-seconds). Below 512 MB this bundle's cold start, CPU-bound, drags.
+  worker: { entry: 'src/worker.ts', timeoutSeconds: 300, memoryMb: 512 },
+  queues: {
+    // Deploys and destroys, in a function of their own: Lambda's full 15 minutes, and room for
+    // artifacts and service images. One run each: the watchdog fails a deploy whose run died, and
+    // a deploy is retried by deploying again, never behind the author's back.
+    stages: queue<StageJob>({ memoryMb: 1024, timeoutSeconds: 900, maxAttempts: 1 }),
+  },
   auth: false,
   crons: {
     pinger: '*/5 * * * *',

@@ -17,7 +17,7 @@ import type { ApiClient } from './api.ts';
 import { buildApp } from './build.ts';
 import { confirmServedHere, edgeChecksFor } from './edge.ts';
 import { appendStepSummary, deriveStage, gitInfo, isGitHubActions, setOutput } from './github.ts';
-import { loadProject } from './project.ts';
+import { appSdkVersion, loadProject } from './project.ts';
 import { CliError, EXIT, info, step, success } from './util/output.ts';
 
 export const TERMINAL_STATUSES: readonly DeploymentStatus[] = ['succeeded', 'failed', 'rolled_back'];
@@ -85,10 +85,12 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
   const git = gitInfo(project.root);
 
   step(`creating deployment of ${pc.bold(app)} to ${pc.bold(stage)}`);
+  const sdk = appSdkVersion(project.root);
   const created = await api.createDeployment(app, {
     stage,
     manifest: project.raw,
     files: fileNames,
+    ...(sdk ? { sdk } : {}),
     ...git,
   });
   const id = created.deployment.id;

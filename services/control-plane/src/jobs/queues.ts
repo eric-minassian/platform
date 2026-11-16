@@ -1,31 +1,73 @@
-/** Queue depths, dead-letter redrive and "run cron now" for an app stage. */
-import { GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+/**
+ * An app stage's jobs that aren't running: retries and delayed sends waiting
+ * for their time (one-shot schedules), and dead letters (the stage's
+ * dead-letter queue, which nothing polls). Redrive runs dead letters again from
+ * their first attempt; discard deletes them. Also "run cron now".
+ */
 import { InvokeCommand } from '@aws-sdk/client-lambda';
-import { GetQueueAttributesCommand, StartMessageMoveTaskCommand } from '@aws-sdk/client-sqs';
+import { ListSchedulesCommand } from '@aws-sdk/client-scheduler';
 import {
+  ChangeMessageVisibilityCommand,
+  DeleteMessageCommand,
+  GetQueueAttributesCommand,
+  type Message,
+  ReceiveMessageCommand,
+} from '@aws-sdk/client-sqs';
+import {
+  DEAD_LETTERS_READ,
+  type DeadLetterItem,
+  type DeadLettersResponse,
+  type DeadLetterView,
   handlerFunctionName,
+  jobSchedulePrefix,
   names,
   type QueueStats,
+  readDeadLetter,
   type ResolvedManifest,
 } from '@ericminassian/platform-core';
-import { Clock, Context, Effect, Layer, Option } from 'effect';
+import { Context, Effect, Layer, Option } from 'effect';
 import { Aws, type AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
+
+/** How much of a dead letter's payload the list shows. */
+const PREVIEW_CHARS = 300;
+
+/** A dead letter as read, with what acting on it needs. */
+interface Letter {
+  readonly message: Message;
+  readonly view: DeadLetterView | null;
+}
 
 export class AppQueues extends Context.Service<
   AppQueues,
   {
-    /** Depth, in-flight, dead-lettered and oldest-message age of each named queue. */
+    /** Each named queue's scheduled jobs and dead letters. */
     stats(
       app: string,
       stage: string,
       queueNames: ReadonlyArray<string>,
     ): Effect.Effect<ReadonlyArray<QueueStats>>;
-    /** Moves dead-lettered messages back to their source queue; answers the move task's handle. */
-    redrive(app: string, stage: string, queue: string): Effect.Effect<string, AwsError>;
+    /** The stage's dead letters: the queue's count, and up to `DEAD_LETTERS_READ` of them. */
+    deadLetters(app: string, stage: string): Effect.Effect<DeadLettersResponse>;
+    /**
+     * Runs dead letters again (`ids`, or all of them) from their first attempt, on the function
+     * their handler runs in now; answers how many. Letters whose handler is gone stay.
+     */
+    redrive(
+      app: string,
+      stage: string,
+      manifest: ResolvedManifest,
+      ids: ReadonlyArray<string> | undefined,
+    ): Effect.Effect<number, AwsError>;
+    /** Deletes dead letters (`ids`, or all of them); answers how many. */
+    discard(
+      app: string,
+      stage: string,
+      ids: ReadonlyArray<string> | undefined,
+    ): Effect.Effect<number, AwsError>;
     /**
      * Fires a cron now (async): the payload the scheduler sends, to the function it sends it to
-     * (the cron's own when it sets its memory or timeout, else the worker's).
+     * (the cron's own when it sets its memory, timeout or concurrency, else the worker's).
      */
     runCron(app: string, stage: string, manifest: ResolvedManifest, cron: string): Effect.Effect<void>;
   }
@@ -36,74 +78,117 @@ export class AppQueues extends Context.Service<
       const aws = yield* Aws;
       const settings = yield* Settings;
 
-      const queueRef = Effect.fnUntraced(function* (name: string) {
+      const deadQueueUrl = Effect.fnUntraced(function* (app: string, stage: string) {
         const { accountId, region } = yield* settings.runtime;
-        return {
-          url: `https://sqs.${region}.amazonaws.com/${accountId}/${name}`,
-          arn: `arn:aws:sqs:${region}:${accountId}:${name}`,
-        };
+        return `https://sqs.${region}.amazonaws.com/${accountId}/${names.deadLetters(app, stage)}`;
       });
 
-      /** None when the queue can't be read (not created yet, or gone). */
-      const depth = (url: string) =>
+      /** Messages in the queue; 0 when it doesn't exist (no worker, or not deployed yet). */
+      const total = (url: string) =>
         tryAws(() =>
           aws.sqs().send(
             new GetQueueAttributesCommand({
               QueueUrl: url,
-              AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+              AttributeNames: ['ApproximateNumberOfMessages'],
             }),
           ),
         ).pipe(
-          Effect.map((res) =>
-            Option.some({
-              visible: Number(res.Attributes?.ApproximateNumberOfMessages ?? 0),
-              inFlight: Number(res.Attributes?.ApproximateNumberOfMessagesNotVisible ?? 0),
-            }),
-          ),
-          Effect.orElseSucceed(() => Option.none<{ visible: number; inFlight: number }>()),
+          Effect.map((r) => Number(r.Attributes?.ApproximateNumberOfMessages ?? 0)),
+          Effect.orElseSucceed(() => 0),
         );
 
-      /**
-       * Age of the oldest message per queue, from the `AWS/SQS` metric SQS
-       * publishes for free (SQS has no queue attribute for it). One
-       * GetMetricData call covers every queue; it costs $0.01 per 1,000
-       * metrics and only runs when someone looks. Queues with no datapoint in
-       * the last 15 minutes are left out.
-       */
-      const oldestAges = Effect.fnUntraced(function* (queueNames: ReadonlyArray<string>) {
-        const ages = new Map<string, number>();
-        if (queueNames.length === 0) return ages;
-        const now = yield* Clock.currentTimeMillis;
-        const res = yield* tryAws(() =>
-          aws.cloudwatch().send(
-            new GetMetricDataCommand({
-              StartTime: new Date(now - 15 * 60_000),
-              EndTime: new Date(now),
-              ScanBy: 'TimestampDescending',
-              MetricDataQueries: queueNames.map((name, i) => ({
-                Id: `q${i}`,
-                MetricStat: {
-                  Metric: {
-                    Namespace: 'AWS/SQS',
-                    MetricName: 'ApproximateAgeOfOldestMessage',
-                    Dimensions: [{ Name: 'QueueName', Value: name }],
-                  },
-                  Period: 60,
-                  Stat: 'Maximum',
-                },
-              })),
+      const receive = (url: string, visibility: number) =>
+        tryAws(() =>
+          aws.sqs().send(
+            new ReceiveMessageCommand({
+              QueueUrl: url,
+              MaxNumberOfMessages: 10,
+              VisibilityTimeout: visibility,
+              MessageAttributeNames: ['All'],
             }),
           ),
-        ).pipe(Effect.option);
-        for (const r of Option.match(res, {
-          onNone: () => [],
-          onSome: (out) => out.MetricDataResults ?? [],
-        })) {
-          const name = queueNames[Number(r.Id?.slice(1))];
-          const latest = r.Values?.[0];
-          if (name !== undefined && latest !== undefined) ages.set(name, latest);
+        ).pipe(Effect.map((r) => r.Messages ?? []));
+
+      const letter = (message: Message): Letter => ({
+        message,
+        view: readDeadLetter(message.Body ?? '', message.MessageAttributes ?? {}),
+      });
+
+      /**
+       * Reads up to `max` dead letters without hiding them (visibility 0), so a look doesn't keep
+       * them from a redrive. SQS returns a sample per call, so this reads until a call brings
+       * nothing new.
+       */
+      const peek = Effect.fnUntraced(function* (url: string, max: number) {
+        const seen = new Map<string, Letter>();
+        while (seen.size < max) {
+          const batch = yield* receive(url, 0).pipe(Effect.orElseSucceed(() => []));
+          const fresh = batch.filter((m) => m.MessageId && !seen.has(m.MessageId));
+          if (fresh.length === 0) break;
+          for (const m of fresh) seen.set(m.MessageId!, letter(m));
         }
-        return ages;
+        return [...seen.values()].slice(0, max);
+      });
+
+      /**
+       * Takes dead letters (`ids`, or all) off the queue for `act` to handle, one batch at a time,
+       * hidden while it runs. `act` answers whether the letter is done (it's then deleted) or stays
+       * (made visible again). Answers how many were done.
+       */
+      const take = Effect.fnUntraced(function* (
+        url: string,
+        ids: ReadonlyArray<string> | undefined,
+        act: (l: Letter) => Effect.Effect<boolean, AwsError>,
+      ) {
+        const wanted = ids ? new Set(ids) : undefined;
+        const seen = new Set<string>();
+        let done = 0;
+        for (;;) {
+          if (wanted && wanted.size === 0) break;
+          const batch = (yield* receive(url, 60)).filter((m) => m.MessageId && !seen.has(m.MessageId));
+          if (batch.length === 0) break;
+          for (const m of batch) {
+            seen.add(m.MessageId!);
+            const mine = !wanted || wanted.has(m.MessageId!);
+            const finished = mine ? yield* act(letter(m)) : false;
+            if (finished) {
+              yield* tryAws(() =>
+                aws.sqs().send(new DeleteMessageCommand({ QueueUrl: url, ReceiptHandle: m.ReceiptHandle })),
+              );
+              done++;
+              wanted?.delete(m.MessageId!);
+            } else {
+              // Back to the queue at once, for the next look or another redrive.
+              yield* tryAws(() =>
+                aws.sqs().send(
+                  new ChangeMessageVisibilityCommand({
+                    QueueUrl: url,
+                    ReceiptHandle: m.ReceiptHandle,
+                    VisibilityTimeout: 0,
+                  }),
+                ),
+              ).pipe(Effect.ignore);
+            }
+          }
+        }
+        return done;
+      });
+
+      /** Jobs waiting under a schedule-name prefix in the stage's group. */
+      const scheduled = Effect.fnUntraced(function* (group: string, prefix: string) {
+        let count = 0;
+        let NextToken: string | undefined;
+        do {
+          const page = yield* tryAws(() =>
+            aws
+              .scheduler()
+              .send(new ListSchedulesCommand({ GroupName: group, NamePrefix: prefix, NextToken })),
+          ).pipe(Effect.option);
+          if (Option.isNone(page)) return count;
+          count += page.value.Schedules?.length ?? 0;
+          NextToken = page.value.NextToken;
+        } while (NextToken);
+        return count;
       });
 
       const stats = Effect.fn('AppQueues.stats')(function* (
@@ -111,42 +196,72 @@ export class AppQueues extends Context.Service<
         stage: string,
         queueNames: ReadonlyArray<string>,
       ) {
-        const [ages, rows] = yield* Effect.all(
-          [
-            oldestAges(queueNames.map((key) => names.queue(app, stage, key))),
-            Effect.forEach(
-              queueNames,
-              Effect.fnUntraced(function* (key: string) {
-                const main = yield* queueRef(names.queue(app, stage, key));
-                const dlq = yield* queueRef(names.deadLetterQueue(app, stage, key));
-                const [m, d] = yield* Effect.all([depth(main.url), depth(dlq.url)], {
-                  concurrency: 'unbounded',
-                });
-                return { key, m, d };
-              }),
-              { concurrency: 'unbounded' },
-            ),
-          ],
-          { concurrency: 'unbounded' },
+        if (queueNames.length === 0) return [];
+        const letters = yield* peek(yield* deadQueueUrl(app, stage), DEAD_LETTERS_READ);
+        const group = names.scheduleGroup(app, stage);
+        return yield* Effect.forEach(
+          queueNames,
+          (name) =>
+            Effect.map(scheduled(group, jobSchedulePrefix('queue', name)), (waiting): QueueStats => ({
+              name,
+              scheduled: waiting,
+              deadLetter: letters.filter((l) => l.view?.kind === 'queue' && l.view.name === name).length,
+            })),
+          { concurrency: 4 },
         );
-        return rows.map(({ key, m, d }): QueueStats => ({
-          name: key,
-          visible: Option.match(m, { onNone: () => 0, onSome: (x) => x.visible }),
-          inFlight: Option.match(m, { onNone: () => 0, onSome: (x) => x.inFlight }),
-          deadLetter: Option.match(d, { onNone: () => 0, onSome: (x) => x.visible }),
-          oldestAgeSeconds: ages.get(names.queue(app, stage, key)) ?? null,
-        }));
       });
 
-      const redrive = Effect.fn('AppQueues.redrive')(function* (app: string, stage: string, queue: string) {
-        const main = yield* queueRef(names.queue(app, stage, queue));
-        const dlq = yield* queueRef(names.deadLetterQueue(app, stage, queue));
-        const res = yield* tryAws(() =>
-          aws.sqs().send(new StartMessageMoveTaskCommand({ SourceArn: dlq.arn, DestinationArn: main.arn })),
+      const deadLetters = Effect.fn('AppQueues.deadLetters')(function* (app: string, stage: string) {
+        const url = yield* deadQueueUrl(app, stage);
+        const [count, letters] = yield* Effect.all([total(url), peek(url, DEAD_LETTERS_READ)], {
+          concurrency: 'unbounded',
+        });
+        return { total: Math.max(count, letters.length), items: letters.map(toItem) };
+      });
+
+      const redrive = Effect.fn('AppQueues.redrive')(function* (
+        app: string,
+        stage: string,
+        manifest: ResolvedManifest,
+        ids: ReadonlyArray<string> | undefined,
+      ) {
+        const declared = {
+          queue: Object.keys(manifest.queues),
+          event: manifest.events,
+          cron: Object.keys(manifest.crons),
+        };
+        return yield* take(yield* deadQueueUrl(app, stage), ids, (l) =>
+          Effect.gen(function* () {
+            const v = l.view;
+            if (!v) return false;
+            let fn: string;
+            if (v.kind === 'invoke') {
+              if (!manifest.worker) return false;
+              fn = names.workerFunction(app, stage);
+            } else {
+              if (!declared[v.kind].includes(v.name)) return false;
+              fn = handlerFunctionName(app, stage, manifest, v.kind, v.name);
+            }
+            yield* tryAws(() =>
+              aws.lambda().send(
+                new InvokeCommand({
+                  FunctionName: fn,
+                  InvocationType: 'Event',
+                  Payload: new TextEncoder().encode(JSON.stringify(v.redrive)),
+                }),
+              ),
+            );
+            return true;
+          }),
         );
-        if (!res.TaskHandle)
-          return yield* Effect.die(new Error('SQS started a message move task without a handle'));
-        return res.TaskHandle;
+      });
+
+      const discard = Effect.fn('AppQueues.discard')(function* (
+        app: string,
+        stage: string,
+        ids: ReadonlyArray<string> | undefined,
+      ) {
+        return yield* take(yield* deadQueueUrl(app, stage), ids, () => Effect.succeed(true));
       });
 
       const runCron = Effect.fn('AppQueues.runCron')(function* (
@@ -166,7 +281,37 @@ export class AppQueues extends Context.Service<
         );
       }, Effect.orDie);
 
-      return AppQueues.of({ stats, redrive, runCron });
+      return AppQueues.of({ stats, deadLetters, redrive, discard, runCron });
     }),
   );
+}
+
+/** What the console shows for a dead letter. */
+export function toItem(l: Letter): DeadLetterItem {
+  const id = l.message.MessageId ?? '';
+  const v = l.view;
+  if (!v) {
+    return {
+      id,
+      kind: 'unknown',
+      name: '',
+      attempts: null,
+      error: { name: 'Unknown', message: 'not a message the platform wrote' },
+      failedAt: null,
+      source: 'unknown',
+      preview: (l.message.Body ?? '').slice(0, PREVIEW_CHARS),
+    };
+  }
+  const r = v.redrive;
+  const payload = r.__platform === 'invoke' ? r.payload : r.kind === 'event' ? r.detail : r.body;
+  return {
+    id,
+    kind: v.kind,
+    name: v.name,
+    attempts: v.attempts,
+    error: v.error,
+    failedAt: v.failedAt === null ? null : new Date(v.failedAt).toISOString(),
+    source: v.source,
+    preview: payload === undefined ? '' : JSON.stringify(payload).slice(0, PREVIEW_CHARS),
+  };
 }

@@ -117,6 +117,12 @@ export const ObserveLive = HttpApiBuilder.group(
           );
         }),
 
+      deadLetters: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          return yield* queues.deadLetters(app, stage);
+        }),
+
       services: ({ params, query }) =>
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);

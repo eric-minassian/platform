@@ -155,6 +155,56 @@ export function registerManage(program: Command): void {
     }),
   );
 
+  // ------------------------------------------------------------ dead letters
+  const jobs = program
+    .command('jobs')
+    .description('dead letters: queue messages, events and cron runs that failed every attempt');
+  withTarget(jobs.command('dead').description('list the stage’s dead letters')).action(
+    action(async (opts: TargetOpts) => {
+      const res = await apiFor(opts).deadLetters(await appFor(opts), opts.stage);
+      result(res, (r) => {
+        if (r.total === 0) return pc.dim('no dead letters');
+        const lines = [
+          table(
+            r.items.map((d) => ({
+              id: d.id,
+              job: d.kind === 'unknown' ? '?' : `${d.kind} ${d.name}`,
+              attempts: d.attempts ?? '-',
+              failed: d.failedAt ? shortTime(d.failedAt) : '-',
+              error: `${d.error.name}: ${d.error.message}`.slice(0, 80),
+            })),
+          ),
+        ];
+        if (r.total > r.items.length) lines.push(pc.dim(`${r.items.length} of about ${r.total} shown`));
+        return lines.join('\n');
+      });
+    }),
+  );
+  const deadLetterAction = (verb: 'redrive' | 'discard', what: string) =>
+    withTarget(
+      jobs
+        .command(`${verb} [ids...]`)
+        .description(`${what} the given dead letters (ids from \`plat jobs dead\`), or with --all every one`)
+        .option('--all', `${verb} every dead letter on the stage`)
+        .option('--yes', 'skip the confirmation (discarding all)'),
+    ).action(
+      action(async (ids: string[], opts: TargetOpts & { all?: boolean; yes?: boolean }) => {
+        if (!ids.length && !opts.all)
+          throw new CliError('name the dead letters to act on, or pass --all', { exitCode: EXIT.usage });
+        const app = await appFor(opts);
+        if (verb === 'discard' && opts.all)
+          await confirmByTyping(`discard every dead letter of ${app}/${opts.stage}?`, opts.stage, opts.yes);
+        const r = await apiFor(opts).deadLetterAction(app, opts.stage, verb, opts.all ? undefined : ids);
+        result({ [verb === 'redrive' ? 'redriven' : 'discarded']: r.count, stage: opts.stage }, () =>
+          verb === 'redrive'
+            ? `${pc.green('✓')} redrove ${r.count} dead letter${r.count === 1 ? '' : 's'} on ${opts.stage}`
+            : `${pc.green('✓')} discarded ${r.count} dead letter${r.count === 1 ? '' : 's'} on ${opts.stage}`,
+        );
+      }),
+    );
+  deadLetterAction('redrive', 'run again, from the first attempt,');
+  deadLetterAction('discard', 'delete');
+
   // ------------------------------------------------------------ crons
   const cron = program.command('cron').description('scheduled jobs');
   withTarget(cron.command('run <name>').description('run a cron now on a deployed stage')).action(
