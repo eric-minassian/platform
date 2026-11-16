@@ -1,27 +1,65 @@
 /**
- * Uptime pinger (every 5 minutes): hits `/__platform/health` on every active
- * prod stage, records the result, and alerts on up→down (after two failed
- * checks in a row) and down→up transitions. For prod stages that send email
- * it also reads SES's sending status, and alerts when SES pauses or resumes it.
+ * Uptime (every 5 minutes) for every active prod stage, without waking servers
+ * that have nothing to do. A Web Function bills the memory it holds for an
+ * environment's whole life, about 5 minutes after its last request, so a
+ * 5-minute health check kept every prod server warm all month and cold-started
+ * most checks.
+ *
+ * - **From traffic.** A stage that served requests in the last 10 complete
+ *   minutes (its whole-stage minute rollups) is up unless at least 3 were
+ *   served and half or more were 5xx. No request is sent.
+ * - **Health checks.** A GET of `/__platform/health` for a stage that served
+ *   nothing: one without a server every run (the router answers it at the
+ *   edge, no function runs); one with a server when its newest uptime row is
+ *   6 hours old, or is traffic (it just went quiet, which is also how a server
+ *   that can no longer start looks), and every run while its last result
+ *   failed, so two failures in a row still take 10 minutes and a recovery is
+ *   seen. Otherwise nothing is recorded and its up/down state stays.
+ * - **Never** a check of the control plane's own app, whose worker this is.
+ *
+ * Each result is an uptime row; two failed results in a row are DOWN and
+ * alert, and a success after that alerts back up. For prod stages that send
+ * email it also reads SES's sending status, and alerts when SES pauses or
+ * resumes it.
  */
 import { PublishCommand } from '@aws-sdk/client-sns';
 import { PutCommand } from '@aws-sdk/lib-dynamodb';
-import { type EmailSending, HEALTH_PATH, PROD_STAGE, telemetryKeys } from '@ericminassian/platform-core';
+import {
+  bucketStart,
+  type EmailSending,
+  HEALTH_PATH,
+  PROD_STAGE,
+  platformNames,
+  telemetryKeys,
+  type UptimeCheck,
+  type UptimePoint,
+  type UptimeTraffic,
+} from '@ericminassian/platform-core';
 import { Clock, Context, Effect, Layer, Option } from 'effect';
 import { FetchHttpClient, HttpClient } from 'effect/http';
 import { Aws, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 import { AppEmail } from '../email.ts';
-import { type StageItem, Store } from '../store.ts';
+import { type DeploymentItem, type StageItem, Store } from '../store.ts';
+import { TelemetryQuery } from '../telemetry/query.ts';
 
 const UPTIME_TTL_DAYS = 35;
 const FAILURES_BEFORE_DOWN = 2;
+/** The complete minutes of a stage's own requests that stand for a check. */
+export const TRAFFIC_WINDOW_MINUTES = 10;
+/** Fewest requests in the window that can count as down. */
+const MIN_REQUESTS_FOR_DOWN = 3;
+/** How often a quiet stage with a server gets a health check. */
+export const QUIET_CHECK_EVERY_MS = 6 * 3_600_000;
 
 export interface CheckResult {
   readonly ok: boolean;
   readonly status: number;
   readonly ms: number;
 }
+
+/** One uptime result as the pinger records it: a row without its time. */
+export type UptimeResult = Omit<UptimeCheck, 'ts'> | Omit<UptimeTraffic, 'ts'>;
 
 /** Next up/down state for a stage given its stored state and a new result (pure). */
 export function nextUptimeState(
@@ -33,6 +71,36 @@ export function nextUptimeState(
   const down = failures >= FAILURES_BEFORE_DOWN;
   const wasUp = prev.up !== false;
   return { up: !down && wasUp, failures, transition: down && wasUp ? 'down' : null };
+}
+
+/** A stage's requests in the window as a result (pure); none when it served nothing. */
+export function trafficResult(req: number, s5xx: number): Omit<UptimeTraffic, 'ts'> | undefined {
+  if (req <= 0) return undefined;
+  return { source: 'traffic', ok: !(req >= MIN_REQUESTS_FOR_DOWN && s5xx * 2 >= req), req, s5xx };
+}
+
+/** Whether a prod stage that served nothing in the window gets a health check now (pure; see the module docs). */
+export function needsCheck(input: {
+  readonly app: string;
+  /** Its live deployment has a server. */
+  readonly server: boolean;
+  readonly stage: Pick<StageItem, 'up' | 'failures'>;
+  /** Its newest uptime row. */
+  readonly last: Pick<UptimePoint, 'ts' | 'source'> | undefined;
+  readonly now: number;
+}): boolean {
+  const { app, server, stage, last, now } = input;
+  if (app === platformNames.controlPlaneApp) return false;
+  if (!server) return true;
+  if ((stage.failures ?? 0) > 0 || stage.up === false) return true;
+  if (!last || last.source === 'traffic') return true;
+  return now - Date.parse(last.ts) >= QUIET_CHECK_EVERY_MS;
+}
+
+/** What a result says, for an alert (pure). */
+export function describeResult(url: string, r: UptimeResult): string {
+  if (r.source === 'check') return `${url}${HEALTH_PATH} → ${r.status || 'no response'} in ${r.ms}ms`;
+  return `${r.s5xx} of ${r.req} requests in the last ${TRAFFIC_WINDOW_MINUTES} minutes were 5xx`;
 }
 
 /** Next email state for a stage given the stored one and what SES says now (pure). */
@@ -86,14 +154,14 @@ export class Pinger extends Context.Service<
   {
     /** One health check: 2xx is up; a redirect, an error status or no answer within 10 s is not. */
     check(url: string): Effect.Effect<CheckResult>;
-    /** Checks every active prod stage; answers how many were checked and which apps are down. */
+    /** Every active prod stage; answers how many there were and which apps are down. */
     readonly run: Effect.Effect<{ readonly checked: number; readonly down: ReadonlyArray<string> }>;
   }
 >()('@ericminassian/platform-control-plane/Pinger') {
   static readonly layer: Layer.Layer<
     Pinger,
     never,
-    Aws | AppEmail | Settings | Store | HttpClient.HttpClient
+    Aws | AppEmail | Settings | Store | TelemetryQuery | HttpClient.HttpClient
   > = Layer.effect(
     Pinger,
     Effect.gen(function* () {
@@ -101,6 +169,7 @@ export class Pinger extends Context.Service<
       const email = yield* AppEmail;
       const settings = yield* Settings;
       const store = yield* Store;
+      const telemetry = yield* TelemetryQuery;
       const http = yield* HttpClient.HttpClient;
 
       const check = Effect.fn('Pinger.check')(function* (url: string) {
@@ -129,9 +198,8 @@ export class Pinger extends Context.Service<
         });
 
       /** Records SES's sending status for a prod stage that sends email, and alerts when it changes. */
-      const checkEmail = Effect.fnUntraced(function* (s: StageItem) {
-        const live = s.currentDeployment ? yield* store.getDeployment(s.currentDeployment) : Option.none();
-        if (!Option.exists(live, (d) => d.manifest?.email !== undefined)) {
+      const checkEmail = Effect.fnUntraced(function* (s: StageItem, live: DeploymentItem | undefined) {
+        if (live?.manifest?.email === undefined) {
           // A stage that stopped sending email has no pause to remember.
           if (s.emailPaused !== undefined)
             yield* store.updateStage(s.app, s.stage, { emailPaused: undefined, emailChangedAt: undefined });
@@ -155,47 +223,81 @@ export class Pinger extends Context.Service<
         }
       });
 
+      /** This run's result for a stage, if it gets one (see the module docs). */
+      const observe = Effect.fnUntraced(function* (s: StageItem, server: boolean, now: number) {
+        if (server) {
+          const end = bucketStart(now, '1m');
+          const { points } = yield* telemetry.metrics(s.app, s.stage, {
+            from: end - TRAFFIC_WINDOW_MINUTES * 60_000,
+            to: end - 1,
+            res: '1m',
+          });
+          const traffic = trafficResult(
+            points.reduce((a, p) => a + p.req, 0),
+            points.reduce((a, p) => a + p.s5xx, 0),
+          );
+          if (traffic) return Option.some<UptimeResult>(traffic);
+        }
+        const last = server ? Option.getOrUndefined(yield* telemetry.lastUptime(s.app, s.stage)) : undefined;
+        if (!needsCheck({ app: s.app, server, stage: s, last, now })) return Option.none<UptimeResult>();
+        return Option.some<UptimeResult>({ source: 'check', ...(yield* check(s.url)) });
+      });
+
       const checkStage = Effect.fnUntraced(function* (s: StageItem) {
         const { telemetryTable } = yield* settings.runtime;
-        const result = yield* check(s.url);
-        const ts = yield* Clock.currentTimeMillis;
-        yield* tryAws(() =>
-          aws.ddb().send(
-            new PutCommand({
-              TableName: telemetryTable,
-              Item: {
-                pk: telemetryKeys.uptime(s.app, s.stage),
-                sk: telemetryKeys.time(ts),
-                ...result,
-                ttl: Math.floor(ts / 1000) + UPTIME_TTL_DAYS * 86_400,
-              },
-            }),
-          ),
-        );
-        const next = nextUptimeState(s, result.ok);
-        if (next.up !== s.up || next.failures !== (s.failures ?? 0)) {
-          yield* store.updateStage(s.app, s.stage, {
-            up: next.up,
-            failures: next.failures,
-            ...(next.transition ? { upChangedAt: new Date(ts).toISOString() } : {}),
-          });
-        }
-        if (next.transition) {
-          const what = next.transition === 'down' ? 'DOWN' : 'back UP';
-          yield* alert(
-            `[platform] ${s.app} is ${what}`,
-            `${s.url}${HEALTH_PATH} → ${result.status || 'no response'} in ${result.ms}ms\n\n${settings.consoleUrl}/apps/${s.app}`,
+        const live = s.currentDeployment
+          ? Option.getOrUndefined(yield* store.getDeployment(s.currentDeployment))
+          : undefined;
+        // The route names a Web Function endpoint only when there's a server: the answer when the
+        // live deployment can't be read.
+        const server = live?.manifest ? Boolean(live.manifest.web?.server) : s.route?.o !== undefined;
+        // A stage with no route (no web, no public stores) has nothing at the edge to answer.
+        const result = s.route
+          ? yield* observe(s, server, yield* Clock.currentTimeMillis)
+          : Option.none<UptimeResult>();
+        let up = s.up !== false;
+        if (Option.isSome(result)) {
+          const r = result.value;
+          const ts = yield* Clock.currentTimeMillis;
+          yield* tryAws(() =>
+            aws.ddb().send(
+              new PutCommand({
+                TableName: telemetryTable,
+                Item: {
+                  pk: telemetryKeys.uptime(s.app, s.stage),
+                  sk: telemetryKeys.time(ts),
+                  ...r,
+                  ttl: Math.floor(ts / 1000) + UPTIME_TTL_DAYS * 86_400,
+                },
+              }),
+            ),
           );
+          const next = nextUptimeState(s, r.ok);
+          if (next.up !== s.up || next.failures !== (s.failures ?? 0)) {
+            yield* store.updateStage(s.app, s.stage, {
+              up: next.up,
+              failures: next.failures,
+              ...(next.transition ? { upChangedAt: new Date(ts).toISOString() } : {}),
+            });
+          }
+          if (next.transition) {
+            const what = next.transition === 'down' ? 'DOWN' : 'back UP';
+            yield* alert(
+              `[platform] ${s.app} is ${what}`,
+              `${describeResult(s.url, r)}\n\n${settings.consoleUrl}/apps/${s.app}`,
+            );
+          }
+          up = next.up;
         }
         // SES being unreadable (throttled, or a permission missing) must not stop the uptime checks.
-        yield* checkEmail(s).pipe(
+        yield* checkEmail(s, live).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning('could not check email sending', cause).pipe(
               Effect.annotateLogs({ app: s.app, stage: s.stage }),
             ),
           ),
         );
-        return next.up;
+        return up;
       });
 
       const run = Effect.gen(function* () {

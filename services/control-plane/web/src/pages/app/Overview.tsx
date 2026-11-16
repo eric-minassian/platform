@@ -1,5 +1,5 @@
 import { useAtomValue } from '@effect/atom-react';
-import type { CustomMetricStats } from '@ericminassian/platform-core';
+import type { CustomMetricStats, UptimePoint } from '@ericminassian/platform-core';
 import { Option } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
 import { useState } from 'react';
@@ -46,8 +46,8 @@ export function OverviewTab() {
         const errors = m.points.reduce((a, p) => a + p.s5xx, 0);
         const cold = m.points.reduce((a, p) => a + p.cold, 0);
         const p95s = m.points.map((p) => p.p95).filter((v): v is number => v !== null);
-        const checks = Option.getOrElse(AsyncResult.value(uptime), () => []);
-        const up = checks.length ? checks.filter((c) => c.ok).length / checks.length : null;
+        const results = Option.getOrElse(AsyncResult.value(uptime), () => []);
+        const up = results.length ? results.filter((r) => r.ok).length / results.length : null;
         const data = m.points.map((p) => ({ ...p, errRate: p.req ? p.s5xx / p.req : 0 }));
         return (
           <div className="space-y-3">
@@ -64,7 +64,7 @@ export function OverviewTab() {
                 label="Uptime"
                 value={fmtPct(up, 2)}
                 tone={up === null ? 'muted' : up > 0.999 ? 'ok' : 'warn'}
-                hint={checks.length ? `${checks.length} checks` : 'prod only'}
+                hint={results.length ? uptimeSources(results) : 'prod only'}
               />
             </div>
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -119,6 +119,20 @@ export function OverviewTab() {
       }}
     </Loaded>
   );
+}
+
+/**
+ * Where the uptime figure comes from: windows of the stage's own requests,
+ * and health checks, which the pinger sends only when the stage served
+ * nothing (or has no server).
+ */
+function uptimeSources(results: ReadonlyArray<UptimePoint>): string {
+  const traffic = results.filter((r) => r.source === 'traffic').length;
+  const checks = results.length - traffic;
+  return [
+    ...(traffic ? [`${fmtNum(traffic)} from traffic`] : []),
+    ...(checks ? [`${fmtNum(checks)} health ${checks === 1 ? 'check' : 'checks'}`] : []),
+  ].join(' · ');
 }
 
 /**

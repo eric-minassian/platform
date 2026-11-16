@@ -207,6 +207,8 @@ export const platformNames = {
   containerSchedulerRole: 'platform-container-scheduler',
   /** Description of the API's subscribe-only key for `public` stages (how the control plane finds it). */
   realtimePublicKey: 'platform-public-subscribe',
+  /** The control plane's own app name (services/control-plane/plat.config.ts), stage prod. */
+  controlPlaneApp: 'platform',
   controlPlaneRole: 'platform-control-plane',
   ciRole: 'platform-ci',
   alertsTopic: 'platform-alerts',

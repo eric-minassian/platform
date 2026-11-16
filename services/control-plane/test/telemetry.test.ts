@@ -16,6 +16,7 @@ import {
   toMetricsPoints,
   toRouteStats,
   toServiceRuns,
+  toUptimePoint,
 } from '../src/telemetry/query.ts';
 import { TelemetryWriter } from '../src/telemetry/write.ts';
 import { awsLayer, githubApp, memoryStore, runtime, settingsLayer } from './support.ts';
@@ -91,6 +92,18 @@ describe('aggregate', () => {
     ]);
     // 1m TTL = 3 days after the bucket.
     expect(minute!.ttl).toBe(Math.floor(Date.parse('2026-11-14T10:15:00Z') / 1000) + 3 * 86400);
+  });
+
+  it('leaves the platform’s health probes out of the traffic', () => {
+    const health = { route: '/__platform/health', path: '/__platform/health' };
+    const agg = aggregate([req(health), req({ ...health, status: 500, cold: true }), req()]);
+    const minute = agg.rollups.find((r) => r.pk === 'm#todo#prod#1m');
+    expect(minute!.add).toEqual({ req: 1, s2xx: 1, l3: 1 });
+    expect(agg.rollups.filter((r) => r.pk.startsWith('r#')).map((r) => r.sk)).toEqual([
+      '2026-11-14T10:00:00.000Z#GET /api/todos',
+      '2026-11-14T00:00:00.000Z#GET /api/todos',
+    ]);
+    expect(aggregate([req(health)]).rollups).toEqual([]);
   });
 
   it('tracks jobs, metrics and environment starts', () => {
@@ -316,6 +329,31 @@ describe('query mapping', () => {
     const h = summarizeHealth(toMetricsPoints(items, range), items, true);
     expect(h).toMatchObject({ up: true, errorRate: 0.1, p95: 100 });
     expect(h.reqPerMin).toBeGreaterThan(0);
+  });
+
+  it('reads uptime rows from traffic and checks, and older rows as checks', () => {
+    const ts = '2026-11-16T12:00:20.000Z';
+    expect(toUptimePoint({ sk: ts, source: 'traffic', ok: false, req: 40, s5xx: 31, ttl: 1 })).toEqual({
+      ts,
+      ok: false,
+      source: 'traffic',
+      req: 40,
+      s5xx: 31,
+    });
+    expect(toUptimePoint({ sk: ts, source: 'check', ok: true, status: 200, ms: 41 })).toEqual({
+      ts,
+      ok: true,
+      source: 'check',
+      status: 200,
+      ms: 41,
+    });
+    expect(toUptimePoint({ sk: ts, ok: false, status: 0, ms: 10_000 })).toEqual({
+      ts,
+      ok: false,
+      source: 'check',
+      status: 0,
+      ms: 10_000,
+    });
   });
 });
 

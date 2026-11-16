@@ -26,7 +26,7 @@ import {
   telemetryKeys,
   type UptimePoint,
 } from '@ericminassian/platform-core';
-import { Clock, Context, Effect, Layer } from 'effect';
+import { Clock, Context, Effect, Layer, Option } from 'effect';
 import { Aws, AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 
@@ -312,6 +312,18 @@ export function summarizeHealth(
   };
 }
 
+/**
+ * An uptime row as the API shows it (pure). The pinger writes `source`; rows
+ * from before it counted traffic have none and were all health checks.
+ */
+export function toUptimePoint(i: Item): UptimePoint {
+  const ts = String(i.sk);
+  const ok = Boolean(i.ok);
+  return i.source === 'traffic'
+    ? { ts, ok, source: 'traffic', req: num(i.req), s5xx: num(i.s5xx) }
+    : { ts, ok, source: 'check', status: num(i.status), ms: num(i.ms) };
+}
+
 // ------------------------------------------------------------------ I/O
 
 const isoRange = (r: TimeRange): [string, string] => [
@@ -359,6 +371,8 @@ export class TelemetryQuery extends Context.Service<
       status: ErrorStatus,
     ): Effect.Effect<boolean>;
     uptime(app: string, stage: string, range: TimeRange): Effect.Effect<ReadonlyArray<UptimePoint>>;
+    /** The stage's newest uptime row: the pinger's memory of how it last knew the stage was up. */
+    lastUptime(app: string, stage: string): Effect.Effect<Option.Option<UptimePoint>>;
     /** Daily cost over the last `days` days (default 35). */
     cost(app: string, days?: number): Effect.Effect<CostResponse>;
     /** Last-hour health of an app's prod stage. */
@@ -513,12 +527,23 @@ export class TelemetryQuery extends Context.Service<
           telemetryKeys.time(range.from),
           `${telemetryKeys.time(range.to)}\uffff`,
         );
-        return items.map((i): UptimePoint => ({
-          ts: String(i.sk),
-          ok: Boolean(i.ok),
-          status: num(i.status),
-          ms: num(i.ms),
-        }));
+        return items.map(toUptimePoint);
+      }, Effect.orDie);
+
+      const lastUptime = Effect.fn('TelemetryQuery.lastUptime')(function* (app: string, stage: string) {
+        const { telemetryTable } = yield* settings.runtime;
+        const res = yield* tryAws(() =>
+          aws.ddb().send(
+            new QueryCommand({
+              TableName: telemetryTable,
+              KeyConditionExpression: 'pk = :pk',
+              ExpressionAttributeValues: { ':pk': telemetryKeys.uptime(app, stage) },
+              ScanIndexForward: false,
+              Limit: 1,
+            }),
+          ),
+        );
+        return Option.map(Option.fromNullishOr(res.Items?.[0]), toUptimePoint);
       }, Effect.orDie);
 
       const cost = Effect.fn('TelemetryQuery.cost')(function* (app: string, days = 35) {
@@ -554,6 +579,7 @@ export class TelemetryQuery extends Context.Service<
         errors,
         setErrorStatus,
         uptime,
+        lastUptime,
         cost,
         health,
       });

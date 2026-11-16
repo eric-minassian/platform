@@ -544,12 +544,28 @@ export const TraceResponse = Schema.Struct({
 });
 export type TraceResponse = typeof TraceResponse.Type;
 
-export const UptimePoint = Schema.Struct({
+/** A GET of the stage's health path, for a stage that served nothing lately or has no server. */
+export const UptimeCheck = Schema.Struct({
   ts: Schema.String,
   ok: Schema.Boolean,
+  source: Schema.Literal('check'),
+  /** The HTTP status; 0 when nothing answered within 10 s. */
   status: Schema.Finite,
   ms: Schema.Finite,
 });
+export type UptimeCheck = typeof UptimeCheck.Type;
+
+/** The stage's own requests in the 10 minutes before `ts`: down when at least 3, half of them 5xx. */
+export const UptimeTraffic = Schema.Struct({
+  ts: Schema.String,
+  ok: Schema.Boolean,
+  source: Schema.Literal('traffic'),
+  req: Schema.Finite,
+  s5xx: Schema.Finite,
+});
+export type UptimeTraffic = typeof UptimeTraffic.Type;
+
+export const UptimePoint = Schema.Union([UptimeCheck, UptimeTraffic]);
 export type UptimePoint = typeof UptimePoint.Type;
 
 /** Monthly cost of one container if it runs all month (`estimateContainerCost`). */
