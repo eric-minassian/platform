@@ -52,9 +52,12 @@ import {
   RollbackResponse,
   RouteStats,
   SecretsResponse,
+  ServiceActionResponse,
+  ServicesResponse,
   StageDestroyed,
   StageDestroying,
   StageRecord,
+  StartServiceRequest,
   StorageResponse,
   SuppressedResponse,
   TraceResponse,
@@ -119,7 +122,10 @@ export class NotFound extends Schema.TaggedError<NotFound, { readonly brand: uni
   static readonly of = (what: string) => new NotFound({ code: 'not_found', message: `${what} not found` });
 }
 
-/** 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`, `redrive_failed`, `paused_by_aws`. */
+/**
+ * 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`,
+ * `redrive_failed`, `paused_by_aws`, `service_action_failed`.
+ */
 export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: unique symbol }>()(
   'Conflict',
   errorFields,
@@ -390,6 +396,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       success: LimitsResponse,
       error: errors,
     }),
+    /** The stage's long-running services: ECS state, CPU and memory, starts and failed runs. */
+    HttpApiEndpoint.get('services', '/apps/:app/services', {
+      params: app,
+      query: rangeQuery,
+      success: ServicesResponse,
+      error: errors,
+    }),
     HttpApiEndpoint.get('errors', '/apps/:app/errors', {
       params: app,
       query: { ...stageQuery, status: Schema.optional(ErrorStatus) },
@@ -421,7 +434,8 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       query: {
         ...rangeQuery,
         q: Schema.optional(Schema.String),
-        stream: Schema.optional(Schema.Literals(['web', 'worker'])),
+        /** `web`, `worker` or `service:<name>`. */
+        stream: Schema.optional(Schema.String),
         limit,
         next: Schema.optional(Schema.String),
       },
@@ -435,7 +449,12 @@ export class ObserveApi extends HttpApiGroup.make('observe')
      */
     HttpApiEndpoint.get('tail', '/apps/:app/logs/tail', {
       params: app,
-      query: { ...stageQuery, q: Schema.optional(Schema.String) },
+      query: {
+        ...stageQuery,
+        q: Schema.optional(Schema.String),
+        /** `web`, `worker` or `service:<name>`. */
+        stream: Schema.optional(Schema.String),
+      },
       success: HttpApiSchema.StreamSse({ events: TailEvent, keepAlive: '20 seconds' }),
       error: errors,
     }),
@@ -532,6 +551,31 @@ export class ManageApi extends HttpApiGroup.make('manage')
       params: app,
       query: stageQuery,
       success: EmailSending,
+      error: errors,
+    }),
+    /** Replaces the service's task with a fresh one on the same build. */
+    HttpApiEndpoint.post('restartService', '/apps/:app/services/:name/restart', {
+      params: { ...app, name: Schema.String },
+      query: stageQuery,
+      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
+      error: errors,
+    }),
+    /**
+     * Runs it (desired 1). It stops again after `minutes` when given; on
+     * previews always, by default after its `previewMinutes` (30 when that is 0).
+     */
+    HttpApiEndpoint.post('startService', '/apps/:app/services/:name/start', {
+      params: { ...app, name: Schema.String },
+      query: stageQuery,
+      payload: StartServiceRequest,
+      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
+      error: errors,
+    }),
+    /** Scales it to zero until it is started again or the stage is redeployed. */
+    HttpApiEndpoint.post('stopService', '/apps/:app/services/:name/stop', {
+      params: { ...app, name: Schema.String },
+      query: stageQuery,
+      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
       error: errors,
     }),
     HttpApiEndpoint.post('redrive', '/apps/:app/queues/:name/redrive', {

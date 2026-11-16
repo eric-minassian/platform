@@ -72,6 +72,8 @@ export const TAGS = {
   managed: 'platform:managed',
   app: 'platform:app',
   stage: 'platform:stage',
+  /** On resources built per deployment (a service's task definition), so it can be found again. */
+  deployment: 'platform:deployment',
 } as const;
 
 /** The production stage. Its host has no stage suffix. */
@@ -81,3 +83,20 @@ export const LOCAL_STAGE = 'local';
 
 /** Lambda runtime for both Web Functions and worker (Event) Functions. */
 export const NODE_RUNTIME = 'nodejs24.x';
+
+/**
+ * Base of every container image the platform builds: Node.js 24 on Debian
+ * slim, linux/arm64, pinned to one image manifest (not the multi-platform
+ * index). The engine copies it from ECR Public into the platform's
+ * repository the first time a deploy needs it, so bumping it is a deliberate
+ * change: look up the arm64 entry of the tag's index and update both fields.
+ */
+export const CONTAINER_BASE_IMAGE = {
+  registry: 'public.ecr.aws',
+  repository: 'docker/library/node',
+  tag: '24-slim',
+  digest: 'sha256:5f8fabfed57b75127de2f584593d67a9e8c90e6b0f65652871f9ef0f759c0299',
+} as const;
+
+/** Environment variable naming the service a container runs (`ais`). */
+export const SERVICE_ENV = 'PLATFORM_SERVICE';
