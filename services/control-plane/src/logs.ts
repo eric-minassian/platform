@@ -91,6 +91,8 @@ export function describe(e: TelemetryEvent): string {
       return e.msg;
     case 'metric':
       return `metric ${e.name}=${e.value}${e.unit ?? ''}`;
+    case 'limit':
+      return `limit ${e.name} ${e.ok ? 'ok' : 'over'}`;
     case 'env':
       return `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
     default:

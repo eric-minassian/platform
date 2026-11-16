@@ -10,6 +10,7 @@ import {
   parseRange,
   summarizeHealth,
   toJobStats,
+  toLimitStats,
   toMetricsPoints,
   toRouteStats,
 } from '../src/telemetry/query.ts';
@@ -75,6 +76,30 @@ describe('aggregate', () => {
     expect(job!.set).toMatchObject({ kind: 'queue', name: 'emails', lastRun: T + 1000 });
     expect(agg.rollups.find((r) => r.pk === 'c#todo#prod#1d')!.add).toEqual({ count: 1, sum: 2 });
     expect(agg.rollups.find((r) => r.pk === 'm#todo#prod#1m')!.add).toEqual({ webStarts: 1 });
+  });
+
+  it('counts rate limit checks per limit, allowed apart from denied', () => {
+    const limit = (ts: number, name: string, ok: boolean): TelemetryEvent => ({
+      ...base,
+      t: 'limit',
+      ts,
+      name,
+      ok,
+    });
+    const agg = aggregate([
+      limit(T, 'signups', true),
+      limit(T + 1000, 'signups', false),
+      limit(T + 2000, 'signups', false),
+      limit(T, 'writes', true),
+    ]);
+    const hourly = agg.rollups.filter((r) => r.pk === 'l#todo#prod#1h');
+    expect(hourly.map((r) => [r.sk, r.add, r.set])).toEqual([
+      ['2026-11-14T10:00:00.000Z#signups', { allowed: 1, denied: 2 }, { name: 'signups' }],
+      ['2026-11-14T10:00:00.000Z#writes', { allowed: 1 }, { name: 'writes' }],
+    ]);
+    expect(agg.rollups.filter((r) => r.pk === 'l#todo#prod#1d')).toHaveLength(2);
+    // Minute buckets are for the whole stage only.
+    expect(agg.rollups.some((r) => r.pk === 'l#todo#prod#1m')).toBe(false);
   });
 
   it('groups errors by fingerprint and keeps the latest sample', () => {
@@ -158,6 +183,31 @@ describe('query mapping', () => {
     expect(jobs).toEqual([
       { kind: 'cron', name: 'nightly', ok: 1, error: 0, p95: null, lastRun: new Date(T).toISOString() },
       { kind: 'queue', name: 'emails', ok: 0, error: 0, p95: null },
+    ]);
+  });
+
+  it('zero-fills each limit and puts the most denied first', () => {
+    const range = {
+      from: Date.parse('2026-11-14T08:00:00Z'),
+      to: Date.parse('2026-11-14T10:30:00Z'),
+      res: '1h' as const,
+    };
+    const limits = toLimitStats(
+      [
+        { sk: '2026-11-14T08:00:00.000Z#writes', name: 'writes', allowed: 40 },
+        { sk: '2026-11-14T10:00:00.000Z#writes', name: 'writes', allowed: 2, denied: 1 },
+        { sk: '2026-11-14T09:00:00.000Z#signups', name: 'signups', allowed: 3, denied: 9 },
+      ],
+      range,
+    );
+    expect(limits.map((l) => [l.name, l.allowed, l.denied])).toEqual([
+      ['signups', 3, 9],
+      ['writes', 42, 1],
+    ]);
+    expect(limits[1]!.points).toEqual([
+      { ts: '2026-11-14T08:00:00.000Z', allowed: 40, denied: 0 },
+      { ts: '2026-11-14T09:00:00.000Z', allowed: 0, denied: 0 },
+      { ts: '2026-11-14T10:00:00.000Z', allowed: 2, denied: 1 },
     ]);
   });
 

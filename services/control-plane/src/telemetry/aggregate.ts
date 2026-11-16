@@ -172,6 +172,20 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         }
         break;
       }
+      case 'limit': {
+        for (const res of SERIES_RES) {
+          const b = bucketStart(ts, res);
+          bump(
+            telemetryKeys.limit(app, stage, res),
+            `${telemetryKeys.time(b)}#${e.name}`,
+            res,
+            b,
+            { [e.ok ? 'allowed' : 'denied']: 1 },
+            { name: e.name },
+          );
+        }
+        break;
+      }
       case 'env': {
         if (e.event !== 'start') break;
         for (const res of STAGE_RES) {

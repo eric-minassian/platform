@@ -73,9 +73,9 @@ describe('data browser', () => {
     }),
   );
 
-  it.effect('counts collections across scan pages', () =>
+  it.effect('counts collections across scan pages, leaving rate-limit counters out', () =>
     Effect.gen(function* () {
-      const { use } = browser(async (cmd) =>
+      const { sent, use } = browser(async (cmd) =>
         cmd.input.ExclusiveStartKey
           ? { Items: [{ _c: 'todos' }, {}], ScannedCount: 2 }
           : { Items: [{ _c: 'users' }, { _c: 'todos' }], ScannedCount: 2, LastEvaluatedKey: { pk: 'x' } },
@@ -87,6 +87,15 @@ describe('data browser', () => {
           { name: 'todos', sampled: 2 },
           { name: 'users', sampled: 1 },
         ],
+      });
+      assert.deepStrictEqual(sent[0]?.input, {
+        TableName: 'todo--prod',
+        ProjectionExpression: '#c',
+        FilterExpression: 'NOT begins_with(#pk, :rl)',
+        ExpressionAttributeNames: { '#c': '_c', '#pk': 'pk' },
+        ExpressionAttributeValues: { ':rl': '_rl#' },
+        ExclusiveStartKey: undefined,
+        Limit: 1000,
       });
     }),
   );
