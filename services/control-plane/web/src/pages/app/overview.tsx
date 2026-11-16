@@ -2,25 +2,30 @@
  * An app stage at a glance: what's live, five figures against the previous
  * period, the four charts that explain most incidents (status, latency,
  * errors, the latency distribution) on one cursor with deployment markers,
- * the busiest routes, and what happened lately.
+ * the busiest routes, what happened lately, and the custom metrics and rate
+ * limits the stage recorded.
  */
 import { useAtomValue } from '@effect/atom-react';
 import {
+  type CustomMetricStats,
   type ErrorGroup,
+  type LimitStats,
   type MetricsView,
   percentile,
   QUERY_RESOLUTION_MS,
   type QueryResolution,
   type SeriesQuery,
   type SeriesResponse,
+  seriesUnit,
 } from '@ericminassian/platform-core';
-import { Link } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { Option } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
 import { ArrowUpRight, Bell, CircleCheck, Layers, TriangleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Sparkline } from '../../components/charts/sparkline.tsx';
+import { columns, DataTable } from '../../components/data-table.tsx';
 import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
 import {
   EmptyState,
@@ -34,10 +39,11 @@ import {
   statusTone,
 } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
-import { deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
+import { alertRulesAtom, deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
 import { stageOf, useAppSummary, useDeployment } from '../../data/hooks.ts';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
+import { formatterFor } from '../../lib/series.ts';
 import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
 import { viewResolution } from '../../lib/view.ts';
 import { overviewRoute } from '../../router.tsx';
@@ -86,6 +92,24 @@ const uptimeAtom = family((k: { app: string; stage: string; time: TimeSearch }) 
 const routesAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
   fresh(
     ApiClient.query('observe', 'routes', {
+      params: { app: k.app },
+      query: { stage: k.stage, ...apiParams(k.time) },
+      timeToLive,
+    }),
+  ),
+);
+const customMetricsAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+  fresh(
+    ApiClient.query('observe', 'customMetrics', {
+      params: { app: k.app },
+      query: { stage: k.stage, ...apiParams(k.time) },
+      timeToLive,
+    }),
+  ),
+);
+const limitsAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+  fresh(
+    ApiClient.query('observe', 'limits', {
       params: { app: k.app },
       query: { stage: k.stage, ...apiParams(k.time) },
       timeToLive,
@@ -249,7 +273,148 @@ export function OverviewPage() {
         <TopRoutes app={app} stage={stage} time={time.search} />
         <Activity app={app} stage={stage} time={time.search} />
       </div>
+      <Recorded app={app} stage={stage} time={time.search} />
     </>
+  );
+}
+
+/** `Metrics.count` records a total, `Metrics.value` values to average. */
+const isTotal = (m: CustomMetricStats) => (m.unit ?? 'count') === 'count';
+
+const customCol = columns<CustomMetricStats>();
+const customColumns = customCol.columns([
+  customCol.accessor('name', {
+    header: 'Metric',
+    cell: ({ getValue }) => <Mono>{getValue()}</Mono>,
+  }),
+  customCol.accessor((m) => (isTotal(m) ? m.sum : m.count ? m.sum / m.count : 0), {
+    id: 'value',
+    header: 'Total or average',
+    meta: { numeric: true },
+    cell: ({ row: { original: m } }) =>
+      isTotal(m) ? (
+        fmtNum(m.sum)
+      ) : (
+        <>
+          {formatterFor(m.unit ?? 'count')(m.count ? m.sum / m.count : 0)}{' '}
+          <span className="text-muted-foreground">avg</span>
+        </>
+      ),
+  }),
+  customCol.accessor('count', {
+    header: 'Recorded',
+    meta: { numeric: true },
+    cell: ({ getValue }) => fmtNum(getValue()),
+  }),
+  customCol.display({
+    id: 'trend',
+    header: 'Trend',
+    cell: ({ row: { original: m } }) => (
+      <Sparkline
+        values={m.points.map((p) => (isTotal(m) ? p.sum : p.count ? p.sum / p.count : null))}
+        width={84}
+        height={20}
+      />
+    ),
+  }),
+]);
+
+const limitCol = columns<LimitStats>();
+const limitColumns = limitCol.columns([
+  limitCol.accessor('name', {
+    header: 'Limit',
+    cell: ({ getValue }) => <Mono>{getValue()}</Mono>,
+  }),
+  limitCol.accessor('allowed', {
+    header: 'Allowed',
+    meta: { numeric: true },
+    cell: ({ getValue }) => fmtNum(getValue()),
+  }),
+  limitCol.accessor('denied', {
+    header: 'Denied',
+    meta: { numeric: true },
+    cell: ({ row: { original: l } }) => (
+      <span className={l.denied ? 'text-warn' : undefined}>
+        {fmtNum(l.denied)}
+        {l.denied > 0 && (
+          <span className="text-muted-foreground"> · {fmtPct(l.denied / (l.allowed + l.denied), 1)}</span>
+        )}
+      </span>
+    ),
+  }),
+  limitCol.display({
+    id: 'trend',
+    header: 'Denied over time',
+    cell: ({ row: { original: l } }) => (
+      <Sparkline values={l.points.map((p) => p.denied)} width={84} height={20} />
+    ),
+  }),
+]);
+
+/** Custom metrics and rate limits, for stages that recorded any; a row opens its chart in Metrics. */
+function Recorded({ app, stage, time }: { app: string; stage: string; time: TimeSearch }) {
+  const navigate = useNavigate();
+  const custom = Option.getOrUndefined(
+    AsyncResult.value(useAtomValue(customMetricsAtom({ app, stage, time }))),
+  );
+  const limits = Option.getOrUndefined(AsyncResult.value(useAtomValue(limitsAtom({ app, stage, time }))));
+  const metrics = custom?.metrics ?? [];
+  const checked = limits?.limits ?? [];
+  if (metrics.length === 0 && checked.length === 0) return null;
+  const explore = (view: MetricsView) =>
+    void navigate({ to: '/apps/$app/metrics', params: { app }, search: (prev) => ({ ...prev, view }) });
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      {metrics.length > 0 && (
+        <Panel flush title="Custom metrics" description="from Metrics.count and Metrics.value">
+          <DataTable
+            dense
+            columns={customColumns}
+            data={metrics}
+            getRowId={(m) => m.name}
+            onRowClick={(m) =>
+              explore({
+                kind: 'metrics',
+                queries: [
+                  {
+                    id: 'a',
+                    metric: 'custom',
+                    stat: isTotal(m) ? 'sum' : 'avg',
+                    filter: { names: [m.name] },
+                  },
+                ],
+                chart: isTotal(m) ? 'bar' : 'line',
+              })
+            }
+          />
+        </Panel>
+      )}
+      {checked.length > 0 && (
+        <Panel flush title="Rate limits" description="checks by limit">
+          <DataTable
+            dense
+            columns={limitColumns}
+            data={checked}
+            getRowId={(l) => l.name}
+            onRowClick={(l) =>
+              explore({
+                kind: 'metrics',
+                queries: [
+                  {
+                    id: 'a',
+                    metric: 'rate_limit',
+                    stat: 'count',
+                    groupBy: 'outcome',
+                    filter: { names: [l.name] },
+                  },
+                ],
+                chart: 'bar',
+              })
+            }
+          />
+        </Panel>
+      )}
+    </div>
   );
 }
 
@@ -493,6 +658,12 @@ function Activity({ app, stage, time }: { app: string; stage: string; time: Time
     AsyncResult.value(useAtomValue(openErrorsAtom({ app, stage }))),
     (): readonly ErrorGroup[] => [],
   );
+  const rules = Option.getOrElse(AsyncResult.value(useAtomValue(alertRulesAtom({ app, stage }))), () => []);
+  // Values in the rule's own unit (ms, %, …); a deleted rule's events read as plain numbers.
+  const formatOf = (id: string) => {
+    const rule = rules.find((r) => r.id === id);
+    return rule ? formatterFor(seriesUnit(rule.query)) : fmtNum;
+  };
   const alerts =
     Option.getOrUndefined(AsyncResult.value(useAtomValue(alertHistoryAtom({ app, stage, time }))))?.events ??
     [];
@@ -533,7 +704,10 @@ function Activity({ app, stage, time }: { app: string; stage: string; time: Time
           {e.name} {e.to === 'alarm' ? 'fired' : e.to === 'ok' ? 'recovered' : 'has no data'}
         </>
       ),
-      detail: e.value === null ? undefined : `value ${fmtNum(e.value)}, threshold ${fmtNum(e.threshold)}`,
+      detail:
+        e.value === null
+          ? undefined
+          : `${formatOf(e.rule)(e.value)} against ${formatOf(e.rule)(e.threshold)}`,
     })),
   ]
     .filter((i) => Number.isFinite(i.at))
