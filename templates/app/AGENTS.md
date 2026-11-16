@@ -424,3 +424,6 @@ plat deployments / plat stages / plat rollback
 ```
 
 The console at https://platform.ericminassian.com shows the same data with graphs.
+
+A trace shows every call (db, queue, `fetch` …) only for requests and jobs that failed or took 1 s or
+more, and for 1 in 20 traces; the rest show how many calls they made and how long those took.
