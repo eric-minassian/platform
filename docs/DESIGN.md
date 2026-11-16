@@ -91,9 +91,13 @@ const app = defineApp({
   },
   auth: true, // or { required: true }
   db: true, // one document DB per stage; collections are declared in code
+  worker: { timeoutSeconds: 120, memoryMb: 1024 }, // every handler's, unless it sets its own
   queues: { emails: queue<EmailJob>({ batchSize: 10 }) },
   events: { 'todo.created': event<TodoCreated>() }, // event types the worker subscribes to
-  crons: { cleanup: '0 3 * * *' }, // 5-field UTC cron or rate(...)
+  crons: {
+    cleanup: '0 3 * * *', // 5-field UTC cron or rate(...)
+    listen: { schedule: 'rate(1 minute)', memoryMb: 256, timeoutSeconds: 90 }, // its own function
+  },
   storage: { uploads: {}, exports: { public: true, expireAfterDays: 7 } }, // or ['uploads']
   secrets: ['STRIPE_KEY'],
   env: { FEATURE_X: 'on' },
@@ -140,9 +144,17 @@ declare module '@ericminassian/platform/config' {
   `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract, and adds the
   platform routes and request telemetry around it.
 - **Worker**: `export default defineWorker({ layer, queues, events, crons })`.
-  One Lambda per stage handles all of them; the wrapper dispatches on event
+  One bundle per stage handles all of them; the wrapper dispatches on event
   shape and reports partial SQS batch failures. Handlers get the payload types
   declared in `plat.config.ts` and run on `layer`.
+  - The worker's Lambda runs every handler with `worker.memoryMb` and
+    `worker.timeoutSeconds`.
+  - A queue, event or cron that sets its own `memoryMb` or `timeoutSeconds`
+    (`queue<T>({ memoryMb })`, `event<T>({ timeoutSeconds })`, a cron's
+    object form) runs in a Lambda of its own: the same bundle, environment
+    and log group, with its triggers pointed there. A setting it leaves out
+    is the worker's, and its queue's visibility timeout follows its own
+    timeout.
 - **Resources**: only through `@ericminassian/platform`, as Effect services.
   `Db.collection()` maps collections onto the stage's single table
   (partition/sort keys, up to three pinned index slots, TTL), so adding a
@@ -191,7 +203,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com`                                                                                                    |
 | Web Function | `todo--prod` (endpoints `live`, `live-b`)                                                                                                                             |
-| Worker       | `todo--prod--worker`                                                                                                                                                  |
+| Worker       | `todo--prod--worker`; a handler's own `…--worker--<queue\|event\|cron>-<name>` (`.` and `:` in event types become `_`; hashed past 64)                                |
 | Table        | `todo--prod`                                                                                                                                                          |
 | Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                                                                                                                       |
 | Bus / rules  | `todo--prod` / `todo--prod--<event>`                                                                                                                                  |
@@ -751,7 +763,7 @@ writing any instrumentation:
 - Each stage's runtime role:
   - lives under `/platform/apps/` with the platform permission boundary;
   - is scoped to that stage's table, queues, bus, storage prefix and secrets
-    paths, and its own worker;
+    paths, and its own worker functions (Scheduler invokes crons as the role);
   - can't create log groups. The engine creates them, so logs still in
     flight when a stage is destroyed can't bring its groups back;
   - publishes only to its own channel namespace. Browsers never publish;
@@ -969,4 +981,5 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                   |
 | Store expiry is a daily control-plane sweep, not S3 lifecycle rules                   | One lifecycle document per bucket, shared by every app, can't be updated safely by concurrent deploys, and the foundation stack owns that bucket's configuration. The sweep touches only the stores that ask for it, for a LIST per 1,000 files a day.                                                                                                                                                                        |
 | A store with files can't switch between public and private                            | Its files would have to move while the live deployment keeps writing to the old place until every edge switches, so some writes could be lost. A new store name is a one-line change.                                                                                                                                                                                                                                         |
+| A handler with its own memory or timeout gets its own Lambda                          | Lambda sets both per function, so a handler idling 45 s on a socket paid for the 1 GB a snapshot parse needs. Same bundle, environment and log group: `defineWorker`, bindings, logs and telemetry don't change. One function per handler, not per setting, so changing one handler never moves another; setting either opts in. Stage roles may invoke `*--*--*`: a hashed name keeps only `<app>--<stage>--`.               |
 | us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |
