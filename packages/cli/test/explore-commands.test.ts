@@ -1,189 +1,254 @@
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import type { AlertRule, SeriesResponse } from '@ericminassian/platform-core';
+import type { Dashboard, SavedQuery } from '@ericminassian/platform-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api.ts';
-import { alertRuleInputOf, formatAlertHistory, formatAlertRules } from '../src/commands/alerts.ts';
-import { formatSeries, parseSeriesFilter, seriesQueryOf } from '../src/commands/observe.ts';
+import { dashboardInput, describeView, formatDashboard, formatQueries } from '../src/commands/explore.ts';
+import {
+  collectList,
+  formatContext,
+  formatInsights,
+  formatOccurrences,
+  formatTraceList,
+  lineTime,
+  logFilters,
+} from '../src/commands/observe.ts';
 import { saveCredentials } from '../src/credentials.ts';
 import { createProgram } from '../src/main.ts';
 import { setJsonMode } from '../src/util/output.ts';
 import { tempDir } from './helpers.ts';
 
-/** Output without its colors. */
 const plain = stripVTControlCharacters;
 
-const rule: AlertRule = {
-  id: 'a01',
+const at = '2026-11-16T10:00:00.000Z';
+const dashboard: Dashboard = {
+  id: 'db1',
+  name: 'Shop',
   app: 'shop',
-  name: 'Errors',
-  stage: 'prod',
-  query: { metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } },
-  condition: { op: 'above', threshold: 2, minutes: 5 },
-  missing: 'ok',
-  notify: true,
-  enabled: true,
-  state: 'alarm',
-  stateSince: '2026-11-16T14:03:00.000Z',
-  value: 3.417,
+  widgets: [
+    {
+      id: 'errors',
+      title: 'Errors',
+      x: 0,
+      y: 0,
+      w: 6,
+      h: 4,
+      view: {
+        kind: 'metrics',
+        chart: 'line',
+        queries: [{ id: 'a', metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } }],
+      },
+    },
+    {
+      id: 'logs',
+      title: 'Errors',
+      x: 6,
+      y: 0,
+      w: 6,
+      h: 4,
+      view: { kind: 'logs', filters: { levels: ['error'] } },
+      stage: 'pr-1',
+    },
+  ],
   createdBy: 'bob',
-  createdAt: '2026-11-16T10:00:00.000Z',
-  updatedAt: '2026-11-16T10:00:00.000Z',
+  createdAt: at,
+  updatedAt: at,
+  updatedBy: 'ada',
 };
 
-describe('explorer queries from flags', () => {
-  it('reads --filter pairs, repeating routes, statuses, jobs and names', () => {
+describe('log filter options', () => {
+  it('builds the structured filters, checking levels and status classes', () => {
     expect(
-      parseSeriesFilter(['route=GET /api/x', 'route=POST /api/y', 'status=5xx', 'outcome=error', 'name=a=b']),
-    ).toEqual({
-      routes: ['GET /api/x', 'POST /api/y'],
-      status: ['5xx'],
-      names: ['a=b'],
-      outcome: 'error',
-    });
-    expect(parseSeriesFilter([])).toBeUndefined();
-    expect(() => parseSeriesFilter(['status=6xx'])).toThrow('status is one of 2xx, 3xx, 4xx, 5xx, not "6xx"');
-    expect(() => parseSeriesFilter(['route'])).toThrow('--filter expects key=value, got "route"');
-    expect(() => parseSeriesFilter(['outcome=ok', 'outcome=error'])).toThrow(
-      '--filter outcome can be given once',
-    );
-    expect(() => parseSeriesFilter(['path=/x'])).toThrow(/not "path"/);
-  });
-
-  it('defaults the statistic to the metric’s own and checks the query as the API does', () => {
-    expect(seriesQueryOf({ metric: 'latency', by: 'route' })).toEqual({
-      metric: 'latency',
-      stat: 'p95',
-      groupBy: 'route',
-    });
-    expect(() => seriesQueryOf({ metric: 'latency', stat: 'count' })).toThrow(/latency answers/);
-    expect(() => seriesQueryOf({ metric: 'traffic' })).toThrow(/--metric is one of requests/);
-    expect(() => seriesQueryOf({ metric: 'requests', by: 'route' }, { alert: true })).toThrow(/one series/);
-  });
-
-  it('shows each line’s total or average, its highest bucket and a sparkline', () => {
-    const r: SeriesResponse = {
-      res: '5m',
-      timestamps: ['a', 'b', 'c'],
-      unit: 'percent',
-      series: [
-        { key: 'GET /a', values: [1, null, 4] },
-        { key: 'GET /b', values: [null, null, null] },
-      ],
-      note: 'showing the top 10 of 12 routes',
-    };
-    const q = { metric: 'requests', stat: 'percent', groupBy: 'route' } as const;
-    expect(plain(formatSeries(r, q, 'shop prod')).split('\n')).toEqual([
-      'shop prod',
-      'all % of requests by route · 5m buckets',
-      '',
-      'series  avg   max  over time',
-      'GET /a  2.5%  4%   ▁ █      ',
-      'GET /b  -     -             ',
-      'note: showing the top 10 of 12 routes',
-    ]);
-    const counts = formatSeries(
-      { ...r, unit: 'count', series: [{ key: 'all', values: [2, 3, 0] }], note: undefined },
-      { metric: 'requests', stat: 'count' },
-      'h',
-    );
-    expect(plain(counts)).toContain('all     5      3    ▆█▁');
+      logFilters({ level: ['error', 'warn'], route: ['/a'], status: ['5xx'], rev: [], trace: 'abcdef01' }),
+    ).toEqual({ levels: ['error', 'warn'], routes: ['/a'], status: ['5xx'], trace: 'abcdef01' });
+    expect(logFilters({ level: [], route: [], status: [], rev: [] })).toEqual({});
+    expect(() => logFilters({ level: ['fatal'], route: [], status: [], rev: [] })).toThrow(/--level takes/);
+    expect(() => logFilters({ level: [], route: [], status: ['500'], rev: [] })).toThrow(/--status takes/);
+    expect(collectList('error, warn', ['info'])).toEqual(['info', 'error', 'warn']);
+    expect(lineTime('1794823200000')).toBe(1794823200000);
+    expect(lineTime('2026-11-16T10:00:00Z')).toBe(Date.parse('2026-11-16T10:00:00Z'));
+    expect(() => lineTime('noon')).toThrow(/--around takes/);
   });
 });
 
-describe('alert rules from flags', () => {
-  it('builds a new rule, defaulting to prod, ok without data, notifying and enabled', () => {
-    expect(
-      alertRuleInputOf({
-        name: 'Errors',
-        metric: 'requests',
-        stat: 'percent',
-        filter: ['status=5xx'],
-        op: 'above',
-        threshold: '2',
-        minutes: '5',
-      }),
-    ).toEqual({
-      name: 'Errors',
-      stage: 'prod',
-      query: { metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } },
-      condition: { op: 'above', threshold: 2, minutes: 5 },
-      missing: 'ok',
-      notify: true,
-      enabled: true,
-    });
-    expect(() => alertRuleInputOf({ metric: 'requests' })).toThrow(
-      'a rule needs --name, --op, --threshold, --minutes',
-    );
-    const ok = { name: 'x', metric: 'requests', op: 'above', threshold: '1', minutes: '5' };
-    expect(() => alertRuleInputOf({ ...ok, minutes: '7' })).toThrow(
-      '--minutes is one of 1, 5, 10, 15, 30, 60',
-    );
-    expect(() => alertRuleInputOf({ ...ok, op: 'over' })).toThrow('--op is above or below, not "over"');
-    expect(() => alertRuleInputOf({ ...ok, threshold: 'lots' })).toThrow(/--threshold is a number/);
-    expect(() => alertRuleInputOf({ ...ok, metric: 'realtime', filter: ['measure=events'] })).toThrow(
-      /can't watch realtime/,
-    );
-  });
-
-  it('changes only what the flags give, and drops a filter that belonged to another metric', () => {
-    expect(alertRuleInputOf({ threshold: '5', notify: false, disable: true }, rule)).toMatchObject({
-      name: 'Errors',
-      query: rule.query,
-      condition: { op: 'above', threshold: 5, minutes: 5 },
-      notify: false,
-      enabled: false,
-    });
-    expect(alertRuleInputOf({ stat: 'count' }, rule).query).toEqual({
-      metric: 'requests',
-      stat: 'count',
-      filter: { status: ['5xx'] },
-    });
-    expect(alertRuleInputOf({ metric: 'latency' }, rule).query).toEqual({ metric: 'latency', stat: 'p95' });
-    expect(() => alertRuleInputOf({ enable: true, disable: true }, rule)).toThrow(/contradict/);
-  });
-
-  it('lists rules with their state and value, and history newest first', () => {
-    const out = plain(formatAlertRules([rule, { ...rule, id: 'a02', enabled: false, value: null }]));
-    expect(out.split('\n')).toEqual([
-      'id   name    stage  state  watches                                value  since                 notify',
-      'a01  Errors  prod   alarm  5xx % of requests above 2% over 5 min  3.42%  2026-11-16 14:03:00Z  yes   ',
-      'a02  Errors  prod   off    5xx % of requests above 2% over 5 min  -      2026-11-16 14:03:00Z  yes   ',
-    ]);
-    expect(plain(formatAlertRules([]))).toBe('(no alert rules; add one with `plat alerts create`)');
-    expect(
-      plain(
-        formatAlertHistory([
+describe('output', () => {
+  it('lists traces with how they ended and whether their calls were recorded', () => {
+    const out = plain(
+      formatTraceList({
+        traces: [
           {
-            ts: '2026-11-16T14:03:00.000Z',
-            rule: 'a01',
-            name: 'Errors',
-            stage: 'prod',
-            from: 'ok',
-            to: 'alarm',
-            value: 3.417,
-            threshold: 2,
+            trace: 't1',
+            ts: at,
+            kind: 'req',
+            name: 'GET /a',
+            status: 503,
+            failed: true,
+            dur: 1_500,
+            recorded: true,
+            rev: 'd1',
           },
-        ]),
-      ).split('\n')[1],
-    ).toBe('2026-11-16 14:03:00Z  prod   Errors  ok → alarm  3.42   2        ');
+          {
+            trace: 't2',
+            ts: at,
+            kind: 'job',
+            name: 'queue refresh',
+            failed: false,
+            dur: 20,
+            recorded: false,
+            calls: 3,
+          },
+        ],
+        truncated: true,
+      }),
+    ).split('\n');
+    expect(out[1]?.trimEnd()).toMatch(/^2026-11-16 10:00:00Z\s+GET \/a\s+503\s+1\.5s\s+recorded\s+t1$/);
+    expect(out[2]?.trimEnd()).toMatch(/queue refresh\s+ok\s+20ms\s+3 not recorded\s+t2$/);
+    expect(out[3]).toBe('more traces matched; narrow --since or the filters to see them');
+  });
+
+  it('prints a Logs Insights result as a table', () => {
+    const out = plain(
+      formatInsights({
+        columns: ['route', 'n'],
+        rows: [
+          ['/a', '2'],
+          ['/b', null],
+        ],
+        recordsMatched: 2,
+        recordsScanned: 40,
+        bytesScanned: 12_345,
+      }),
+    );
+    expect(out.split('\n')).toEqual(['route  n', '/a     2', '/b      ', '2 matched, 40 scanned (12.3 kB)']);
+  });
+
+  it('marks the line context is around, and hides runtime records unless asked', () => {
+    const line = (message: string, level?: string) => ({
+      ts: at,
+      stream: 'web',
+      message,
+      ...(level ? { level } : {}),
+    });
+    const r = { lines: [line('a'), line('runtime: init', 'system'), line('b'), line('c')], anchor: 2 };
+    expect(plain(formatContext(r, { runtime: false })).split('\n')).toEqual([
+      '  2026-11-16 10:00:00Z web    a',
+      '> 2026-11-16 10:00:00Z web    b',
+      '  2026-11-16 10:00:00Z web    c',
+    ]);
+    expect(plain(formatContext(r, { runtime: true })).split('\n')).toHaveLength(4);
+  });
+
+  it('shows an error group’s occurrences over time and by deployment', () => {
+    const out = plain(
+      formatOccurrences(
+        { res: '1h', timestamps: [at, at], counts: [1, 3], revs: [{ value: 'd2', count: 4 }] },
+        '7d',
+      ),
+    );
+    expect(out.split('\n')).toEqual([
+      '4 in the last 7d (1h buckets)  ▁█',
+      '',
+      'deployment  count',
+      'd2          4    ',
+    ]);
+  });
+
+  it('describes what saved queries and widgets read', () => {
+    expect(describeView(dashboard.widgets[0]!.view)).toBe('5xx % of requests');
+    expect(describeView({ kind: 'logs', q: 'timeout', filters: { levels: ['error'], routes: ['/a'] } })).toBe(
+      'logs: "timeout" · error · /a',
+    );
+    expect(
+      describeView({ kind: 'traces', filters: { routes: ['GET /a'], outcome: 'error', recorded: true } }),
+    ).toBe('traces: GET /a · failed · recorded');
+    expect(plain(formatDashboard(dashboard)).split('\n')).toEqual([
+      'Shop db1 · shop',
+      'widget  title   at       reads             ',
+      'errors  Errors  0,0 6×4  5xx % of requests ',
+      'logs    Errors  6,0 6×4  logs: error (pr-1)',
+    ]);
+    const query: SavedQuery = {
+      id: 'q1',
+      app: 'shop',
+      name: 'slow',
+      view: { kind: 'traces', filters: { minMs: 1000 } },
+      range: '24h',
+      createdBy: 'bob',
+      createdAt: at,
+      updatedAt: at,
+    };
+    expect(plain(formatQueries([query])).split('\n')[1]).toMatch(
+      /^q1\s+slow\s+traces: ≥ 1000ms\s+24h\s+2026-11-16 10:00:00Z\s+bob$/,
+    );
+  });
+
+  it('takes a dashboard’s JSON as `show --json` prints it, without what the API adds', () => {
+    expect(dashboardInput(JSON.stringify(dashboard))).toEqual({
+      id: 'db1',
+      request: { name: 'Shop', app: 'shop', widgets: dashboard.widgets },
+    });
+    expect(dashboardInput('{"name":"New"}')).toEqual({ request: { name: 'New', widgets: [] } });
+    expect(() => dashboardInput('[]')).toThrow(/JSON object/);
+    expect(() => dashboardInput('{')).toThrow(/isn't JSON/);
   });
 });
 
-describe('plat metrics --metric and plat alerts', () => {
-  const calls: string[] = [];
+describe('requests', () => {
+  it('sends filters as JSON and calls the new endpoints', async () => {
+    const calls: string[] = [];
+    const api = new ApiClient({
+      baseUrl: 'https://api.test',
+      token: 't',
+      fetch: (async (url: string, init?: RequestInit) => {
+        calls.push(
+          `${init?.method ?? 'GET'} ${decodeURIComponent(url)}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`,
+        );
+        return new Response(init?.method === 'DELETE' ? null : '[]', {
+          status: init?.method === 'DELETE' ? 204 : 200,
+        });
+      }) as unknown as typeof fetch,
+    });
+    await api.logs('shop', { stage: 'prod', from: 1, to: 2, filters: { levels: ['error'] } });
+    await api.logs('shop', { stage: 'prod', from: 1, filters: {} });
+    await api.traces('shop', { stage: 'prod', from: 1, to: 2, filters: { outcome: 'error' }, limit: 5 });
+    await api.logStats('shop', { stage: 'prod', from: 1, to: 2, filter: 'x' });
+    await api.logContext('shop', { stage: 'prod', stream: 'web', ts: 5, before: 1, after: 2 });
+    await api.insights('shop', { stage: 'prod', query: 'fields @message' });
+    await api.errorOccurrences('shop', '0a1b2c3d', { stage: 'prod', from: 1, to: 2 });
+    await api.listQueries('shop');
+    await api.deleteQuery('shop', 'q1');
+    await api.listDashboards('shop');
+    await api.createDashboard({ name: 'd', widgets: [] });
+    await api.updateDashboard('db1', { name: 'd', widgets: [] });
+    await api.deleteDashboard('db1');
+    expect(calls).toEqual([
+      'GET https://api.test/v1/apps/shop/logs?stage=prod&from=1&to=2&f={"levels":["error"]}',
+      'GET https://api.test/v1/apps/shop/logs?stage=prod&from=1',
+      'GET https://api.test/v1/apps/shop/traces?stage=prod&from=1&to=2&limit=5&f={"outcome":"error"}',
+      'GET https://api.test/v1/apps/shop/logs/stats?stage=prod&from=1&to=2&q=x',
+      'GET https://api.test/v1/apps/shop/logs/context?stage=prod&stream=web&ts=5&before=1&after=2',
+      'POST https://api.test/v1/apps/shop/insights {"stage":"prod","query":"fields @message"}',
+      'GET https://api.test/v1/apps/shop/errors/0a1b2c3d/occurrences?stage=prod&from=1&to=2',
+      'GET https://api.test/v1/apps/shop/queries',
+      'DELETE https://api.test/v1/apps/shop/queries/q1',
+      'GET https://api.test/v1/dashboards?app=shop',
+      'POST https://api.test/v1/dashboards {"name":"d","widgets":[]}',
+      'PUT https://api.test/v1/dashboards/db1 {"name":"d","widgets":[]}',
+      'DELETE https://api.test/v1/dashboards/db1',
+    ]);
+  });
+});
+
+describe('commands', () => {
+  const calls: Array<{ method: string; url: URL; body?: unknown }> = [];
   let out = '';
-  const series: SeriesResponse = {
-    res: '5m',
-    timestamps: ['2026-11-16T14:00:00.000Z'],
-    unit: 'percent',
-    series: [{ key: 'all', values: [3] }],
-  };
+  let dir = '';
   beforeEach(() => {
     calls.length = 0;
     out = '';
-    const dir = tempDir();
+    dir = tempDir();
     vi.stubEnv('PLAT_CONFIG_DIR', dir);
-    // In CI the client would otherwise sign in with the workflow's OIDC token.
     vi.stubEnv('GITHUB_ACTIONS', '');
     saveCredentials({
       apiUrl: 'https://api.test',
@@ -192,132 +257,147 @@ describe('plat metrics --metric and plat alerts', () => {
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     });
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
-      const method = init?.method ?? 'GET';
-      calls.push(`${method} ${url}${typeof init?.body === 'string' ? ` ${init.body}` : ''}`);
-      const path = new URL(url).pathname;
-      if (method === 'DELETE') return new Response(null, { status: 204 });
-      if (path.endsWith('/series')) return new Response(JSON.stringify(series));
-      if (path.endsWith('/history')) return new Response(JSON.stringify({ events: [] }));
-      if (method === 'GET') return new Response(JSON.stringify([rule]));
-      const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as object) : {};
-      return new Response(JSON.stringify({ ...rule, ...body }), {
-        status: method === 'POST' ? 201 : 200,
+      const u = new URL(url);
+      calls.push({
+        method: init?.method ?? 'GET',
+        url: u,
+        ...(typeof init?.body === 'string' ? { body: JSON.parse(init.body) } : {}),
       });
+      const path = u.pathname;
+      const body = path.endsWith('/logs')
+        ? { lines: [] }
+        : path.endsWith('/traces')
+          ? { traces: [], truncated: false }
+          : path.endsWith('/insights')
+            ? { columns: [], rows: [], recordsMatched: 0, recordsScanned: 0, bytesScanned: 0 }
+            : path.endsWith('/occurrences')
+              ? { res: '1h', timestamps: [], counts: [], revs: [] }
+              : path.endsWith('/context')
+                ? { lines: [], anchor: 0 }
+                : path.startsWith('/v1/dashboards')
+                  ? { ...dashboard, ...(init?.method === 'POST' ? { id: 'db2' } : {}) }
+                  : {};
+      return new Response(JSON.stringify(body));
     });
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       out += String(chunk);
       return true;
     });
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     setJsonMode(false);
+    process.exitCode = undefined;
   });
   const run = (...args: string[]) =>
-    createProgram().parseAsync(['node', 'plat', ...args, '--app', 'shop', '--api-url', 'https://api.test']);
+    createProgram().parseAsync(['node', 'plat', ...args, '--api-url', 'https://api.test']);
+  const filtersOf = (call: { url: URL } | undefined) =>
+    JSON.parse(call?.url.searchParams.get('f') ?? 'null') as unknown;
 
-  it('sends the query and prints the raw answer with --json', async () => {
+  it('searches logs with structured filters, runs Logs Insights and reads context', async () => {
     await run(
-      'metrics',
-      '--metric',
-      'requests',
-      '--stat',
-      'percent',
-      '--filter',
-      'status=5xx',
-      '--filter',
-      'route=GET /a',
-      '--res',
-      '5m',
+      'logs',
+      '--app',
+      'shop',
+      '--level',
+      'error,warn',
+      '--status',
+      '5xx',
+      '--route',
+      '/api/x',
+      '--rev',
+      'd1',
       '--since',
-      '1h',
-      '--stage',
-      'dev',
-      '--json',
+      '30m',
     );
-    const url = new URL(calls[0]!.slice('GET '.length));
-    expect(url.pathname).toBe('/v1/apps/shop/series');
-    expect(url.searchParams.get('stage')).toBe('dev');
-    expect(url.searchParams.get('res')).toBe('5m');
-    expect(Number(url.searchParams.get('to')) - Number(url.searchParams.get('from'))).toBe(3_600_000);
-    expect(JSON.parse(url.searchParams.get('q')!)).toEqual({
-      metric: 'requests',
-      stat: 'percent',
-      filter: { routes: ['GET /a'], status: ['5xx'] },
+    expect(calls[0]?.url.pathname).toBe('/v1/apps/shop/logs');
+    expect(filtersOf(calls[0])).toEqual({
+      levels: ['error', 'warn'],
+      routes: ['/api/x'],
+      status: ['5xx'],
+      revs: ['d1'],
     });
-    expect(JSON.parse(out)).toEqual(series);
-  });
 
-  it('refuses query flags without --metric', async () => {
-    const before = process.exitCode;
-    await run('metrics', '--by', 'route');
-    expect(process.exitCode).toBe(2);
-    expect(calls).toEqual([]);
-    process.exitCode = before;
-  });
+    await run('logs', '--app', 'shop', '--insights', 'stats count(*) by route', '--stage', 'pr-1');
+    expect(calls[1]?.method).toBe('POST');
+    expect(calls[1]?.body).toMatchObject({ stage: 'pr-1', query: 'stats count(*) by route' });
 
-  it('lists, creates, updates, deletes and reads history', async () => {
-    await run('alerts', '--stage', 'prod');
     await run(
-      'alerts',
-      'create',
-      '--name',
-      'Slow',
-      '--metric',
-      'latency',
-      '--stat',
-      'p99',
-      '--op',
-      'above',
-      '--threshold',
-      '800',
-      '--minutes',
-      '15',
-      '--no-notify',
+      'logs',
+      '--app',
+      'shop',
+      '--around',
+      '2026-11-16T10:00:00Z',
+      '--stream',
+      'worker',
+      '--context',
+      '10',
     );
-    await run('alerts', 'update', 'a01', '--threshold', '5', '--enable');
-    await run('alerts', 'delete', 'a01');
-    await run('alerts', 'history', '--stage', 'prod', '--since', '1d');
-    expect(calls.map((c) => c.replace(/from=\d+&to=\d+/, 'from=…&to=…'))).toEqual([
-      'GET https://api.test/v1/apps/shop/alerts?stage=prod',
-      `POST https://api.test/v1/apps/shop/alerts ${JSON.stringify({
-        name: 'Slow',
-        stage: 'prod',
-        query: { metric: 'latency', stat: 'p99' },
-        condition: { op: 'above', threshold: 800, minutes: 15 },
-        missing: 'ok',
-        notify: false,
-        enabled: true,
-      })}`,
-      // An update starts from the rule as it is.
-      'GET https://api.test/v1/apps/shop/alerts',
-      `PUT https://api.test/v1/apps/shop/alerts/a01 ${JSON.stringify({
-        name: 'Errors',
-        stage: 'prod',
-        query: rule.query,
-        condition: { op: 'above', threshold: 5, minutes: 5 },
-        missing: 'ok',
-        notify: true,
-        enabled: true,
-      })}`,
-      'DELETE https://api.test/v1/apps/shop/alerts/a01',
-      'GET https://api.test/v1/apps/shop/alerts/history?stage=prod&from=…&to=…',
-    ]);
-    expect(plain(out)).toContain('✓ created a01 on prod: Slow (p99 latency above 800 ms over 15 min)');
-    expect(plain(out)).toContain('(no state changes in this range)');
+    expect(calls[2]?.url.pathname).toBe('/v1/apps/shop/logs/context');
+    expect(calls[2]?.url.search).toBe(
+      `?stage=prod&stream=worker&ts=${Date.parse('2026-11-16T10:00:00Z')}&before=10&after=10`,
+    );
+
+    await run('logs', '--app', 'shop', '--around', '1794823200000');
+    expect(process.exitCode).toBe(2);
+    expect(calls).toHaveLength(3);
   });
 
-  it('calls the series and alert endpoints', async () => {
-    const api = new ApiClient({ baseUrl: 'https://api.test', token: 't' });
-    await api.series('shop', { stage: 'prod', query: { metric: 'jobs', stat: 'count' }, from: 1, to: 2 });
-    await api.alertRules('shop');
-    expect(calls).toEqual([
-      `GET https://api.test/v1/apps/shop/series?stage=prod&from=1&to=2&q=${encodeURIComponent(
-        JSON.stringify({ metric: 'jobs', stat: 'count' }),
-      )}`,
-      'GET https://api.test/v1/apps/shop/alerts',
+  it('lists traces with filters, or shows one', async () => {
+    await run(
+      'traces',
+      '--app',
+      'shop',
+      '--failed',
+      '--route',
+      'GET /api/x',
+      '--job',
+      'queue:refresh',
+      '--min-ms',
+      '500',
+      '--recorded',
+      '--limit',
+      '20',
+    );
+    expect(calls[0]?.url.pathname).toBe('/v1/apps/shop/traces');
+    expect(calls[0]?.url.searchParams.get('limit')).toBe('20');
+    expect(filtersOf(calls[0])).toEqual({
+      routes: ['GET /api/x'],
+      jobs: ['queue:refresh'],
+      outcome: 'error',
+      minMs: 500,
+      recorded: true,
+    });
+    await run('traces', 'abcdef0123', '--app', 'shop');
+    expect(calls[1]?.url.pathname).toBe('/v1/apps/shop/traces/abcdef0123');
+  });
+
+  it('reads an error group’s occurrences', async () => {
+    await run('errors', '0a1b2c3d', '--occurrences', '--since', '1d', '--app', 'shop', '--json');
+    expect(calls[0]?.url.pathname).toBe('/v1/apps/shop/errors/0a1b2c3d/occurrences');
+    expect(JSON.parse(out)).toEqual({ res: '1h', timestamps: [], counts: [], revs: [] });
+  });
+
+  it('applies a dashboard from JSON: creates it, or replaces the one its id names', async () => {
+    const file = join(dir, 'dashboard.json');
+    writeFileSync(file, JSON.stringify({ name: 'New', widgets: [] }));
+    await run('dashboards', 'apply', '--file', file);
+    expect([calls[0]?.method, calls[0]?.url.pathname, calls[0]?.body]).toEqual([
+      'POST',
+      '/v1/dashboards',
+      { name: 'New', widgets: [] },
     ]);
+    expect(plain(out)).toContain('created dashboard db2 (Shop)');
+
+    writeFileSync(file, JSON.stringify(dashboard));
+    await run('dashboards', 'apply', '--file', file);
+    expect([calls[1]?.method, calls[1]?.url.pathname]).toEqual(['PUT', '/v1/dashboards/db1']);
+    expect(calls[1]?.body).toEqual({ name: 'Shop', app: 'shop', widgets: dashboard.widgets });
+
+    await run('dashboards', '--app', 'shop');
+    expect(calls[2]?.url.search).toBe('?app=shop');
   });
 });

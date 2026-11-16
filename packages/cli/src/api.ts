@@ -17,6 +17,7 @@ import {
   type CreateDeploymentRequest,
   type CreateDeploymentResponse,
   type CustomMetricsResponse,
+  type Dashboard,
   type DeadLetterActionResponse,
   type DeadLettersResponse,
   type DataCollections,
@@ -25,10 +26,16 @@ import {
   type EmailSending,
   type EmailStatsResponse,
   type ErrorGroup,
+  type ErrorOccurrencesResponse,
+  type InsightsRequest,
+  type InsightsResponse,
   type JobStats,
   type LimitsResponse,
+  type LogContextResponse,
+  type LogFilters,
   type LogLine,
   type LogsResponse,
+  type LogStatsResponse,
   type MeResponse,
   type MetricsResponse,
   PLATFORM_DEFAULTS,
@@ -39,6 +46,8 @@ import {
   type RollbackRequest,
   type RollbackResponse,
   type RouteStats,
+  type SaveDashboardRequest,
+  type SavedQuery,
   type SecretInfo,
   type SeriesQuery,
   type SeriesResponse,
@@ -47,7 +56,9 @@ import {
   type StageRecord,
   type StoredObjectInfo,
   type SuppressedResponse,
+  type TraceFilters,
   type TraceResponse,
+  type TracesResponse,
 } from './api-types.ts';
 import { isExpired, loadCredentials } from './credentials.ts';
 import { canUseOidc, fetchOidcToken } from './github.ts';
@@ -305,7 +316,10 @@ export class ApiClient {
   async errors(app: string, q: { stage: string }): Promise<ErrorGroup[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/errors`, { query: q }), 'errors');
   }
-  /** `stream`: `web`, `worker` or `service:<name>`. */
+  /**
+   * `stream`: `web`, `worker` or `service:<name>`. Structured `filters` run
+   * the search on Logs Insights, where `filter` is plain text.
+   */
   logs(
     app: string,
     q: {
@@ -314,24 +328,100 @@ export class ApiClient {
       to?: number;
       filter?: string;
       stream?: string;
+      filters?: LogFilters;
       nextToken?: string;
       limit?: number;
     },
   ) {
-    const { filter, nextToken, ...rest } = q;
+    const { filter, filters, nextToken, ...rest } = q;
     return this.request<LogsResponse>('GET', `/v1/apps/${enc(app)}/logs`, {
-      query: { ...rest, ...(filter ? { q: filter } : {}), ...(nextToken ? { next: nextToken } : {}) },
+      query: {
+        ...rest,
+        ...(filter ? { q: filter } : {}),
+        ...json('f', filters),
+        ...(nextToken ? { next: nextToken } : {}),
+      },
     });
   }
-  tailLogs(app: string, q: { stage: string; filter?: string; stream?: string }, signal?: AbortSignal) {
+  /** Live lines; `filter` is Live Tail's filter pattern and `filters` apply to the lines. */
+  tailLogs(
+    app: string,
+    q: { stage: string; filter?: string; stream?: string; filters?: LogFilters },
+    signal?: AbortSignal,
+  ) {
     return this.stream<LogLine>(
       `/v1/apps/${enc(app)}/logs/tail`,
-      { stage: q.stage, ...(q.filter ? { q: q.filter } : {}), ...(q.stream ? { stream: q.stream } : {}) },
+      {
+        stage: q.stage,
+        ...(q.filter ? { q: q.filter } : {}),
+        ...(q.stream ? { stream: q.stream } : {}),
+        ...json('f', q.filters),
+      },
       signal,
     );
   }
   trace(app: string, trace: string, q: { stage: string }) {
     return this.request<TraceResponse>('GET', `/v1/apps/${enc(app)}/traces/${enc(trace)}`, { query: q });
+  }
+  /** Requests and jobs that started traces, newest first. */
+  traces(
+    app: string,
+    q: { stage: string; from: number; to: number; filters?: TraceFilters; limit?: number },
+  ) {
+    const { filters, ...rest } = q;
+    return this.request<TracesResponse>('GET', `/v1/apps/${enc(app)}/traces`, {
+      query: { ...rest, ...json('f', filters) },
+    });
+  }
+  /** Lines per bucket by level and the commonest field values, for the same search as `logs`. */
+  logStats(
+    app: string,
+    q: { stage: string; from: number; to: number; filter?: string; stream?: string; filters?: LogFilters },
+  ) {
+    const { filter, filters, ...rest } = q;
+    return this.request<LogStatsResponse>('GET', `/v1/apps/${enc(app)}/logs/stats`, {
+      query: { ...rest, ...(filter ? { q: filter } : {}), ...json('f', filters) },
+    });
+  }
+  /** The lines around the one at `ts` (epoch ms) on one stream. */
+  logContext(app: string, q: { stage: string; stream: string; ts: number; before?: number; after?: number }) {
+    return this.request<LogContextResponse>('GET', `/v1/apps/${enc(app)}/logs/context`, { query: q });
+  }
+  /** A Logs Insights query on the stage's log groups. */
+  insights(app: string, req: InsightsRequest) {
+    return this.request<InsightsResponse>('POST', `/v1/apps/${enc(app)}/insights`, { body: req });
+  }
+  errorOccurrences(app: string, fingerprint: string, q: { stage: string; from: number; to: number }) {
+    return this.request<ErrorOccurrencesResponse>(
+      'GET',
+      `/v1/apps/${enc(app)}/errors/${enc(fingerprint)}/occurrences`,
+      { query: q },
+    );
+  }
+
+  // ------------------------------------------------------------- saved queries & dashboards
+  async listQueries(app: string): Promise<SavedQuery[]> {
+    return list(await this.request('GET', `/v1/apps/${enc(app)}/queries`), 'queries');
+  }
+  deleteQuery(app: string, id: string) {
+    return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/queries/${enc(id)}`);
+  }
+  /** Every dashboard the caller can see; with `app`, that app's and the cross-app ones. */
+  async listDashboards(app?: string): Promise<Dashboard[]> {
+    return list(await this.request('GET', '/v1/dashboards', { query: { app } }), 'dashboards');
+  }
+  getDashboard(id: string) {
+    return this.request<Dashboard>('GET', `/v1/dashboards/${enc(id)}`);
+  }
+  createDashboard(req: SaveDashboardRequest) {
+    return this.request<Dashboard>('POST', '/v1/dashboards', { body: req });
+  }
+  /** Replaces the dashboard. */
+  updateDashboard(id: string, req: SaveDashboardRequest) {
+    return this.request<Dashboard>('PUT', `/v1/dashboards/${enc(id)}`, { body: req });
+  }
+  deleteDashboard(id: string) {
+    return this.request<unknown>('DELETE', `/v1/dashboards/${enc(id)}`);
   }
   services(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
     return this.request<ServicesResponse>('GET', `/v1/apps/${enc(app)}/services`, { query: q });
@@ -423,6 +513,11 @@ export class ApiClient {
 }
 
 const enc = encodeURIComponent;
+
+/** A query parameter carrying JSON (`f`), left out when there is nothing in it. */
+function json(name: string, value: object | undefined): Record<string, string> {
+  return value && Object.keys(value).length ? { [name]: JSON.stringify(value) } : {};
+}
 
 /** The API scopes secrets with `?scope=shared` (app-wide) or `?stage=`. */
 function secretScope(o: { stage?: string; shared?: boolean }): Record<string, string> {
