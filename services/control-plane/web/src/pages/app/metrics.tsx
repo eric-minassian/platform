@@ -54,15 +54,16 @@ export function cliCommand(
 ): string {
   const f = q.filter ?? {};
   const filters = [
-    ...(f.routes ?? []).map((v) => `routes=${v}`),
+    ...(f.routes ?? []).map((v) => `route=${v}`),
     ...(f.status ?? []).map((v) => `status=${v}`),
-    ...(f.jobs ?? []).map((v) => `jobs=${v}`),
-    ...(f.names ?? []).map((v) => `names=${v}`),
+    ...(f.jobs ?? []).map((v) => `job=${v}`),
+    ...(f.names ?? []).map((v) => `name=${v}`),
     ...(f.outcome ? [`outcome=${f.outcome}`] : []),
     ...(f.measure ? [`measure=${f.measure}`] : []),
   ];
   return [
     'plat metrics',
+    '--app',
     q.app ?? app,
     ...(stage !== 'prod' || q.stage ? ['--stage', q.stage ?? stage] : []),
     '--metric',

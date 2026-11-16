@@ -956,15 +956,55 @@ writing any instrumentation:
   `req|err|job|metric|limit|env` lines to the telemetry processor. `span` and
   `log` lines stay in CloudWatch Logs for log search and traces (Logs
   Insights) to read on demand. The processor writes:
-  - per-minute, per-hour and per-day rollups to `platform-telemetry`: request
-    counts by status class, a fixed-bucket latency histogram (so DynamoDB
-    `ADD` works), per-route, per-job, custom-metric and rate-limit series,
-    with TTL;
+  - per-minute, per-hour and per-day rollups to `platform-telemetry`, with
+    TTL (minutes 3 days): request counts by status class, a fixed-bucket
+    latency histogram (so DynamoDB `ADD` works) and cold starts, stage-wide
+    and per route; per-job, custom-metric (count, sum and a max raised by a
+    conditional write) and rate-limit series. Writes happen only when there
+    is traffic;
   - Sentry-style error groups. A new group sends an alert and can open a
     GitHub issue in the app repo.
 - **No CloudWatch custom metrics, alarms or dashboards per app.** These are
   the costs that scale with app count. Infrastructure metrics (Web Function
   environments and throttles, queue age) are read from CloudWatch on demand.
+- **Reading it back** (`src/telemetry/query.ts`, `src/logs.ts`,
+  `src/insights.ts`):
+  - _Series_ (the Metrics explorer, dashboards, alert rules, `plat metrics
+    --metric`): a query's statistic per bucket from the rollups. 5 to 30
+    minute buckets are sums of minute rows, and histograms add, so
+    percentiles stay exact. A window older than minute rows falls back to
+    hours with a note. Grouped queries keep the top 10 groups. Realtime and
+    service series come from their CloudWatch metrics.
+  - _Log search:_ text or a filter pattern runs on FilterLogEvents. Any
+    structured filter but streams (level, route, status class, deployment,
+    trace) runs on Logs Insights over the stage's log groups, newest first,
+    paged by the oldest millisecond returned and the lines already returned
+    at it. A line's level follows its kind: a `log` line's own; `err` lines
+    and 5xx requests are errors; the Lambda runtime's records are `system`.
+    Facets and the volume chart are five Insights queries run together; a
+    line's context reads its stream over widening windows.
+  - _Members' Logs Insights queries_ run only on the stage's own log groups:
+    the language is pinned and a query that names log groups (`SOURCE`,
+    `logGroups(`) is refused. The control plane can read every log group, so
+    this check is what keeps members to their apps.
+  - _Trace lists_ are root `req` and `job` lines (a trace and no parent). A
+    trace's spans were kept when its root line names its own span id.
+- **Alert rules** (`src/alerts/`): a rule watches one series query on one
+  stage (requests, latency, cold starts, jobs, job duration, custom metrics
+  or rate limits) and fires when it is above or below a threshold over 1 to
+  60 minutes. The worker's `alerts` cron evaluates every enabled rule each
+  minute over the window that ends 2 minutes before the current minute, so
+  its telemetry is in. States are OK, Alarm and No data (the rule says
+  whether missing data is OK, Alarm or keeps the state). A state change is
+  written only if the state read is unchanged, so overlapping runs can't
+  both notify; it gets a history row (`a#<app>#<stage>`, 90 days), and
+  `notify` rules email the alerts topic on entering and leaving Alarm with a
+  link to the rule. Unchanged rules are written at most every 10 minutes.
+  Up to 25 rules per app. A platform with no rules does one read a minute.
+- **Saved queries and dashboards** are rows in the state table (layout in
+  `src/records.ts`). Saved queries belong to an app. A dashboard belongs to
+  an app or to none; one that spans apps is visible to and editable by
+  every member, and each widget still needs access to its own app.
 - **Console** (`platform.ericminassian.com`, `services/control-plane/web`):
   dark only, React on TanStack Router, Charts and Table with shadcn/ui.
   - **Layout:** one sidebar. At the top level: Apps, Dashboards (all,
@@ -1126,6 +1166,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
 | Edge floor (AWS WAF)                                | $0.10 for the alarm; while on, $6 a month by the hour (~$0.01/h) plus $0.60 per million requests                             |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
+| Alert rules                                         | a cron a minute (~43k invocations, inside the free tier) and one index read; per rule a rollup read a minute: cents          |
 
 Fixed cost is about $0.60 a month: the delegated zone and the edge floor's
 alarm. An idle app adds about nothing: no server held warm, no queue polled,
@@ -1384,3 +1425,9 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Web Function endpoints capped, runtime logs at WARN                                   | Spare environments are billed, and the cap bounds them (previews 2, prod 10 unless `web.maxEnvironments`). The runtime's own log records repeat the SDK's `env` and `req` lines and cost ingest.                                                                                                                                                                                                                                                                                                                                                         |
 | The control plane's server runs in instance mode                                      | It must keep answering when apps' request-mode servers and workers use up the account's shared Lambda concurrency; Web Functions scale on their own quota.                                                                                                                                                                                                                                                                                                                                                                                               |
 | `auto` waits for the account to have Lambda concurrency to spare                      | A new account can run 10 Lambda invocations at once, shared by request-mode servers and every worker; past that, function URLs answer errors. Web Functions scale on their own quota, so on such an account `auto` keeps servers there, with a warning that names the fix (raise "Concurrent executions" to at least 100).                                                                                                                                                                                                                               |
+| The console: dark only, one sidebar, TanStack Router, Charts and Table                | Eric's call (2026-11-16): CloudWatch's depth with a simpler face. Typed search params put the window, filters and queries of every view in its URL, so a link reproduces what someone saw.                                                                                                                                                                                                                                                                                                                                                               |
+| Alert rules are evaluated by the control plane from the rollups                       | CloudWatch alarms would need a custom metric per series ($0.30 a month) and $0.10 per alarm, per app and stage. The rollups already hold every series the explorer charts, so one cron a minute serves every rule for cents, and a rule can watch anything a chart shows.                                                                                                                                                                                                                                                                                |
+| A rule's state is written when it changes, else every 10 minutes                      | A write per rule per minute is ~$0.05 a rule a month, even for idle apps; reads cost less, and the history keeps every change.                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Members' Logs Insights queries run only on their stage's log groups                   | The control plane can read every log group, so the API picks the groups and refuses queries that name their own (`SOURCE`, `logGroups(`).                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Dashboards that span apps are open to every member                                    | They have no one app to authorize against. Each widget's data still goes through its own app's access check, so a member sees an error in place of an app they can't read.                                                                                                                                                                                                                                                                                                                                                                               |
+| Explorer expressions run in the browser                                               | Each query's series is fetched and cached once, and arithmetic over aligned buckets is cheap. Alert rules watch a single query, so the server never needs them.                                                                                                                                                                                                                                                                                                                                                                                          |

@@ -55,9 +55,20 @@ Run these in the app's directory, or pass `--app <name>`. `--stage` defaults to 
 
 ```sh
 plat logs --since 30m [--filter error] [--follow]
-plat errors
+plat logs --level error --route /api/items/:id --status 5xx
+plat logs --around <time> --stream web
+plat logs --since 6h --insights 'stats count() by bin(5m), status'
+plat errors [<fingerprint> --occurrences]
+plat traces [--failed] [--min-ms 1000]
 plat traces <traceId>
 plat metrics --since 6h
+plat metrics --metric requests --stat percent --filter status=5xx --by route
+plat alerts list|history
+plat alerts create --name "5xx" --metric requests --stat percent --filter status=5xx --op above --threshold 2 --minutes 5
+plat dashboards list
+plat dashboards show <id> --json > board.json   # edit, then
+plat dashboards apply --file board.json
+plat queries list
 plat data [collection] [--partition key=value]
 plat deployments
 plat rollback [--to <deploymentId>]
