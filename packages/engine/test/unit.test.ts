@@ -89,7 +89,7 @@ describe('stage role policy', () => {
     ]);
     expect(bySid.Queues?.Resource).toBe('arn:aws:sqs:us-east-1:111122223333:todo--prod--*');
     expect(bySid.Events?.Resource).toBe('arn:aws:events:us-east-1:111122223333:event-bus/todo--prod');
-    expect(bySid.StorageObjects?.Resource).toBe('arn:aws:s3:::store/todo/prod/*');
+    expect(bySid.StorageObjects?.Resource).toEqual(['arn:aws:s3:::store/todo/prod/*']);
     expect(bySid.StorageList?.Condition).toEqual({ StringLike: { 's3:prefix': ['todo/prod/*'] } });
     expect(bySid.InvokeWorker?.Resource).toBe(
       'arn:aws:lambda:us-east-1:111122223333:function:todo--prod--worker',
@@ -97,6 +97,25 @@ describe('stage role policy', () => {
     expect(bySid.Secrets?.Resource).toContain(
       'arn:aws:ssm:us-east-1:111122223333:parameter/platform/apps/todo/_shared/secrets/*',
     );
+  });
+
+  it('adds the public prefix only for public stores', () => {
+    const files = policies.stageRolePolicy({
+      app: 'atlas',
+      stage: 'pr-3',
+      region: 'us-east-1',
+      accountId: '111122223333',
+      manifest: parseManifest({ name: 'atlas', storage: { uploads: {}, snapshots: { public: true } } }),
+      platform: platform(),
+    });
+    const sids = Object.fromEntries(files.Statement.map((s) => [s.Sid ?? '', s] as const));
+    expect(sids.StorageObjects?.Resource).toEqual([
+      'arn:aws:s3:::store/atlas/pr-3/*',
+      'arn:aws:s3:::store/_public/atlas/pr-3/*',
+    ]);
+    expect(sids.StorageList?.Condition).toEqual({
+      StringLike: { 's3:prefix': ['atlas/pr-3/*', '_public/atlas/pr-3/*'] },
+    });
   });
 
   it("can't create log groups, so none outlives a destroyed stage", () => {
@@ -630,6 +649,80 @@ describe('realtime', () => {
       ]);
       expect(manage?.Action).toContain('appsync:UpdateApiKey');
       expect(manage?.Action).not.toContain('appsync:EventPublish');
+    });
+  });
+
+  describe('a store that changes visibility', () => {
+    /** Answers the live route and whether a prefix has files; any other call fails. */
+    const fake = (live: RouteRecord | undefined, filesUnder: string[]) => {
+      const calls: Array<[string, Record<string, unknown>]> = [];
+      const send = async (cmd: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        const name = cmd.constructor.name;
+        calls.push([name, cmd.input]);
+        if (name === 'GetKeyCommand') {
+          if (!live) throw Object.assign(new Error('missing'), { name: 'ResourceNotFoundException' });
+          return { Value: JSON.stringify(live) };
+        }
+        if (name === 'ListObjectsV2Command') {
+          const prefix = String(cmd.input.Prefix);
+          return { KeyCount: filesUnder.some((f) => f.startsWith(prefix)) ? 1 : 0 };
+        }
+        throw new Error(`stopped at ${name}`);
+      };
+      const ctx = {
+        clients: new Proxy({}, { get: () => ({ send }) }),
+        region: 'us-east-1',
+        target: 'aws',
+        log: () => {},
+        accountId: async () => '1',
+      } as unknown as EngineContext;
+      return { ctx, calls };
+    };
+    const deploy = (ctx: EngineContext, storage: Record<string, { public?: boolean }>) =>
+      deployStage(ctx, {
+        manifest: parseManifest({ name: 'atlas', web: { static: 'dist' }, storage }),
+        stage: 'prod',
+        deploymentId: 'd2',
+        platform: platform({ kvsArn: 'arn:kvs/x' }),
+        artifacts: {},
+      });
+    const live = (p?: string[]): RouteRecord => ({
+      v: 1,
+      app: 'atlas',
+      stage: 'prod',
+      d: 'd1',
+      s: 'atlas/prod/d1',
+      ...(p ? { p } : {}),
+    });
+
+    it('is refused when it has private files, before anything changes', async () => {
+      const aws = fake(live(), ['atlas/prod/snapshots/a.json']);
+      await expect(deploy(aws.ctx, { snapshots: { public: true } })).rejects.toThrow(
+        /store "snapshots" has files from when it was private, and a store with files can't become public/,
+      );
+      expect(aws.calls.map(([name]) => name)).toEqual(['GetKeyCommand', 'ListObjectsV2Command']);
+      expect(aws.calls[1]?.[1]).toMatchObject({ Bucket: 'store', Prefix: 'atlas/prod/snapshots/' });
+    });
+
+    it('is refused when it has public files', async () => {
+      const aws = fake(live(['snapshots']), ['_public/atlas/prod/snapshots/a.json']);
+      await expect(deploy(aws.ctx, { snapshots: {} })).rejects.toThrow(/when it was public.*become private/);
+    });
+
+    it('goes ahead when the store has no files where it was', async () => {
+      // Files of another store, and a store whose visibility doesn't change, don't matter.
+      const aws = fake(live(['tiles']), ['atlas/prod/uploads/a.json', '_public/atlas/prod/tiles/t.png']);
+      await expect(
+        deploy(aws.ctx, { snapshots: { public: true }, tiles: { public: true }, uploads: {} }),
+      ).rejects.toThrow(/stopped at/);
+      expect(aws.calls.filter(([name]) => name === 'ListObjectsV2Command').map(([, i]) => i.Prefix)).toEqual([
+        'atlas/prod/snapshots/',
+      ]);
+    });
+
+    it('treats every store as private before the stage has a route', async () => {
+      const aws = fake(undefined, ['atlas/prod/snapshots/a.json']);
+      await expect(deploy(aws.ctx, { snapshots: { public: true } })).rejects.toThrow(/when it was private/);
     });
   });
 

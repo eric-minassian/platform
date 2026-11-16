@@ -5,11 +5,15 @@ import {
   emailMailFromDomain,
   HOST_HEADER,
   names,
+  PUBLIC_STORAGE_ROOT,
   type PlatformConfig,
   type PlatformRuntimeConfig,
   PROD_STAGE,
   platformNames,
   REALTIME_TOKEN_PATTERN,
+  STORAGE_DEFAULT_CACHE_CONTROL,
+  STORAGE_PATH,
+  STORAGE_RESPONSE_HEADERS,
 } from '@ericminassian/platform-core';
 import { buildRouterFunctionCode } from '@ericminassian/platform-core/cloudfront-function';
 import { platformTags, policies } from '@ericminassian/platform-engine';
@@ -233,6 +237,31 @@ export class FoundationStack extends Stack {
       enableAcceptEncodingGzip: true,
       enableAcceptEncodingBrotli: true,
     });
+    // Public stores (`STORAGE_PATH`): the storage bucket under its public
+    // root, which is all this distribution may read of it (bucket policy
+    // below), with headers that keep an uploaded HTML or SVG file from running
+    // script on the app's origin. A file without its own Cache-Control gets
+    // one that makes browsers revalidate; the edge itself caches it for the
+    // cache policy's default TTL (none).
+    const storageAccess = new cloudfront.S3OriginAccessControl(this, 'StorageOriginAccess', {
+      originAccessControlName: 'platform-storage',
+      signing: cloudfront.Signing.SIGV4_ALWAYS,
+    });
+    const storageHeaders = new cloudfront.ResponseHeadersPolicy(this, 'StorageHeaders', {
+      responseHeadersPolicyName: 'platform-storage',
+      comment: 'platform public stores: nosniff, no scripts, revalidate by default',
+      securityHeadersBehavior: {
+        contentTypeOptions: { override: true },
+        contentSecurityPolicy: {
+          contentSecurityPolicy: STORAGE_RESPONSE_HEADERS['content-security-policy'],
+          override: true,
+        },
+      },
+      customHeadersBehavior: {
+        customHeaders: [{ header: 'Cache-Control', value: STORAGE_DEFAULT_CACHE_CONTROL, override: false }],
+      },
+    });
+
     // One distribution for every app. The router function serves static files
     // from the sites bucket or switches the origin to the stage's Web Function.
     const distribution = new cloudfront.Distribution(this, 'Edge', {
@@ -257,8 +286,52 @@ export class FoundationStack extends Stack {
         originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         functionAssociations: [{ function: router, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }],
       },
+      additionalBehaviors: {
+        // The router rewrites a public store's file to `/<app>/<stage>/<store>/<key>`, or answers 404.
+        [`${STORAGE_PATH}*`]: {
+          origin: new PublicStorageOrigin(storage, storageAccess),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+          cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+          compress: true,
+          // The cache key ignores the behavior; the router keeps these entries apart from the
+          // default behavior's with its own x-platform-host (STORAGE_CACHE_HOST in core).
+          cachePolicy,
+          // No origin request policy: S3 gets only what the cache key holds.
+          responseHeadersPolicy: storageHeaders,
+          functionAssociations: [
+            { function: router, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+      },
     });
     tag(distribution, 'edge');
+    // The public root and nothing else, so a routing mistake can't expose a
+    // private store. Listing it makes a missing file a 404 instead of a 403.
+    const fromEdge = {
+      principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
+      conditions: { StringEquals: { 'AWS:SourceArn': distribution.distributionArn } },
+    };
+    storage.addToResourcePolicy(
+      new iam.PolicyStatement({
+        ...fromEdge,
+        sid: 'EdgeReadsPublicStores',
+        actions: ['s3:GetObject'],
+        resources: [storage.arnForObjects(`${PUBLIC_STORAGE_ROOT}*`)],
+      }),
+    );
+    storage.addToResourcePolicy(
+      new iam.PolicyStatement({
+        ...fromEdge,
+        sid: 'EdgeFindsMissingPublicFiles',
+        actions: ['s3:ListBucket'],
+        resources: [storage.bucketArn],
+        conditions: {
+          ...fromEdge.conditions,
+          StringLike: { 's3:prefix': [`${PUBLIC_STORAGE_ROOT}*`] },
+        },
+      }),
+    );
 
     // `*.<domain>` in the root zone is a CNAME to the edge host; the console
     // is the zone apex.
@@ -589,6 +662,26 @@ export class FoundationStack extends Stack {
     new CfnOutput(this, 'CiRoleArn', { value: ciRole.roleArn });
     new CfnOutput(this, 'DistributionDomainName', { value: distribution.distributionDomainName });
     new CfnOutput(this, 'RealtimeApiId', { value: realtimeApi.attrApiId });
+  }
+}
+
+/**
+ * The storage bucket's public root through OAC. `S3BucketOrigin` would also
+ * let the distribution read the whole bucket, private stores included; the
+ * stack grants it the public root itself.
+ */
+class PublicStorageOrigin extends cloudfront.OriginBase {
+  constructor(bucket: s3.IBucket, access: cloudfront.IOriginAccessControl) {
+    super(bucket.bucketRegionalDomainName, {
+      originId: 'storage',
+      originPath: `/${PUBLIC_STORAGE_ROOT}`,
+      originAccessControlId: access.originAccessControlId,
+    });
+  }
+
+  protected override renderS3OriginConfig(): cloudfront.CfnDistribution.S3OriginConfigProperty {
+    // OAC, not an origin access identity.
+    return { originAccessIdentity: '' };
   }
 }
 

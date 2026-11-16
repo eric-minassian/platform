@@ -296,9 +296,75 @@ describe('foundation stack', () => {
             { EventType: 'viewer-request', FunctionARN: { 'Fn::GetAtt': [router, 'FunctionARN'] } },
           ],
         }),
-        Origins: [Match.objectLike({ Id: 'sites', OriginAccessControlId: Match.anyValue() })],
+        Origins: Match.arrayWith([
+          Match.objectLike({ Id: 'sites', OriginAccessControlId: Match.anyValue() }),
+        ]),
       }),
     });
+  });
+
+  it('serves public stores from the storage bucket’s public root, and only there', () => {
+    const router = logicalId('AWS::CloudFront::Function', { Name: platformNames.routerFunction });
+    const storage = logicalId('AWS::S3::Bucket', {
+      BucketName: platformNames.storageBucket(account, config.region),
+    });
+    const headers = logicalId('AWS::CloudFront::ResponseHeadersPolicy', {
+      ResponseHeadersPolicyConfig: Match.objectLike({ Name: 'platform-storage' }),
+    });
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        CacheBehaviors: [
+          Match.objectLike({
+            PathPattern: '/__platform/storage/*',
+            TargetOriginId: 'storage',
+            AllowedMethods: ['GET', 'HEAD'],
+            Compress: true,
+            ResponseHeadersPolicyId: { Ref: headers },
+            OriginRequestPolicyId: Match.absent(),
+            FunctionAssociations: [
+              { EventType: 'viewer-request', FunctionARN: { 'Fn::GetAtt': [router, 'FunctionARN'] } },
+            ],
+          }),
+        ],
+        Origins: Match.arrayWith([
+          Match.objectLike({
+            Id: 'storage',
+            DomainName: { 'Fn::GetAtt': [storage, 'RegionalDomainName'] },
+            OriginPath: '/_public',
+            OriginAccessControlId: Match.anyValue(),
+            S3OriginConfig: { OriginAccessIdentity: '' },
+          }),
+        ]),
+      }),
+    });
+    template.hasResourceProperties('AWS::CloudFront::ResponseHeadersPolicy', {
+      ResponseHeadersPolicyConfig: Match.objectLike({
+        SecurityHeadersConfig: {
+          ContentTypeOptions: { Override: true },
+          ContentSecurityPolicy: { ContentSecurityPolicy: "script-src 'none'", Override: true },
+        },
+        CustomHeadersConfig: { Items: [{ Header: 'Cache-Control', Value: 'no-cache', Override: false }] },
+      }),
+    });
+
+    // The distribution reads the public root, and lists only it, so a missing file is a 404.
+    const policy = Object.values(
+      template.findResources('AWS::S3::BucketPolicy', { Properties: { Bucket: { Ref: storage } } }),
+    );
+    expect(policy).toHaveLength(1);
+    const statements = (
+      policy[0] as { Properties: { PolicyDocument: { Statement: Array<Record<string, unknown>> } } }
+    ).Properties.PolicyDocument.Statement;
+    const edge = statements.filter(
+      (st) => (st.Principal as { Service?: string } | undefined)?.Service === 'cloudfront.amazonaws.com',
+    );
+    expect(edge.map((st) => [st.Action, st.Resource])).toEqual([
+      ['s3:GetObject', { 'Fn::Join': ['', [{ 'Fn::GetAtt': [storage, 'Arn'] }, '/_public/*']] }],
+      ['s3:ListBucket', { 'Fn::GetAtt': [storage, 'Arn'] }],
+    ]);
+    for (const st of edge)
+      expect(Object.keys((st.Condition as { StringEquals: object }).StringEquals)).toEqual(['AWS:SourceArn']);
+    expect(edge[1]?.Condition).toMatchObject({ StringLike: { 's3:prefix': ['_public/*'] } });
   });
 
   it('keys the router cache on the platform host header', () => {
