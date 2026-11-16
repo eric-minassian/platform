@@ -27,8 +27,9 @@ import {
 } from '../util.ts';
 
 /**
- * Lambda Web Functions (launched 2026-10): a function holds immutable
- * revisions; an endpoint routes traffic to up to two revisions by weight.
+ * Lambda Web Functions (launched 2026-10), a stage's server in instance mode:
+ * a function holds immutable revisions; an endpoint routes traffic to up to
+ * two revisions by weight.
  *
  * The engine gives each stage two endpoints and pins each to one revision
  * (100%). A route record names an endpoint, so the route flip switches
@@ -64,7 +65,10 @@ function revisionConfig(spec: RevisionSpec) {
       timeoutSeconds: spec.timeoutSeconds,
       maxConcurrencyPerEnvironment: spec.maxConcurrency,
       environmentVariables: spec.env,
-      telemetryConfig: { loggingConfig: { logGroup: spec.logGroup } },
+      // WARN drops the runtime's per-minute `platform.invokeSummary` and its init, invoke and
+      // spin-down records: the SDK's own `env` and `req` lines carry the same facts, and nothing
+      // reads the runtime's beyond showing them in the logs.
+      telemetryConfig: { loggingConfig: { logGroup: spec.logGroup, systemLogLevel: 'WARN' as const } },
     },
   };
 }
@@ -84,12 +88,13 @@ export async function ensureWebFunction(
   spec: {
     name: string;
     tags?: Record<string, string>;
-    initial: { revision: RevisionSpec; endpointName: string };
+    initial: { revision: RevisionSpec; endpointName: string; maxEnvironments?: number };
   },
 ): Promise<{ arn: string; initialRevisionId?: string }> {
   const lw = ctx.clients.lambdaWeb;
   const existing = await ignoreNotFound(lw.send(new GetWebFunctionCommand({ functionName: spec.name })));
   if (existing?.functionArn) return { arn: existing.functionArn };
+  const { maxEnvironments } = spec.initial;
   const res = await retry(
     () =>
       lw.send(
@@ -103,6 +108,7 @@ export async function ensureWebFunction(
             authType: 'IamAuth',
             // Traffic moves only when the engine sets weights, so rollback stays explicit.
             autoDeploymentMode: 'Disabled',
+            ...(maxEnvironments ? { scalingConfig: { maxEnvironments } } : {}),
           },
         }),
       ),
@@ -168,19 +174,24 @@ export interface EndpointState {
   revisionIds: string[];
 }
 
-/** Ensure the endpoint exists and routes 100% to `revisionId`. */
+/**
+ * Ensure the endpoint exists and routes 100% to `revisionId`, with at most
+ * `maxEnvironments` environments when given (left as it is otherwise).
+ */
 export async function ensureEndpoint(
   ctx: EngineContext,
-  spec: { functionName: string; endpointName: string; revisionId: string },
+  spec: { functionName: string; endpointName: string; revisionId: string; maxEnvironments?: number },
 ): Promise<EndpointState> {
   const lw = ctx.clients.lambdaWeb;
   const weights = [{ revisionId: spec.revisionId, weight: 100 }];
+  const scaling = spec.maxEnvironments ? { scalingConfig: { maxEnvironments: spec.maxEnvironments } } : {};
   // Endpoints only accept updates while Active (a new one starts Pending).
   const existing = await waitEndpointSettled(ctx, spec.functionName, spec.endpointName);
   const routed =
     existing?.revisionWeights?.length === 1 &&
     existing.revisionWeights[0]?.revisionId === spec.revisionId &&
     existing.revisionWeights[0]?.weight === 100;
+  const scaled = !spec.maxEnvironments || existing?.scalingConfig?.maxEnvironments === spec.maxEnvironments;
   if (!existing) {
     await lw.send(
       new CreateWebFunctionEndpointCommand({
@@ -190,6 +201,7 @@ export async function ensureEndpoint(
         authType: 'IamAuth',
         autoDeploymentMode: 'Disabled',
         revisionWeights: weights,
+        ...scaling,
       }),
     );
     ctx.log(
@@ -197,12 +209,13 @@ export async function ensureEndpoint(
       'created web function endpoint',
       `web-function ${spec.functionName}/${spec.endpointName}`,
     );
-  } else if (!routed) {
+  } else if (!routed || !scaled) {
     await lw.send(
       new UpdateWebFunctionEndpointCommand({
         functionName: spec.functionName,
         endpointName: spec.endpointName,
         revisionWeights: weights,
+        ...scaling,
       }),
     );
   }
@@ -280,6 +293,8 @@ export async function endpointForRevision(
     revisionId: string;
     liveDomain?: string;
     distributionArn?: string;
+    /** The endpoint's cap on environments; unchanged when absent. */
+    maxEnvironments?: number;
   },
 ): Promise<RevisionEndpoint> {
   const { functionName, revisionId } = spec;
@@ -291,7 +306,12 @@ export async function endpointForRevision(
   const reuse = before.find((c) => c.e && pinnedTo(c.e, revisionId))?.name;
   const live = before.find((c) => c.e?.domainName && c.e.domainName === spec.liveDomain)?.name;
   const endpointName = reuse ?? spec.endpointNames.find((n) => n !== live)!;
-  const endpoint = await ensureEndpoint(ctx, { functionName, endpointName, revisionId });
+  const endpoint = await ensureEndpoint(ctx, {
+    functionName,
+    endpointName,
+    revisionId,
+    ...(spec.maxEnvironments ? { maxEnvironments: spec.maxEnvironments } : {}),
+  });
   if (!reuse) {
     ctx.log('info', `endpoint ${endpointName} → revision ${revisionId}`, `web-function ${functionName}`);
   }

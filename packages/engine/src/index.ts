@@ -21,6 +21,7 @@ import type {
   RealtimeEdgeEntry,
   ResolvedManifest,
   RouteRecord,
+  WebCompute,
 } from '@ericminassian/platform-core';
 import { createClients } from './clients.ts';
 import { ensureRealtimePlatform } from './drivers/appsync.ts';
@@ -84,6 +85,14 @@ export interface DeployStageInput {
    */
   webMode?: 'function' | 'external';
   /**
+   * How the server runs with `webMode: 'function'` (core `webComputeFor`
+   * decides it): `instance`, a Lambda Web Function (the default), or
+   * `request`, a Lambda function per request behind function URLs. A deploy
+   * builds only this one; the stage keeps the other mode's (it costs nothing
+   * idle) until the manifest drops `web.server` or the stage is destroyed.
+   */
+  webCompute?: WebCompute;
+  /**
    * `ecs`: build each service's image and run it on ECS (AWS; the default).
    * `external`: skip images and ECS; `plat dev` runs services as local
    * processes. Their log groups are created either way.
@@ -97,7 +106,7 @@ export interface DeployStageInput {
 }
 
 export interface ResourceRef {
-  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `email-tenant`, `configuration-set`, `route`, `static`, `image`, `task-definition`, `ecs-service` */
+  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function` (worker, a handler's own, or the request-mode server), `esm`, `user-pool-client`, `channel-namespace`, `email-tenant`, `configuration-set`, `route`, `static`, `image`, `task-definition`, `ecs-service` */
   type: string;
   name: string;
   arn?: string;
@@ -108,7 +117,12 @@ export interface DeployStageResult {
   host: string;
   url: string;
   route?: RouteRecord;
+  /** How the server runs, when the stage has one. */
+  compute?: WebCompute;
+  /** The server in instance mode. */
   webFunction?: { name: string; endpointDomain: string; revisionId: string };
+  /** The server in request mode: the version this deploy published, behind `urlDomain`. */
+  requestFunction?: { name: string; urlDomain: string; version: string };
   workerFunction?: { name: string; arn: string };
   /** Services the deploy rolled out (`servicesMode: 'ecs'`). */
   services?: DeployedService[];
@@ -131,10 +145,15 @@ export interface RollbackStageInput {
   app: string;
   stage: string;
   platform: PlatformRuntimeConfig;
-  /** Route record of the deployment to go back to. The engine picks the endpoint (`o`) itself. */
+  /**
+   * Route record of the deployment to go back to, in its compute mode. The
+   * engine picks the endpoint or function URL (`o`) itself.
+   */
   route: RouteRecord;
-  /** That deployment's Web Function revision. */
+  /** That deployment's Web Function revision (instance mode). */
   revisionId?: string;
+  /** That deployment's function version (request mode). */
+  version?: string;
   /**
    * Services that deployment declared. Each one the stage still runs is
    * pointed back at that deployment's build; the rollback is refused if a
