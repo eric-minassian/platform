@@ -636,13 +636,25 @@ async function rolloutError(
   return new RolloutError(spec.service, failure, lines.join('\n'));
 }
 
-/** The stream's last lines. Best effort: the rollout error matters more than its logs. */
+/**
+ * Longest log line a rollout error quotes. Node prints the source line of an
+ * uncaught error, which in a minified bundle is the whole bundle (150 KB on
+ * the first real failure), and the error lands in the deployment's record.
+ */
+const QUOTED_LINE_MAX = 300;
+
+/** The stream's last lines, each cut to a readable length. Best effort: the rollout error matters more than its logs. */
 async function logTail(ctx: EngineContext, group: string, stream: string, limit: number): Promise<string[]> {
   try {
     const res = await ctx.clients.logs.send(
       new GetLogEventsCommand({ logGroupName: group, logStreamName: stream, limit, startFromHead: false }),
     );
-    return (res.events ?? []).map((e) => (e.message ?? '').trimEnd());
+    return (res.events ?? []).map((e) => {
+      const line = (e.message ?? '').trimEnd();
+      return line.length > QUOTED_LINE_MAX
+        ? `${line.slice(0, QUOTED_LINE_MAX)}… (${line.length} chars)`
+        : line;
+    });
   } catch (e) {
     return isNotFound(e) ? [] : [`(its logs couldn't be read: ${errorMessage(e)})`];
   }

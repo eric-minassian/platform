@@ -623,7 +623,7 @@ describe('waitForRollout', () => {
           stoppedAt: t1,
         },
       ],
-      logs: { 'ecs/app/newest': ['starting', 'Error: AIS_KEY is not set'] },
+      logs: { 'ecs/app/newest': ['starting', `minified ${'x'.repeat(5000)}`, 'Error: AIS_KEY is not set'] },
     });
     const error = await waitForRollout(ecs.ctx, spec()).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(RolloutError);
@@ -632,6 +632,9 @@ describe('waitForRollout', () => {
     expect(message).toContain("svc (shop--prod--ais:2) didn't start: its tasks keep stopping.");
     expect(message).toContain('task newest stopped (exit code 1): Essential container in task exited');
     expect(message).toContain('    | Error: AIS_KEY is not set');
+    // A minified bundle's source line is cut, not quoted whole.
+    expect(message).toContain(`    | minified ${'x'.repeat(291)}… (5009 chars)`);
+    expect(message.length).toBeLessThan(2000);
     expect(message.indexOf('task newest')).toBeLessThan(message.indexOf('task older'));
     expect(message).not.toContain('old-build');
     expect(ecs.sent('GetLogEventsCommand')).toEqual([
