@@ -345,6 +345,7 @@ export function controlPlanePolicy(input: {
     | 'userPoolId'
     | 'boundaryPolicyArn'
     | 'alertsTopicArn'
+    | 'edgeWebAclArn'
   > & {
     realtime?: Pick<NonNullable<PlatformRuntimeConfig['realtime']>, 'apiId'>;
     email?: Pick<EmailRuntimeConfig, 'identityArn'>;
@@ -472,6 +473,15 @@ export function controlPlanePolicy(input: {
       Effect: 'Allow',
       Action: ['cloudfront-keyvaluestore:*', 'cloudfront:DescribeKeyValueStore'],
       Resource: runtime.kvsArn,
+    });
+  }
+  if (runtime.edgeWebAclArn) {
+    statements.push({
+      // The console's list of requests the edge floor blocked.
+      Sid: 'EdgeFloor',
+      Effect: 'Allow',
+      Action: ['wafv2:GetSampledRequests'],
+      Resource: runtime.edgeWebAclArn,
     });
   }
   if (runtime.userPoolId) {

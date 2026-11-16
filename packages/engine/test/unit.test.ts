@@ -159,6 +159,20 @@ describe('stage role policy', () => {
     expect(create?.Resource).toBe('arn:aws:iam::1:role/platform/apps/*');
   });
 
+  it("lets the control plane read the edge floor's samples only when there is one", () => {
+    const runtime = { artifactsBucket: 'a', sitesBucket: 's', storageBucket: 'st' };
+    const acl = 'arn:aws:wafv2:us-east-1:1:global/webacl/platform-edge/abc';
+    const with_ = policies.controlPlanePolicy({
+      region: 'us-east-1',
+      accountId: '1',
+      runtime: { ...runtime, edgeWebAclArn: acl },
+    });
+    expect(allows(with_, 'wafv2:GetSampledRequests', acl)).toBe(true);
+    expect(allows(with_, 'wafv2:UpdateWebACL', acl)).toBe(false);
+    const without = policies.controlPlanePolicy({ region: 'us-east-1', accountId: '1', runtime });
+    expect(without.Statement.some((st) => st.Sid === 'EdgeFloor')).toBe(false);
+  });
+
   it('lets the control plane create tagged secrets, list and delete them', () => {
     const cp = policies.controlPlanePolicy({
       region: 'us-east-1',
