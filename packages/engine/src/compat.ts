@@ -1,5 +1,9 @@
 import { Readable } from 'node:stream';
 
+type Client = {
+  middlewareStack: { add: (mw: never, opts: { step: 'deserialize'; name: string; priority: 'low' }) => void };
+};
+
 /**
  * AWS Emulator v1.0.385 serializes Lambda Web Function timestamps (`createdAt`,
  * `updatedAt`, ...) as epoch numbers, while the service model (and the JS SDK
@@ -8,9 +12,22 @@ import { Readable } from 'node:stream';
  * deserializes. Only installed when the engine targets the emulator; delete it
  * once the emulator is fixed.
  */
-export function addEmulatorCompat(client: {
-  middlewareStack: { add: (mw: never, opts: { step: 'deserialize'; name: string; priority: 'low' }) => void };
-}): void {
+export function addEmulatorCompat(client: Client): void {
+  rewriteResponses(client, 'platformEmulatorTimestampCompat', fixTimestamps);
+}
+
+/**
+ * AWS Emulator v1.0.385 writes ECS service timestamps as epoch seconds with
+ * nanosecond digits (`1794787458.178454563`). The SDK reads numbers with more
+ * digits than a double holds as big decimals, which its timestamp parser
+ * rejects, so DescribeServices, CreateService and UpdateService all fail.
+ * Re-serializing the body rounds them to doubles. Emulator only.
+ */
+export function addEmulatorEcsCompat(client: Client): void {
+  rewriteResponses(client, 'platformEmulatorEpochPrecisionCompat', roundNumbers);
+}
+
+function rewriteResponses(client: Client, name: string, rewrite: (body: string) => string): void {
   const middleware =
     (next: (args: unknown) => Promise<{ response?: { body?: unknown } }>) => async (args: unknown) => {
       const out = await next(args);
@@ -23,15 +40,21 @@ export function addEmulatorCompat(client: {
       ) {
         const chunks: Buffer[] = [];
         for await (const c of body) chunks.push(Buffer.from(c));
-        res.body = Readable.from([Buffer.from(fixTimestamps(Buffer.concat(chunks).toString('utf8')))]);
+        res.body = Readable.from([Buffer.from(rewrite(Buffer.concat(chunks).toString('utf8')))]);
       }
       return out;
     };
-  client.middlewareStack.add(middleware as never, {
-    step: 'deserialize',
-    name: 'platformEmulatorTimestampCompat',
-    priority: 'low',
-  });
+  client.middlewareStack.add(middleware as never, { step: 'deserialize', name, priority: 'low' });
+}
+
+/** Exported for tests. */
+export function roundNumbers(json: string): string {
+  if (!json) return json;
+  try {
+    return JSON.stringify(JSON.parse(json));
+  } catch {
+    return json;
+  }
 }
 
 /** Exported for tests. */

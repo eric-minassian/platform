@@ -26,13 +26,16 @@ import { createClients } from './clients.ts';
 import { ensureRealtimePlatform } from './drivers/appsync.ts';
 import { putObject } from './drivers/s3.ts';
 import { ensureLocal } from './local.ts';
+import { controlService, describeServices } from './services.ts';
 import { deployStage, destroyStage, expireStorage, listStageResources, rollbackStage } from './stage.ts';
 import type { EngineContext } from './util.ts';
 
 export type { AwsClients } from './clients.ts';
 export * from './drivers/index.ts';
 export * from './emulator.ts';
+export * as images from './images.ts';
 export * as policies from './policy.ts';
+export { ServiceNotFoundError } from './services.ts';
 export { hostFor } from './stage.ts';
 export { cacheControlFor, contentTypeFor } from './static.ts';
 export type { EngineContext, PolicyDocument, PolicyStatement } from './util.ts';
@@ -69,14 +72,23 @@ export interface DeployStageInput {
   stage: string;
   deploymentId: string;
   platform: PlatformRuntimeConfig;
-  /** Uploaded build artifacts (zips) in the artifacts bucket. */
-  artifacts: { server?: S3Location; worker?: S3Location; static?: S3Location };
+  /**
+   * Uploaded build artifacts (zips) in the artifacts bucket. `services` is
+   * `services.zip`: `<service>/index.mjs` (+ `.map`) for each declared service.
+   */
+  artifacts: { server?: S3Location; worker?: S3Location; static?: S3Location; services?: S3Location };
   /**
    * `function`: create/update the Lambda Web Function + route record (AWS).
    * `external`: skip both; `plat dev` runs the server process itself because
    * the emulator does not serve Web Function endpoints yet.
    */
   webMode?: 'function' | 'external';
+  /**
+   * `ecs`: build each service's image and run it on ECS (AWS; the default).
+   * `external`: skip images and ECS; `plat dev` runs services as local
+   * processes. Their log groups are created either way.
+   */
+  servicesMode?: 'ecs' | 'external';
   /** Use this role instead of creating the per-stage role (the control plane runs privileged). */
   roleArn?: string;
   /** Extra environment variables for web + worker (merged over manifest `env`). */
@@ -85,7 +97,7 @@ export interface DeployStageInput {
 }
 
 export interface ResourceRef {
-  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `email-tenant`, `configuration-set`, `route`, `static` */
+  /** `role`, `table`, `queue`, `bus`, `rule`, `schedule-group`, `schedule`, `log-group`, `web-function`, `function`, `esm`, `user-pool-client`, `channel-namespace`, `email-tenant`, `configuration-set`, `route`, `static`, `image`, `task-definition`, `ecs-service` */
   type: string;
   name: string;
   arn?: string;
@@ -98,7 +110,21 @@ export interface DeployStageResult {
   route?: RouteRecord;
   webFunction?: { name: string; endpointDomain: string; revisionId: string };
   workerFunction?: { name: string; arn: string };
+  /** Services the deploy rolled out (`servicesMode: 'ecs'`). */
+  services?: DeployedService[];
   resources: ResourceRef[];
+}
+
+export interface DeployedService {
+  /** The key in plat.config.ts (`ais`). */
+  name: string;
+  /** `<repositoryUri>@sha256:…`. */
+  image: string;
+  taskDefinitionArn: string;
+  /** 1 running, 0 when a preview doesn't run it. */
+  desired: number;
+  /** A preview's stop schedule. */
+  stopsAt?: string;
 }
 
 export interface RollbackStageInput {
@@ -109,6 +135,49 @@ export interface RollbackStageInput {
   route: RouteRecord;
   /** That deployment's Web Function revision. */
   revisionId?: string;
+  /**
+   * Services that deployment declared. Each one the stage still runs is
+   * pointed back at that deployment's build; the rollback is refused if a
+   * build was cleaned up since.
+   */
+  services?: readonly string[];
+}
+
+export interface StageServicesInput {
+  app: string;
+  stage: string;
+  platform: PlatformRuntimeConfig;
+}
+
+/** One service as ECS reports it right now. */
+export interface ServiceRuntimeState {
+  name: string;
+  desired: number;
+  running: number;
+  pending: number;
+  /** The newest ECS deployment's rollout (`COMPLETED`, `IN_PROGRESS`, `FAILED`). */
+  rollout?: 'completed' | 'in_progress' | 'failed';
+  /** Deployment whose build the newest ECS deployment runs (its task definition's tag). */
+  deploymentId?: string;
+  /** When the current task started. */
+  startedAt?: string;
+  /** When a stop schedule scales it to zero. */
+  stopsAt?: string;
+  /** The task that stopped most recently. */
+  lastStop?: { at: string; reason: string; exitCode?: number };
+  /** Recent ECS service events, newest first (at most 10). */
+  events: Array<{ at: string; message: string }>;
+}
+
+export interface ControlServiceInput extends StageServicesInput {
+  name: string;
+  /**
+   * `start`: desired 1, stopping again after `minutes` when given (replacing
+   * any stop schedule). `stop`: desired 0 (and no stop schedule). `restart`:
+   * a fresh task on the same build.
+   */
+  action: 'start' | 'stop' | 'restart';
+  minutes?: number;
 }
 
 export interface DestroyStageInput {
@@ -154,6 +223,10 @@ export interface Engine {
    * plane runs it nightly; `plat dev` serves the entry from its local router.
    */
   ensureRealtimePlatform(platform: PlatformRuntimeConfig): Promise<RealtimeEdgeEntry | undefined>;
+  /** The stage's long-running services as ECS runs them now (none without container compute). */
+  describeServices(input: StageServicesInput): Promise<ServiceRuntimeState[]>;
+  /** Start, stop or restart one of the stage's services. */
+  controlService(input: ControlServiceInput): Promise<{ desired: number; stopsAt?: string }>;
 }
 
 export function createEngine(opts: EngineOptions): Engine {
@@ -169,6 +242,8 @@ export function createEngine(opts: EngineOptions): Engine {
     listStageResources: (app, stage) => listStageResources(ctx, app, stage),
     putArtifact: (platform, key, body) => putObject(ctx, { bucket: platform.artifactsBucket, key, body }),
     ensureRealtimePlatform: (platform) => ensureRealtimePlatform(ctx, platform),
+    describeServices: (input) => describeServices(ctx, input),
+    controlService: (input) => controlService(ctx, input),
   };
   contexts.set(engine, ctx);
   return engine;

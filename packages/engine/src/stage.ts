@@ -61,6 +61,7 @@ import {
 import {
   deleteSchedule,
   deleteScheduleGroup,
+  deleteScheduleGroupIfEmpty,
   ensureSchedule,
   ensureScheduleGroup,
   listSchedules,
@@ -93,6 +94,17 @@ import type {
   RollbackStageInput,
 } from './index.ts';
 import { configurationSetArn, stageRolePolicy, stageTrustPolicy } from './policy.ts';
+import {
+  applyServicesRollback,
+  awaitServiceRollouts,
+  destroyServices,
+  listServiceResources,
+  planServicesRollback,
+  pruneServices,
+  type ServiceRollout,
+  type ServicesRollback,
+  startServices,
+} from './services.ts';
 import { type EngineContext, ignoreNotFound, stageTags } from './util.ts';
 
 /**
@@ -100,6 +112,12 @@ import { type EngineContext, ignoreNotFound, stageTags } from './util.ts';
  * newest ones, plus whatever the routes still use), so rollback can reach them.
  */
 const DEPLOYMENTS_KEPT = 3;
+
+/**
+ * Crons and preview stop schedules share the stage's schedule group. Cron
+ * keys can't contain `--`; a service's stop schedule (`<key>--stop`) does.
+ */
+const isCronSchedule = (name: string) => !name.includes('--');
 
 /**
  * Public host of a stage. Under `plat dev` the `local` stage is simply
@@ -117,7 +135,8 @@ function statementId(prefix: string, name: string): string {
 /**
  * Reconcile one stage with its manifest, then flip the route. Ordering keeps
  * the old deployment serving until everything for the new one is ready:
- * data/messaging → role → worker → static → web revision → route (last) → GC.
+ * data/messaging → role → worker → services (started) → static → web
+ * revision → services (running) → route (last) → GC.
  */
 export async function deployStage(ctx: EngineContext, input: DeployStageInput): Promise<DeployStageResult> {
   const { manifest: m, stage, platform, deploymentId } = input;
@@ -136,6 +155,8 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   const base = names.base(app, stage);
   const hasWeb = Boolean(m.web?.server) && webMode === 'function';
   const hasWorker = Boolean(m.worker);
+  const serviceKeys = Object.keys(m.services);
+  const servicesOnEcs = (input.servicesMode ?? 'ecs') === 'ecs';
   const resources: ResourceRef[] = [];
   const workerName = names.workerFunction(app, stage);
   const servedStores = publicStores(m);
@@ -152,6 +173,14 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     throw new Error(
       "plat.config.ts declares email, but this platform has no mail domain yet (its foundation predates it): deploy the platform's foundation first",
     );
+  if (serviceKeys.length && servicesOnEcs) {
+    if (!platform.containers)
+      throw new Error(
+        "plat.config.ts declares services, but this platform has no container compute yet (its foundation predates it): deploy the platform's foundation first",
+      );
+    if (!input.artifacts.services)
+      throw new Error('manifest declares services but no services artifact was provided');
+  }
 
   ctx.log('info', `deploying ${app}/${stage} (${deploymentId})`);
 
@@ -177,6 +206,12 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     });
   }
   if (hasWorker) await ensureLogGroup(ctx, { name: workerLogGroup, retentionDays: retention, tags });
+  for (const key of serviceKeys)
+    await ensureLogGroup(ctx, {
+      name: names.serviceLogGroup(app, stage, key),
+      retentionDays: retention,
+      tags,
+    });
 
   // 2. Data.
   let table: string | undefined;
@@ -384,6 +419,27 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await removeWorker(ctx, app, stage);
   }
 
+  // 9b. Services: images, task definitions and ECS services. Their rollouts run while the static
+  // files and the web revision go up, and must finish before the route flips.
+  let services: DeployStageResult['services'];
+  let rollouts: ServiceRollout[] = [];
+  if (servicesOnEcs && serviceKeys.length && platform.containers && input.artifacts.services) {
+    const started = await startServices(ctx, {
+      app,
+      stage,
+      deploymentId,
+      services: m.services,
+      containers: platform.containers,
+      region,
+      roleArn,
+      env,
+      tags,
+      artifact: input.artifacts.services,
+      resources,
+    });
+    services = started.deployed;
+    rollouts = started.rollouts;
+  }
   // 10. Static files (new prefix per deployment; the old one keeps serving until the route flips).
   let staticPrefix: string | undefined;
   if (input.artifacts.static) {
@@ -433,6 +489,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await deleteWebFunction(ctx, names.webFunction(app, stage));
   }
 
+  // 11b. Every service that should run is running (a failed rollout fails the deploy here).
+  if (platform.containers && rollouts.length)
+    await awaitServiceRollouts(ctx, { cluster: platform.containers.cluster, rollouts });
+
   // 12. Route flip — the only step that changes what users see. A stage with public stores is
   // routed even without web, so its files have a host.
   let route: RouteRecord | undefined;
@@ -476,6 +536,23 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     }
   }
 
+  // 13b. Services removed from the manifest, and old builds of the rest. Kept: the newest few
+  // deployments' builds, the one each service ran before this deploy and the previously live one
+  // (rollback targets).
+  if (servicesOnEcs && platform.containers) {
+    await pruneServices(ctx, {
+      app,
+      stage,
+      services: m.services,
+      containers: platform.containers,
+      keep: [deploymentId, liveRoute?.d],
+      keepTaskDefinitions: rollouts.flatMap((r) => r.previousTaskDefinition ?? []),
+      kept: DEPLOYMENTS_KEPT,
+    });
+    if (!hasWorker || !Object.keys(m.crons).length)
+      await deleteScheduleGroupIfEmpty(ctx, names.scheduleGroup(app, stage));
+  }
+
   // 14. Realtime removed from the manifest: the route no longer advertises it, so the namespace
   // can go (open connections to it are dropped by AppSync).
   if (!m.realtime && platform.realtime) {
@@ -498,6 +575,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     ...(route ? { route } : {}),
     ...(webFunction ? { webFunction } : {}),
     ...(workerFunction ? { workerFunction } : {}),
+    ...(services ? { services } : {}),
     resources,
   };
 }
@@ -699,14 +777,21 @@ async function reconcileWorkerTriggers(
     p.resources.push({ type: 'schedule', name: `${group}/${key}` });
   }
   const existing = await listSchedules(ctx, group);
-  for (const s of existing) if (!cronKeys.includes(s)) await deleteSchedule(ctx, group, s);
-  if (!cronKeys.length && existing.length) await deleteScheduleGroup(ctx, group);
+  for (const s of existing)
+    if (isCronSchedule(s) && !cronKeys.includes(s)) await deleteSchedule(ctx, group, s);
+  if (!cronKeys.length && existing.length) await deleteScheduleGroupIfEmpty(ctx, group);
 }
 
-/** The manifest no longer has a worker: remove it and everything that targets it. */
+/**
+ * The manifest no longer has a worker: remove it and everything that
+ * targets it. Services' stop schedules stay (and with them the group).
+ */
 async function removeWorker(ctx: EngineContext, app: string, stage: string): Promise<void> {
   const workerName = names.workerFunction(app, stage);
-  await deleteScheduleGroup(ctx, names.scheduleGroup(app, stage));
+  const group = names.scheduleGroup(app, stage);
+  const schedules = await listSchedules(ctx, group);
+  for (const s of schedules) if (isCronSchedule(s)) await deleteSchedule(ctx, group, s);
+  await deleteScheduleGroupIfEmpty(ctx, group);
   const bus = names.eventBus(app, stage);
   for (const rule of await listRules(ctx, bus, `${names.base(app, stage)}--`))
     await deleteRule(ctx, bus, rule);
@@ -733,11 +818,15 @@ export function staleStaticPrefixes(prefixes: string[], keep: Array<string | und
 }
 
 /**
- * Rollback targets lose their files to garbage collection after enough
- * deploys. Check before changing anything, so a stage is never pointed at a
- * deployment that can no longer serve.
+ * Rollback targets lose their files and builds to garbage collection after
+ * enough deploys. Check before changing anything, so a stage is never
+ * pointed at a deployment that can no longer serve. Returns what the
+ * services go back to.
  */
-async function assertCanRollBack(ctx: EngineContext, input: RollbackStageInput): Promise<void> {
+async function assertCanRollBack(
+  ctx: EngineContext,
+  input: RollbackStageInput,
+): Promise<ServicesRollback | undefined> {
   const { app, stage, platform, route } = input;
   const gone = (what: string) => new Error(`deployment ${route.d} can't be rolled back to: ${what}`);
   if (route.s && !(await hasObjects(ctx, platform.sitesBucket, `${route.s}/`))) {
@@ -748,6 +837,7 @@ async function assertCanRollBack(ctx: EngineContext, input: RollbackStageInput):
     if (!state) throw gone('its server revision has been cleaned up');
     if (state !== 'Active') throw gone(`its server revision is ${state}`);
   }
+  return planServicesRollback(ctx, input, gone);
 }
 
 /**
@@ -759,7 +849,8 @@ async function assertCanRollBack(ctx: EngineContext, input: RollbackStageInput):
  */
 export async function rollbackStage(ctx: EngineContext, input: RollbackStageInput): Promise<RouteRecord> {
   const { app, stage, platform } = input;
-  await assertCanRollBack(ctx, input);
+  const services = await assertCanRollBack(ctx, input);
+  await applyServicesRollback(ctx, services);
   const host = hostFor(platform, app, stage);
   let route = input.route;
   if (input.revisionId && route.o) {
@@ -790,6 +881,8 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   if (platform.kvsArn) await ignoreNotFound(deleteRoute(ctx, platform.kvsArn, host));
   await removeWorker(ctx, app, stage);
   await deleteWebFunction(ctx, names.webFunction(app, stage));
+  if (platform.containers) await destroyServices(ctx, { app, stage, containers: platform.containers });
+  await deleteScheduleGroup(ctx, names.scheduleGroup(app, stage));
   for (const q of await listQueues(ctx, `${names.base(app, stage)}--`)) await deleteQueue(ctx, q.name);
   await deleteEventBus(ctx, names.eventBus(app, stage));
   if (platform.realtime)
@@ -869,5 +962,6 @@ export async function listStageResources(
       name: tenantName,
       arn: configurationSetArn(ctx.region, await ctx.accountId(), tenantName),
     });
+  out.push(...(await listServiceResources(ctx, app, stage)));
   return out;
 }
