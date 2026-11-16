@@ -497,9 +497,11 @@ describe('logs', () => {
       const logs = {
         send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
           if (command.constructor.name === 'DescribeLogGroupsCommand') {
-            assert.strictEqual(command.input.logGroupNamePrefix, '/platform/apps/shop/prod/services/');
+            assert.strictEqual(command.input.logGroupNamePrefix, '/platform/apps/shop/prod/');
             return Promise.resolve({
-              logGroups: [{ logGroupName: '/platform/apps/shop/prod/services/ais' }],
+              logGroups: ['web', 'web.local', 'worker', 'services/ais', 'services/Bad'].map((g) => ({
+                logGroupName: `/platform/apps/shop/prod/${g}`,
+              })),
             });
           }
           const group = String(command.input.logGroupName);

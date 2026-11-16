@@ -1224,6 +1224,150 @@ describe('observability', () => {
   );
 });
 
+describe('logs, traces and Logs Insights', () => {
+  it.effect('passes structured filters and checks them before a tail opens', () =>
+    Effect.gen(function* () {
+      const seen: unknown[] = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop] }),
+        logs: {
+          search: (options) => Effect.sync(() => (seen.push(options.filters), { lines: [] })),
+          tail: () => Stream.empty,
+        },
+      });
+      const bob = yield* signIn('bob');
+      const f = encodeURIComponent(JSON.stringify({ levels: ['error'], status: ['5xx'] }));
+      const res = yield* request(`/v1/apps/shop/logs?f=${f}`, { headers: bob });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(seen, [{ levels: ['error'], status: ['5xx'] }]);
+
+      const badRoute = encodeURIComponent(JSON.stringify({ routes: ['no-slash'] }));
+      const tail = yield* request(`/v1/apps/shop/logs/tail?f=${badRoute}`, { headers: bob });
+      assert.strictEqual(tail.status, 400);
+      const badStream = encodeURIComponent(JSON.stringify({ streams: ['nope'] }));
+      const tail2 = yield* request(`/v1/apps/shop/logs/tail?f=${badStream}`, { headers: bob });
+      assert.deepStrictEqual(yield* json(tail2), {
+        error: { code: 'bad_request', message: 'stream must be web, worker or service:<name>' },
+      });
+    }),
+  );
+
+  it.effect('reads context lines around a line, 50 each side unless asked', () =>
+    Effect.gen(function* () {
+      const seen: unknown[] = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop] }),
+        logs: {
+          context: ({ app: _a, ...options }) =>
+            Effect.sync(() => (seen.push(options), { lines: [], anchor: 0 })),
+        },
+      });
+      const bob = yield* signIn('bob');
+      const ok = yield* request('/v1/apps/shop/logs/context?stream=web&ts=1794823200000', { headers: bob });
+      assert.strictEqual(ok.status, 200);
+      yield* request(
+        '/v1/apps/shop/logs/context?stage=pr-1&stream=worker&ts=2026-11-16T10:00:00Z&before=0&after=200',
+        {
+          headers: bob,
+        },
+      );
+      assert.deepStrictEqual(seen, [
+        { stage: 'prod', stream: 'web', ts: 1794823200000, before: 50, after: 50 },
+        { stage: 'pr-1', stream: 'worker', ts: Date.parse('2026-11-16T10:00:00Z'), before: 0, after: 200 },
+      ]);
+      const badTs = yield* request('/v1/apps/shop/logs/context?stream=web&ts=yesterday', { headers: bob });
+      assert.strictEqual(badTs.status, 400);
+      const tooMany = yield* request('/v1/apps/shop/logs/context?stream=web&ts=1&after=201', {
+        headers: bob,
+      });
+      assert.deepStrictEqual(yield* json(tooMany), {
+        error: { code: 'bad_request', message: 'before and after count lines, up to 200' },
+      });
+    }),
+  );
+
+  it.effect('runs Logs Insights on the stage the request names, over the last hour by default', () =>
+    Effect.gen(function* () {
+      const seen: Array<{ stage: string; query: string; span: number }> = [];
+      const ops: AppRecord = { ...shop, name: 'ops', repo: 'ada/ops', owners: ['ada'], createdBy: 'ada' };
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop, ops] }),
+        logs: {
+          insights: ({ stage, query, from, to }) =>
+            Effect.sync(() => {
+              seen.push({ stage, query, span: to - from });
+              return {
+                columns: ['n'],
+                rows: [['1']],
+                recordsMatched: 1,
+                recordsScanned: 1,
+                bytesScanned: 10,
+              };
+            }),
+        },
+      });
+      const bob = yield* signIn('bob');
+      const res = yield* request('/v1/apps/shop/insights', {
+        method: 'POST',
+        headers: bob,
+        json: { stage: 'pr-1', query: 'stats count(*) as n' },
+      });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(yield* json(res), {
+        columns: ['n'],
+        rows: [['1']],
+        recordsMatched: 1,
+        recordsScanned: 1,
+        bytesScanned: 10,
+      });
+      assert.deepStrictEqual(seen, [{ stage: 'pr-1', query: 'stats count(*) as n', span: 3_600_000 }]);
+      // Members only read their apps' logs.
+      const other = yield* request('/v1/apps/ops/insights', {
+        method: 'POST',
+        headers: bob,
+        json: { query: 'fields @message' },
+      });
+      assert.strictEqual(other.status, 404);
+    }),
+  );
+
+  it.effect('lists traces and an error’s occurrences for the range', () =>
+    Effect.gen(function* () {
+      const seen: unknown[] = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop] }),
+        logs: {
+          traces: ({ filters, limit, from, to }) =>
+            Effect.sync(
+              () => (seen.push({ filters, limit, span: to - from }), { traces: [], truncated: false }),
+            ),
+          errorOccurrences: ({ fingerprint, from, to }) =>
+            Effect.sync(
+              () => (
+                seen.push({ fingerprint, span: to - from }),
+                { res: '1h' as const, timestamps: [], counts: [], revs: [] }
+              ),
+            ),
+        },
+      });
+      const bob = yield* signIn('bob');
+      const f = encodeURIComponent(JSON.stringify({ outcome: 'error', minMs: 500 }));
+      assert.strictEqual(
+        (yield* request(`/v1/apps/shop/traces?range=1h&f=${f}&limit=50`, { headers: bob })).status,
+        200,
+      );
+      assert.strictEqual(
+        (yield* request('/v1/apps/shop/errors/0a1b2c3d/occurrences', { headers: bob })).status,
+        200,
+      );
+      assert.deepStrictEqual(seen, [
+        { filters: { outcome: 'error', minMs: 500 }, limit: 50, span: 3_600_000 },
+        { fingerprint: '0a1b2c3d', span: 7 * 86_400_000 },
+      ]);
+    }),
+  );
+});
+
 describe('manage', () => {
   it.effect('lists secrets against the live manifest and sets them', () =>
     Effect.gen(function* () {

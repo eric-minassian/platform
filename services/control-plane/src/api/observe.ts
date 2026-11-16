@@ -1,6 +1,7 @@
 /**
  * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
- * custom metrics, rate limits, services, errors, uptime, cost, logs, traces.
+ * custom metrics, rate limits, services, errors and their occurrences,
+ * uptime, cost, logs (search, stats, context, tail, Logs Insights), traces.
  */
 import {
   checkSeriesQuery,
@@ -15,6 +16,7 @@ import { BadRequest, NotFound, PlatformApi } from '@ericminassian/platform-core/
 import { Cause, Clock, Effect, Option, Schema, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { AppEmail } from '../email.ts';
+import { checkLogFilters } from '../insights.ts';
 import { AppQueues } from '../jobs/queues.ts';
 import { AppRealtime } from '../jobs/realtime.ts';
 import { AppServices, alwaysOnCosts } from '../jobs/services.ts';
@@ -57,6 +59,19 @@ export function stageComputeCost(stage: StageItem, live: DeploymentItem | undefi
       ...(stage.computeStreak ? { streak: stage.computeStreak } : {}),
     },
   ];
+}
+
+/** Lines of context on each side of a line, by default and at most. */
+const DEFAULT_CONTEXT_LINES = 50;
+const MAX_CONTEXT_LINES = 200;
+
+const contextCount = (n: number | undefined) =>
+  n === undefined ? DEFAULT_CONTEXT_LINES : n >= 0 && n <= MAX_CONTEXT_LINES ? n : undefined;
+
+/** A line's time as `logContext` takes it: epoch ms (as the console sends it) or ISO. */
+export function lineTime(ts: string): number | undefined {
+  const t = /^\d+$/.test(ts) ? Number(ts) : Date.parse(ts);
+  return Number.isFinite(t) ? t : undefined;
 }
 
 /** What a live tail sends when it stops on an error: the reason, as the CLI and console show it. */
@@ -273,6 +288,7 @@ export const ObserveLive = HttpApiBuilder.group(
             to: range.to,
             q: query.q,
             stream: query.stream,
+            filters: query.f,
             limit: query.limit,
             nextToken: query.next,
           });
@@ -282,9 +298,12 @@ export const ObserveLive = HttpApiBuilder.group(
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
           // Refused before the event stream opens, so a bad name is a 400 rather than an `error` event.
-          if (query.stream && !logGroupOf(app, stage, query.stream))
-            return yield* BadRequest.of('stream must be web, worker or service:<name>');
-          return logs.tail({ app, stage, q: query.q, stream: query.stream }).pipe(
+          for (const stream of [...(query.stream ? [query.stream] : []), ...(query.f?.streams ?? [])])
+            if (!logGroupOf(app, stage, stream))
+              return yield* BadRequest.of('stream must be web, worker or service:<name>');
+          const problem = checkLogFilters(query.f);
+          if (problem) return yield* BadRequest.of(problem);
+          return logs.tail({ app, stage, q: query.q, stream: query.stream, filters: query.f }).pipe(
             Stream.map((line) => ({ event: 'line' as const, data: line })),
             // The tail ends with the reason it stopped; a client that left needs none.
             Stream.catchCause((cause) =>
@@ -309,12 +328,66 @@ export const ObserveLive = HttpApiBuilder.group(
           return { trace: params.trace, events };
         }),
 
-      // Placeholders until the log, trace and Insights readers land (this branch is being built in parts).
-      traces: () => Effect.die(new Error('traces: not implemented yet')),
-      logStats: () => Effect.die(new Error('logStats: not implemented yet')),
-      logContext: () => Effect.die(new Error('logContext: not implemented yet')),
-      insights: () => Effect.die(new Error('insights: not implemented yet')),
-      errorOccurrences: () => Effect.die(new Error('errorOccurrences: not implemented yet')),
+      traces: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const range = yield* rangeOf(query);
+          return yield* logs.traces({
+            app,
+            stage,
+            from: range.from,
+            to: range.to,
+            filters: query.f,
+            limit: query.limit,
+          });
+        }),
+
+      logStats: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const range = yield* rangeOf(query);
+          return yield* logs.stats({
+            app,
+            stage,
+            from: range.from,
+            to: range.to,
+            q: query.q,
+            stream: query.stream,
+            filters: query.f,
+          });
+        }),
+
+      logContext: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const ts = lineTime(query.ts);
+          if (ts === undefined) return yield* BadRequest.of('ts must be epoch milliseconds or an ISO time');
+          const before = contextCount(query.before);
+          const after = contextCount(query.after);
+          if (before === undefined || after === undefined)
+            return yield* BadRequest.of(`before and after count lines, up to ${MAX_CONTEXT_LINES}`);
+          return yield* logs.context({ app, stage, stream: query.stream, ts, before, after });
+        }),
+
+      insights: ({ params, payload }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, payload.stage);
+          const range = yield* rangeOf(payload, '1h');
+          return yield* logs.insights({ app, stage, query: payload.query, from: range.from, to: range.to });
+        }),
+
+      errorOccurrences: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const range = yield* rangeOf(query, '7d');
+          return yield* logs.errorOccurrences({
+            app,
+            stage,
+            fingerprint: params.fingerprint,
+            from: range.from,
+            to: range.to,
+          });
+        }),
     });
   }),
 );
