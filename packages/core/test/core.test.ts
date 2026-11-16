@@ -59,7 +59,8 @@ describe('naming', () => {
     const app = 'a'.repeat(30);
     const stage = 'b'.repeat(20);
     expect(names.workerFunction(app, stage).length).toBeLessThanOrEqual(64);
-    expect(names.deadLetterQueue(app, stage, 'c'.repeat(20)).length).toBeLessThanOrEqual(80);
+    expect(names.deadLetters(app, stage).length).toBeLessThanOrEqual(80);
+    expect(names.legacyDeadLetterQueue(app, stage, 'c'.repeat(20)).length).toBeLessThanOrEqual(80);
     expect(names.eventRule(app, stage, 'x'.repeat(60)).length).toBeLessThanOrEqual(64);
   });
 
@@ -112,7 +113,7 @@ describe('manifest', () => {
       web: { server: 'src/server.ts' },
     });
     expect(m.worker?.entry).toBe('src/worker.ts');
-    expect(m.queues.emails?.visibilityTimeoutSeconds).toBe(360);
+    expect(m.queues.emails).toEqual({ maxAttempts: 5 });
     expect(m.auth).toEqual({ enabled: false, required: false });
     expect(m.web?.serverRoutes).toEqual(['/api/']);
   });
@@ -144,16 +145,16 @@ describe('manifest', () => {
     );
   });
 
-  it('takes a handler’s own memory and timeout, and sizes its queue’s visibility by it', () => {
+  it('takes a handler’s own memory, timeout and attempts', () => {
     const m = parseManifest({
       name: 'atlas',
       worker: { timeoutSeconds: 300, memoryMb: 1024 },
-      queues: { refresh: { batchSize: 1 }, ais: { memoryMb: 256, timeoutSeconds: 90 } },
+      queues: { refresh: { maxAttempts: 2 }, ais: { memoryMb: 256, timeoutSeconds: 90 } },
       events: { 'fire.detected': {}, 'ship.seen': { memoryMb: 256 } },
       crons: { tick: 'rate(1 minute)', listen: { schedule: 'rate(1 minute)', timeoutSeconds: 90 } },
     });
-    expect(m.queues.refresh?.visibilityTimeoutSeconds).toBe(1800);
-    expect(m.queues.ais).toMatchObject({ memoryMb: 256, timeoutSeconds: 90, visibilityTimeoutSeconds: 540 });
+    expect(m.queues.refresh).toEqual({ maxAttempts: 2 });
+    expect(m.queues.ais).toEqual({ maxAttempts: 5, memoryMb: 256, timeoutSeconds: 90 });
     expect(m.events).toEqual(['fire.detected', 'ship.seen']);
     expect(m.eventOptions).toEqual({ 'fire.detected': {}, 'ship.seen': { memoryMb: 256 } });
     expect(m.crons.listen).toEqual({ schedule: 'rate(1 minute)', timeoutSeconds: 90 });
@@ -164,11 +165,13 @@ describe('manifest', () => {
       name: 'ship.seen',
       memoryMb: 256,
       timeoutSeconds: 300,
+      maxAttempts: 3,
       own: true,
     });
     expect(handlerSettings(m, 'queue', 'refresh')).toMatchObject({
       memoryMb: 1024,
       timeoutSeconds: 300,
+      maxAttempts: 2,
       own: false,
     });
     expect(ownFunctionHandlers(m).map((h) => `${h.kind}:${h.name}`)).toEqual([
@@ -197,6 +200,33 @@ describe('manifest', () => {
     expect(() =>
       parseManifest({ name: 'atlas', crons: { ais: { schedule: 'rate(1 minute)', memoryMb: 100.5 } } }),
     ).toThrow(/crons\.ais/);
+  });
+
+  it('runs a queue with a concurrency cap in a function of its own', () => {
+    const m = parseManifest({ name: 'atlas', queues: { ais: { concurrency: 2 } } });
+    expect(handlerSettings(m, 'queue', 'ais')).toMatchObject({ concurrency: 2, own: true, maxAttempts: 5 });
+    expect(handlerFunctionName('atlas', 'prod', m, 'queue', 'ais')).toBe('atlas--prod--worker--queue-ais');
+  });
+
+  it('refuses the queue settings that went away with SQS', () => {
+    expect(() => parseManifest({ name: 'atlas', queues: { refresh: { batchSize: 1 } } })).toThrow(
+      /queues\.refresh\.batchSize: removed in 0\.4\.0/,
+    );
+    expect(() => parseManifest({ name: 'atlas', queues: { refresh: { maxReceiveCount: 2 } } })).toThrow(
+      /queues\.refresh\.maxReceiveCount: renamed to maxAttempts/,
+    );
+    expect(() =>
+      parseManifest({ name: 'atlas', queues: { refresh: { visibilityTimeoutSeconds: 60 } } }),
+    ).toThrow(/visibilityTimeoutSeconds/);
+  });
+
+  it('decodes deployments recorded when queues were SQS queues', () => {
+    const stored = {
+      ...parseManifest({ name: 'atlas', queues: { refresh: {} } }),
+      queues: { refresh: { batchSize: 1, maxReceiveCount: 2, visibilityTimeoutSeconds: 360 } },
+    };
+    const m = Schema.decodeUnknownSync(ResolvedManifest)(JSON.parse(JSON.stringify(stored)));
+    expect(m.queues.refresh).toEqual({ maxAttempts: 5 });
   });
 
   it('decodes deployments recorded before handlers had settings', () => {

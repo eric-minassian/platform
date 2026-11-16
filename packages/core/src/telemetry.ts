@@ -70,6 +70,8 @@ export const JobEvent = Schema.Struct({
   status: Schema.Literals(['ok', 'error']),
   dur: Schema.Finite,
   attempt: Schema.optional(Schema.Finite),
+  /** What happens after a failed run: tried again later, or moved to the dead-letter queue. */
+  next: Schema.optional(Schema.Literals(['retry', 'dead'])),
 });
 export type JobEvent = typeof JobEvent.Type;
 

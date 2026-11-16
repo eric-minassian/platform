@@ -31,7 +31,7 @@ interface EmailJob {
 describe('defineApp', () => {
   const app = defineApp({
     name: 'todo',
-    queues: { emails: queue<EmailJob>({ batchSize: 5 }), plain: {} },
+    queues: { emails: queue<EmailJob>({ maxAttempts: 2 }), plain: {} },
     events: { 'todo.created': event<{ id: string }>() },
     crons: { cleanup: '0 3 * * *' },
     storage: ['uploads'],
@@ -46,7 +46,7 @@ describe('defineApp', () => {
 
   it('serializes to a manifest the schema accepts', () => {
     const m = parseManifest(JSON.parse(JSON.stringify(app)));
-    expect(m.queues.emails?.batchSize).toBe(5);
+    expect(m.queues.emails?.maxAttempts).toBe(2);
     expect(m.events).toEqual(['todo.created']);
     expect(m.worker?.entry).toBe('src/worker.ts');
   });
@@ -55,7 +55,7 @@ describe('defineApp', () => {
     // @ts-expect-error misspelled top-level field
     defineApp({ name: 'todo', qeues: {} });
     // @ts-expect-error misspelled queue option
-    defineApp({ name: 'todo', queues: { emails: { batchsize: 5 } } });
+    defineApp({ name: 'todo', queues: { emails: { maxattempts: 5 } } });
     // @ts-expect-error misspelled nested field
     defineApp({ name: 'todo', web: { server: 'src/server.ts', dev: { command: 'vite', prot: 5173 } } });
     // @ts-expect-error misspelled store option
