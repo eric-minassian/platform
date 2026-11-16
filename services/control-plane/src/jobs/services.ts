@@ -4,7 +4,7 @@
  * and start, stop and restart. The engine calls behind them are plain ECS and
  * Scheduler calls, so unlike KVS writes (jobs/call.ts) they run in the API.
  */
-import type { MetricDataResult } from '@aws-sdk/client-cloudwatch';
+import type { MetricDataQuery, MetricDataResult } from '@aws-sdk/client-cloudwatch';
 import {
   type AlwaysOnCost,
   bucketStart,
@@ -17,16 +17,27 @@ import {
   type ServiceActionResponse,
   type ServiceInfo,
   type ServiceState,
+  type SERVICE_MEASURES,
+  type SeriesResponse,
   type ServicesResponse,
+  seriesUnit,
   telemetryKeys,
 } from '@ericminassian/platform-core';
 import type { ServiceRuntimeState } from '@ericminassian/platform-engine';
 import { Clock, Context, Effect, Layer, Schema } from 'effect';
 import { Aws } from '../aws.ts';
-import { cloudWatchRange, readMetrics } from '../cloudwatch.ts';
+import { cloudWatchRange, cloudWatchSeriesRes, readMetrics, readMetricsBetween } from '../cloudwatch.ts';
 import { Settings } from '../config.ts';
 import { StageEngine } from '../deploy.ts';
-import { type ServiceRuns, TelemetryQuery, type TimeRange } from '../telemetry/query.ts';
+import {
+  ALL_SERIES,
+  MAX_SERIES_LINES,
+  type SeriesRange,
+  type ServiceRuns,
+  seriesBuckets,
+  TelemetryQuery,
+  type TimeRange,
+} from '../telemetry/query.ts';
 
 type ServiceConfig = ResolvedManifest['services'][string];
 type UsagePoint = ServiceInfo['points'][number];
@@ -197,6 +208,93 @@ export function toUsagePoints(
   );
 }
 
+/** What the explorer asks of services' usage: CPU or memory, each bucket's average or maximum. */
+export interface ServiceSeriesQuery {
+  readonly measure: (typeof SERVICE_MEASURES)[number];
+  readonly stat: 'avg' | 'max';
+  /** One line per service; otherwise one line for all of them. */
+  readonly grouped: boolean;
+}
+
+/** ECS's CPU or memory of each service, one period per bucket, ids `s<i>` for the `i`th service. */
+export function serviceSeriesQueries(
+  cluster: string,
+  app: string,
+  stage: string,
+  services: ReadonlyArray<string>,
+  q: Pick<ServiceSeriesQuery, 'measure' | 'stat'>,
+  periodSeconds: number,
+): MetricDataQuery[] {
+  return services.map((key, i) => ({
+    Id: `s${i}`,
+    MetricStat: {
+      Metric: {
+        Namespace: 'AWS/ECS',
+        MetricName: q.measure === 'cpu' ? 'CPUUtilization' : 'MemoryUtilization',
+        Dimensions: [
+          { Name: 'ClusterName', Value: cluster },
+          { Name: 'ServiceName', Value: names.service(app, stage, key) },
+        ],
+      },
+      Period: periodSeconds,
+      Stat: q.stat === 'avg' ? 'Average' : 'Maximum',
+    },
+  }));
+}
+
+/**
+ * Services' usage per bucket (pure): a line per service by name (the first
+ * `MAX_SERIES_LINES`), or one `all` line with the services' mean (`avg`) or
+ * highest (`max`). Null where CloudWatch has no datapoint.
+ */
+export function toServiceSeriesResponse(
+  results: ReadonlyArray<MetricDataResult>,
+  services: ReadonlyArray<string>,
+  q: ServiceSeriesQuery,
+  range: SeriesRange,
+  note?: string,
+): SeriesResponse {
+  const { times, slot, step } = seriesBuckets(range);
+  const perService = services.map(() => times.map((): number | null => null));
+  for (const r of results) {
+    const values = perService[Number(r.Id?.slice(1))];
+    if (!values) continue;
+    (r.Timestamps ?? []).forEach((when, i) => {
+      const index = slot.get(Math.floor(new Date(when).getTime() / step) * step);
+      const value = r.Values?.[i];
+      if (index !== undefined && value !== undefined) values[index] = Math.round(value * 10) / 10;
+    });
+  }
+  const notes = note ? [note] : [];
+  let series: Array<{ key: string; values: Array<number | null> }>;
+  if (q.grouped) {
+    const sorted = services
+      .map((key, i) => ({ key, values: perService[i]! }))
+      .toSorted((a, b) => a.key.localeCompare(b.key));
+    if (sorted.length > MAX_SERIES_LINES)
+      notes.push(`showing the first ${MAX_SERIES_LINES} of ${sorted.length} services`);
+    series = sorted.slice(0, MAX_SERIES_LINES);
+  } else {
+    const values = times.map((_, index) => {
+      const present = perService
+        .map((v) => v[index])
+        .filter((v): v is number => v !== null && v !== undefined);
+      if (present.length === 0) return null;
+      return q.stat === 'max'
+        ? Math.max(...present)
+        : Math.round((present.reduce((a, b) => a + b, 0) / present.length) * 10) / 10;
+    });
+    series = [{ key: ALL_SERIES, values }];
+  }
+  return {
+    res: range.res,
+    timestamps: times.map((t) => telemetryKeys.time(t)),
+    unit: seriesUnit({ metric: 'service', stat: q.stat }),
+    series,
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
+}
+
 export class AppServices extends Context.Service<
   AppServices,
   {
@@ -207,6 +305,14 @@ export class AppServices extends Context.Service<
       declared: ResolvedManifest['services'],
       range: TimeRange,
     ): Effect.Effect<ServicesResponse>;
+    /** `services`' CPU or memory over `range`, for the explorer: nulls without container compute. */
+    series(
+      app: string,
+      stage: string,
+      services: ReadonlyArray<string>,
+      query: ServiceSeriesQuery,
+      range: SeriesRange,
+    ): Effect.Effect<SeriesResponse>;
     /** Starts (stopping again after `minutes`, when given), stops or restarts one service. */
     control(input: {
       readonly app: string;
@@ -321,7 +427,27 @@ export class AppServices extends Context.Service<
           } satisfies ServiceActionResponse;
         });
 
-        return AppServices.of({ stats, control });
+        const series = Effect.fn('AppServices.series')(function* (
+          app: string,
+          stage: string,
+          services: ReadonlyArray<string>,
+          query: ServiceSeriesQuery,
+          requested: SeriesRange,
+        ) {
+          const cw = cloudWatchSeriesRes(requested.res, requested.from, yield* Clock.currentTimeMillis);
+          const range = { ...requested, res: cw.res };
+          const { containers } = yield* settings.runtime;
+          const { times, step } = seriesBuckets(range);
+          const first = times[0];
+          const last = times.at(-1);
+          if (!containers || services.length === 0 || first === undefined || last === undefined)
+            return toServiceSeriesResponse([], services, query, range, cw.note);
+          const queries = serviceSeriesQueries(containers.cluster, app, stage, services, query, step / 1000);
+          const results = yield* readMetricsBetween(aws, queries, first, last + step).pipe(Effect.orDie);
+          return toServiceSeriesResponse(results, services, query, range, cw.note);
+        });
+
+        return AppServices.of({ stats, control, series });
       }),
     );
 }

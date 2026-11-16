@@ -2,9 +2,17 @@
  * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
  * custom metrics, rate limits, services, errors, uptime, cost, logs, traces.
  */
-import type { JobStats, StageCompute } from '@ericminassian/platform-core';
+import {
+  checkSeriesQuery,
+  type JobStats,
+  QUERY_RESOLUTION_MS,
+  QueryResolution,
+  REALTIME_MEASURES,
+  SERVICE_MEASURES,
+  type StageCompute,
+} from '@ericminassian/platform-core';
 import { BadRequest, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
-import { Cause, Clock, Effect, Option, Stream } from 'effect';
+import { Cause, Clock, Effect, Option, Schema, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { AppEmail } from '../email.ts';
 import { AppQueues } from '../jobs/queues.ts';
@@ -13,7 +21,7 @@ import { AppServices, alwaysOnCosts } from '../jobs/services.ts';
 import { Logs, logGroupOf } from '../logs.ts';
 import { type DeploymentItem, type StageItem, stageCompute } from '../records.ts';
 import { Store } from '../store.ts';
-import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
+import { parseRange, parseSeriesRange, storedHorizonMs, TelemetryQuery } from '../telemetry/query.ts';
 import { Access, stageParam } from './access.ts';
 
 interface RangeQuery {
@@ -28,6 +36,12 @@ const rangeOf = (query: RangeQuery, defaultRange?: string) =>
   Effect.map(Clock.currentTimeMillis, (now) =>
     parseRange({ from: query.from, to: query.to, range: query.range ?? defaultRange, res: query.res }, now),
   );
+
+const isQueryResolution = Schema.is(QueryResolution);
+const isRealtimeMeasure = (m: string | undefined): m is (typeof REALTIME_MEASURES)[number] =>
+  REALTIME_MEASURES.some((x) => x === m);
+const isServiceMeasure = (m: string | undefined): m is (typeof SERVICE_MEASURES)[number] =>
+  SERVICE_MEASURES.some((x) => x === m);
 
 /** A stage's server on the Cost tab: its mode and setting, and the chooser's latest estimate (pure). */
 export function stageComputeCost(stage: StageItem, live: DeploymentItem | undefined): StageCompute[] {
@@ -97,8 +111,46 @@ export const ObserveLive = HttpApiBuilder.group(
           return yield* telemetry.metrics(app, stage, yield* rangeOf(query));
         }),
 
-      // Placeholder until the explorer's series reader lands (this branch is being built in parts).
-      series: () => Effect.die(new Error('series: not implemented yet')),
+      series: ({ params, query }) =>
+        Effect.gen(function* () {
+          const app = (yield* access.memberApp(params.app)).app.name;
+          const q = query.q;
+          // The path's app is the one the caller may read; a query naming another is a mistake.
+          if (q.app !== undefined && q.app !== app)
+            return yield* BadRequest.of(`the query reads app ${q.app}, not ${app}`);
+          if (q.stage !== undefined && query.stage !== undefined && q.stage !== query.stage)
+            return yield* BadRequest.of(`the query reads stage ${q.stage}, not ${query.stage}`);
+          const stage = yield* stageParam(query.stage ?? q.stage);
+          const problem = checkSeriesQuery(q);
+          if (problem) return yield* BadRequest.of(problem);
+          if (query.res !== undefined && !isQueryResolution(query.res))
+            return yield* BadRequest.of(`res is one of ${Object.keys(QUERY_RESOLUTION_MS).join(', ')}`);
+          const now = yield* Clock.currentTimeMillis;
+          // CloudWatch keeps minute data for 15 days, the rollups for 3.
+          const cloudWatch = q.metric === 'realtime' || q.metric === 'service';
+          const range = parseSeriesRange(
+            query,
+            query.res,
+            now,
+            cloudWatch ? 15 * 86_400_000 : storedHorizonMs('1m'),
+          );
+          const measure = q.filter?.measure;
+          if (q.metric === 'realtime' && isRealtimeMeasure(measure))
+            return yield* realtime.series(app, stage, measure, range);
+          if (q.metric === 'service' && isServiceMeasure(measure)) {
+            const declared = Object.keys(
+              Option.getOrUndefined(yield* access.liveManifest(app, stage))?.services ?? {},
+            );
+            return yield* services.series(
+              app,
+              stage,
+              q.filter?.names?.length ? q.filter.names : declared,
+              { measure, stat: q.stat === 'max' ? 'max' : 'avg', grouped: q.groupBy === 'name' },
+              range,
+            );
+          }
+          return yield* telemetry.series(app, stage, q, range);
+        }),
 
       routes: ({ params, query }) =>
         Effect.gen(function* () {
