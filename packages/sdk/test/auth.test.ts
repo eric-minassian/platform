@@ -5,6 +5,7 @@ import { loginUrl, logoutUrl } from '../src/api.ts';
 import { parseCookies, serializeCookie } from '../src/runtime/auth/cookies.ts';
 import { getUser, unauthorized } from '../src/runtime/auth/index.ts';
 import { challengeFor, decodeFlow, encodeFlow } from '../src/runtime/auth/pkce.ts';
+import { acceptedIssuers } from '../src/runtime/auth/tokens.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform, useTestBindings } from '../src/testing.ts';
 
 describe('cookie + pkce helpers', () => {
@@ -32,6 +33,24 @@ describe('cookie + pkce helpers', () => {
     expect(safeRedirect('/\t/evil.com')).toBe('/');
     expect(safeRedirect('/\n/evil.com')).toBe('/');
     expect(safeRedirect(' /x')).toBe('/');
+  });
+});
+
+describe('token issuers', () => {
+  const pool = 'us-east-1_abc';
+  const cognito = `https://cognito-idp.us-east-1.amazonaws.com/${pool}`;
+
+  it('takes only Cognito in AWS', () => {
+    expect(
+      acceptedIssuers({ mode: 'cognito', issuer: cognito, jwksUri: `${cognito}/.well-known/jwks.json` }),
+    ).toBe(cognito);
+  });
+
+  it("takes Cognito's or the emulator's own issuer locally", () => {
+    const emulator = `https://127.0.0.1:4566/${pool}`;
+    expect(
+      acceptedIssuers({ mode: 'local', issuer: cognito, jwksUri: `${emulator}/.well-known/jwks.json` }),
+    ).toEqual([cognito, emulator]);
   });
 });
 
