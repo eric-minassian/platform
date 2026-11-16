@@ -311,5 +311,8 @@ describe('Platform.layerMemory', () => {
       const rest = yield* uploads.list('a/', { cursor: first.cursor! });
       expect(rest.objects.map((o) => o.key)).toEqual(['a/2.txt']);
       expect((yield* Effect.exit(uploads.put('../escape', 'x')))._tag).toBe('Failure');
+      expect(yield* uploads.publicUrl('a/1 2.txt')).toBe(
+        'http://test-app.localhost:3000/__platform/storage/uploads/a/1%202.txt',
+      );
     }).pipe(Effect.provide(Platform.layerMemory({ secrets: { KEY: 'v' } })), Effect.runPromise));
 });

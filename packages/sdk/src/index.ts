@@ -66,6 +66,7 @@ export type {
   CronName,
   EventDetail,
   EventType,
+  PublicStoreName,
   QueueBody,
   QueueName,
   Register,
@@ -82,6 +83,7 @@ export {
   Events,
   Jobs,
   Metrics,
+  type PublicStore,
   Queues,
   Realtime,
   Secrets,
@@ -89,5 +91,6 @@ export {
   Storage,
   type Store,
   type StoredObject,
+  type StoreFor,
 } from './services.ts';
 export { defineWorker, type WorkerDefinition } from './worker.ts';

@@ -1,24 +1,33 @@
 /**
  * `@ericminassian/platform/client`: realtime for the browser, as streams over
- * the page's one WebSocket.
+ * the page's one WebSocket, and the paths of public stores' files.
  *
- *   import { RealtimeClient } from '@ericminassian/platform/client';
+ *   import { RealtimeClient, storageUrl } from '@ericminassian/platform/client';
  *
  *   RealtimeClient.subscribe('board').pipe(Stream.runForEach(draw));
  *   RealtimeClient.status.pipe(Stream.filter((s) => s === 'connected'), Stream.runForEach(refetch));
+ *   fetch(storageUrl('snapshots', 'fires/latest.json'));
  *
- * Channel names and event types come from `realtime.channels` in
- * `plat.config.ts` when the web project's TypeScript program includes it.
+ * Channel names, event types and store names come from `plat.config.ts` when
+ * the web project's TypeScript program includes it.
  * Browser-safe: nothing here reaches Node or AWS code.
  *
  * CONTRACT: documented in templates/app/AGENTS.md. Keep stable.
  */
+import { storagePath } from '@ericminassian/platform-core/storage';
 import { Effect, Queue, Stream } from 'effect';
 import { createRealtimeClient, type RealtimeEnv, type RealtimeStatus } from './realtime-client.ts';
-import type { ChannelEvent, ChannelSubscription } from './register.ts';
+import type { ChannelEvent, ChannelSubscription, PublicStoreName } from './register.ts';
 
 export type { RealtimeStatus } from './realtime-client.ts';
-export type { ChannelEvent, ChannelSubscription } from './register.ts';
+export type { ChannelEvent, ChannelSubscription, PublicStoreName } from './register.ts';
+
+/**
+ * The same-origin path the edge serves a public store's file at:
+ * `storageUrl('snapshots', 'fires/latest.json')` →
+ * `/__platform/storage/snapshots/fires/latest.json`.
+ */
+export const storageUrl = (store: PublicStoreName, key: string): string => storagePath(store, key);
 
 /** The page's own WebSocket, fetch, location, document and timers. */
 function browserEnv(): RealtimeEnv {

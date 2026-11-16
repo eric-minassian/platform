@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { checkEmailMessage, type EmailMessage, emailUsageDay, names } from '@ericminassian/platform-core';
+import {
+  checkEmailMessage,
+  type EmailMessage,
+  emailUsageDay,
+  names,
+  storagePath,
+} from '@ericminassian/platform-core';
 import { Clock, Context, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
@@ -20,8 +26,9 @@ import {
   Queues,
   Realtime,
   Secrets,
+  type PublicStore,
   Storage,
-  type Store,
+  type StoreFor,
 } from './services.ts';
 
 export interface SentMessage {
@@ -230,7 +237,7 @@ export const layerMemory = (
             RateLimits,
             makeRateLimits(memoryCounters(), (check) => void limitChecks.push(check)),
           ),
-          Context.add(Storage, Storage.of({ store: memoryStores() })),
+          Context.add(Storage, Storage.of({ store: memoryStores(appInfo.url) })),
           Context.add(
             Secrets,
             Secrets.of({
@@ -277,10 +284,15 @@ export const layerMemory = (
     ),
   );
 
-/** Stores in memory. Keys are validated like S3 keys; signed URLs are `memory://<store>/<key>`. */
-function memoryStores(): (name: string) => Store {
+/**
+ * Stores in memory. Keys are validated like S3 keys; signed URLs are
+ * `memory://<store>/<key>`, and public URLs are on the app's URL like the
+ * deployed app's (every store has one here; the config's types decide which
+ * stores app code can ask).
+ */
+function memoryStores(url: string): <Name extends string>(name: Name) => StoreFor<Name> {
   const stores = new Map<string, Map<string, Uint8Array>>();
-  return (name) => {
+  return <Name extends string>(name: Name) => {
     const objects = stores.get(name) ?? new Map<string, Uint8Array>();
     stores.set(name, objects);
     const key = (k: string) => objectKey('', k);
@@ -308,6 +320,7 @@ function memoryStores(): (name: string) => Store {
         }),
       uploadUrl: (k) => Effect.sync(() => `memory://${name}/${key(k)}`),
       downloadUrl: (k) => Effect.sync(() => `memory://${name}/${key(k)}`),
-    };
+      publicUrl: (k) => Effect.sync(() => `${url}${storagePath(name, key(k))}`),
+    } satisfies PublicStore as StoreFor<Name>;
   };
 }

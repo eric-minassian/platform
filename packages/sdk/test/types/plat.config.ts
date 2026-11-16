@@ -22,7 +22,7 @@ const app = defineApp({
   queues: { emails: queue<EmailJob>({ batchSize: 5 }), plain: {} },
   events: { 'todo.created': event<TodoCreated>() },
   crons: { cleanup: '0 3 * * *' },
-  storage: ['uploads'],
+  storage: { uploads: {}, snapshots: { public: true, expireAfterDays: 7 } },
   secrets: ['STRIPE_KEY'],
   web: { server: 'src/server.ts' },
   auth: true,

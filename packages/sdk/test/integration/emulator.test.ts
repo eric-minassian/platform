@@ -17,7 +17,7 @@ import {
   PutRuleCommand,
   PutTargetsCommand,
 } from '@aws-sdk/client-eventbridge';
-import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
+import { CreateBucketCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
   CreateQueueCommand,
   GetQueueAttributesCommand,
@@ -58,6 +58,7 @@ const base = `${APP}--${STAGE}`;
 
 let bindings: Bindings;
 let eventsTargetUrl = '';
+let headObject: (key: string) => Promise<{ contentType?: string; cacheControl?: string }>;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function createTable(ddb: DynamoDBClient, name: string) {
@@ -151,6 +152,13 @@ beforeAll(async () => {
 
   const bucket = `platform-000000000000-${region}-storage-${id}`;
   await s3.send(new CreateBucketCommand({ Bucket: bucket }));
+  headObject = async (key) => {
+    const head = await s3.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+    return {
+      ...(head.ContentType ? { contentType: head.ContentType } : {}),
+      ...(head.CacheControl ? { cacheControl: head.CacheControl } : {}),
+    };
+  };
 
   const secretsPath = `/platform/apps/${APP}/${STAGE}/secrets/`;
   const sharedPath = `/platform/apps/${APP}/_shared/secrets/`;
@@ -195,7 +203,13 @@ beforeAll(async () => {
     table: base,
     queues: { emails: { url: emails.QueueUrl!, arn: emailsArn } },
     bus: { name: base, arn: bus.EventBusArn! },
-    storage: { bucket, prefix: `${APP}/${STAGE}/`, stores: ['uploads'] },
+    storage: {
+      bucket,
+      prefix: `${APP}/${STAGE}/`,
+      stores: ['uploads', 'snapshots'],
+      public: ['snapshots'],
+      publicPrefix: `_public/${APP}/${STAGE}/`,
+    },
     secrets: { path: secretsPath, sharedPath, names: ['STAGE_ONLY', 'SHARED'] },
     auth: {
       mode: 'local',
@@ -314,6 +328,44 @@ describe('against the AWS Emulator', () => {
         expect(yield* Effect.promise(() => fetch(downloadUrl).then((r) => r.text()))).toBe('hello world');
         yield* s.delete('direct.bin');
         expect(yield* s.get('direct.bin')).toEqual(Option.none());
+      }),
+    ));
+
+  it('storage: public stores keep their files under the public prefix, with their headers', () =>
+    run(
+      Effect.gen(function* () {
+        const s = (yield* Storage).store('snapshots');
+        yield* s.put('fires/1105.json', '{"n":1}', { cacheControl: 'public, max-age=31536000, immutable' });
+        expect(
+          yield* Effect.promise(() => headObject(`_public/${APP}/${STAGE}/snapshots/fires/1105.json`)),
+        ).toEqual({
+          contentType: 'application/json; charset=utf-8',
+          cacheControl: 'public, max-age=31536000, immutable',
+        });
+        expect(yield* s.getText('fires/1105.json')).toEqual(Option.some('{"n":1}'));
+
+        // A browser upload sends the headers it was signed with.
+        const uploadUrl = yield* s.uploadUrl('tiles/a.png', {
+          contentType: 'image/png',
+          cacheControl: 'no-cache',
+        });
+        const put = yield* Effect.promise(() =>
+          fetch(uploadUrl, {
+            method: 'PUT',
+            headers: { 'content-type': 'image/png', 'cache-control': 'no-cache' },
+            body: new Uint8Array([1]),
+          }),
+        );
+        expect(put.status).toBe(200);
+        expect(
+          yield* Effect.promise(() => headObject(`_public/${APP}/${STAGE}/snapshots/tiles/a.png`)),
+        ).toEqual({
+          contentType: 'image/png',
+          cacheControl: 'no-cache',
+        });
+        expect(yield* s.publicUrl('fires/1105.json')).toBe(
+          `http://${APP}--${STAGE}.localhost:3000/__platform/storage/snapshots/fires/1105.json`,
+        );
       }),
     ));
 

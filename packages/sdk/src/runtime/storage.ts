@@ -1,5 +1,5 @@
 import type { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { APP_CONFIG_FILE } from '@ericminassian/platform-core';
+import { APP_CONFIG_FILE, contentTypeFor, storagePath } from '@ericminassian/platform-core';
 import type { StoreName } from '../register.ts';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
@@ -11,8 +11,15 @@ export interface StoredObject {
   lastModified?: Date;
 }
 
+export interface PutOptions {
+  /** Default: from the key's extension (`application/octet-stream` when unknown). */
+  contentType?: string;
+  /** Sent with the file wherever it's served; the edge caches a public store's files by it. */
+  cacheControl?: string;
+}
+
 export interface Store {
-  put(key: string, body: Uint8Array | string, opts?: { contentType?: string }): Promise<void>;
+  put(key: string, body: Uint8Array | string, opts?: PutOptions): Promise<void>;
   get(key: string): Promise<Uint8Array | undefined>;
   getText(key: string): Promise<string | undefined>;
   delete(key: string): Promise<void>;
@@ -20,12 +27,17 @@ export interface Store {
     prefix?: string,
     opts?: { cursor?: string; limit?: number },
   ): Promise<{ objects: StoredObject[]; cursor?: string }>;
-  /** Browser-direct upload URL (HTTP PUT). */
-  uploadUrl(key: string, opts?: { contentType?: string; expiresInSeconds?: number }): Promise<string>;
+  /** Browser-direct upload URL (HTTP PUT). The browser sends the same `Content-Type` and `Cache-Control`. */
+  uploadUrl(
+    key: string,
+    opts?: { contentType?: string; cacheControl?: string; expiresInSeconds?: number },
+  ): Promise<string>;
   downloadUrl(key: string, opts?: { expiresInSeconds?: number; filename?: string }): Promise<string>;
+  /** Where the edge serves a public store's file, on the app's host. */
+  publicUrl(key: string): string;
 }
 
-function location(name: string): { bucket: string; prefix: string } {
+function location(name: string): { bucket: string; prefix: string; public: boolean } {
   const s = getBindings().storage;
   if (!s?.stores.includes(name)) {
     const declared = s?.stores ?? [];
@@ -33,7 +45,12 @@ function location(name: string): { bucket: string; prefix: string } {
       `Unknown store "${name}". Declared storage: ${declared.length ? declared.join(', ') : '(none)'} — add it under \`storage\` in ${APP_CONFIG_FILE}.`,
     );
   }
-  return { bucket: s.bucket, prefix: `${s.prefix}${name}/` };
+  const isPublic = Boolean(s.publicPrefix && s.public?.includes(name));
+  return {
+    bucket: s.bucket,
+    prefix: `${isPublic ? s.publicPrefix : s.prefix}${name}/`,
+    public: isPublic,
+  };
 }
 
 /** The S3 client and command module, loaded on first use. */
@@ -84,7 +101,8 @@ export function storage(name: StoreName): Store {
             Bucket: bucket,
             Key: objectKey(prefix, key),
             Body: typeof body === 'string' ? Buffer.from(body) : body,
-            ...(opts?.contentType ? { ContentType: opts.contentType } : {}),
+            ContentType: opts?.contentType ?? contentTypeFor(key),
+            ...(opts?.cacheControl ? { CacheControl: opts.cacheControl } : {}),
           }),
         );
       }),
@@ -126,6 +144,7 @@ export function storage(name: StoreName): Store {
           Bucket: bucket,
           Key: objectKey(prefix, key),
           ...(opts?.contentType ? { ContentType: opts.contentType } : {}),
+          ...(opts?.cacheControl ? { CacheControl: opts.cacheControl } : {}),
         });
         return sign(cmd, opts?.expiresInSeconds ?? 900);
       }),
@@ -142,5 +161,12 @@ export function storage(name: StoreName): Store {
         });
         return sign(cmd, opts?.expiresInSeconds ?? 900);
       }),
+    publicUrl: (key) => {
+      if (!location(name).public)
+        throw new Error(
+          `Store "${name}" isn't public, so the edge doesn't serve it: set \`storage: { ${name}: { public: true } }\` in ${APP_CONFIG_FILE}, or use downloadUrl.`,
+        );
+      return `${getBindings().url}${storagePath(name, key)}`;
+    },
   };
 }

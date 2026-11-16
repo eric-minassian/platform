@@ -27,6 +27,7 @@ type Items<A> = A extends readonly (infer S extends string)[] ? S : never;
 type Queues = App extends { queues: infer Q } ? Q : never;
 type Events = App extends { events: infer E } ? E : readonly [];
 type Channels = App extends { realtime: { channels: infer C } } ? C : never;
+type Stores = App extends { storage: infer S } ? S : never;
 type ChannelPattern = Keys<Channels>;
 /** The concrete channels a declared pattern covers: `board` → `board`; `boards/*` → `boards/${string}`. */
 type ChannelsOf<P extends string> = P extends `${infer Prefix}/*` ? `${Prefix}/${string}` : P;
@@ -43,9 +44,15 @@ export type EventType = Registered extends true
   : string;
 export type CronName = Registered extends true ? (App extends { crons: infer C } ? Keys<C> : never) : string;
 export type StoreName = Registered extends true
-  ? App extends { storage: infer S }
-    ? Items<S>
-    : never
+  ? Stores extends readonly string[]
+    ? Items<Stores>
+    : Keys<Stores>
+  : string;
+/** Stores declared with `public: true`, whose files the edge serves. */
+export type PublicStoreName = Registered extends true
+  ? Stores extends readonly string[]
+    ? never
+    : { [K in Keys<Stores>]: Stores[K] extends { public: true } ? K : never }[Keys<Stores>]
   : string;
 export type SecretName = Registered extends true
   ? App extends { secrets: infer S }

@@ -7,6 +7,7 @@ import type {
   ChannelName,
   EventDetail,
   EventType,
+  PublicStoreName,
   QueueBody,
   QueueName,
   SecretName,
@@ -196,10 +197,16 @@ export type { StoredObject } from './runtime/storage.ts';
 
 /** A file store declared under `storage` in `plat.config.ts`. */
 export interface Store {
+  /**
+   * Writes the file. `contentType` defaults to one from the key's extension;
+   * `cacheControl` goes with the file wherever it's served, and the edge
+   * caches a public store's files by it (`public, max-age=31536000, immutable`
+   * for a key that never changes). Without it, browsers revalidate.
+   */
   put(
     key: string,
     body: Uint8Array | string,
-    options?: { readonly contentType?: string },
+    options?: { readonly contentType?: string; readonly cacheControl?: string },
   ): Effect.Effect<void>;
   get(key: string): Effect.Effect<Option.Option<Uint8Array>>;
   getText(key: string): Effect.Effect<Option.Option<string>>;
@@ -208,10 +215,17 @@ export interface Store {
     prefix?: string,
     options?: { readonly cursor?: string; readonly limit?: number },
   ): Effect.Effect<{ readonly objects: ReadonlyArray<StoredObject>; readonly cursor?: string | undefined }>;
-  /** URL the browser can `PUT` the file to directly. */
+  /**
+   * URL the browser can `PUT` the file to directly. It must send the same
+   * `Content-Type` and `Cache-Control` headers as given here.
+   */
   uploadUrl(
     key: string,
-    options?: { readonly contentType?: string; readonly expiresIn?: Duration.Input },
+    options?: {
+      readonly contentType?: string;
+      readonly cacheControl?: string;
+      readonly expiresIn?: Duration.Input;
+    },
   ): Effect.Effect<string>;
   downloadUrl(
     key: string,
@@ -219,15 +233,29 @@ export interface Store {
   ): Effect.Effect<string>;
 }
 
-export class Storage extends Context.Service<Storage, { store(name: StoreName): Store }>()(
-  '@ericminassian/platform/Storage',
-) {
+/** A store declared with `public: true`: the edge serves its files on the app's host. */
+export interface PublicStore extends Store {
+  /**
+   * `https://<host>/__platform/storage/<store>/<key>`: anyone with it can read
+   * the file. Browsers can build the same path with `storageUrl` from
+   * `@ericminassian/platform/client`.
+   */
+  publicUrl(key: string): Effect.Effect<string>;
+}
+
+/** What `Storage.store(name)` gives: a `PublicStore` for a store declared `public: true`. */
+export type StoreFor<Name extends string> = Name extends PublicStoreName ? PublicStore : Store;
+
+export class Storage extends Context.Service<
+  Storage,
+  { store<Name extends StoreName>(name: Name): StoreFor<Name> }
+>()('@ericminassian/platform/Storage') {
   static readonly layer: Layer.Layer<Storage> = Layer.succeed(
     Storage,
     Storage.of({
       store: (name) => {
         const s = storage(name);
-        return {
+        const store: PublicStore = {
           put: (key, body, options) => Effect.promise(() => s.put(key, body, options)),
           get: (key) =>
             Effect.map(
@@ -245,6 +273,7 @@ export class Storage extends Context.Service<Storage, { store(name: StoreName): 
             Effect.promise(() =>
               s.uploadUrl(key, {
                 ...(options?.contentType ? { contentType: options.contentType } : {}),
+                ...(options?.cacheControl ? { cacheControl: options.cacheControl } : {}),
                 ...(options?.expiresIn ? { expiresInSeconds: Duration.toSeconds(options.expiresIn) } : {}),
               }),
             ),
@@ -255,7 +284,10 @@ export class Storage extends Context.Service<Storage, { store(name: StoreName): 
                 ...(options?.expiresIn ? { expiresInSeconds: Duration.toSeconds(options.expiresIn) } : {}),
               }),
             ),
+          // A private store has no `publicUrl` in its type; called anyway, it's a defect.
+          publicUrl: (key) => Effect.sync(() => s.publicUrl(key)),
         };
+        return store;
       },
     }),
   );
