@@ -47,6 +47,8 @@ export interface PlatformConfig {
      * `RateLimits`.
      */
     edgeRequestsPerMinute?: number;
+    /** Long-running services one stage's plat.config.ts may declare: the one resource billed while idle. */
+    servicesPerApp: number;
   };
   telemetry: { logRetentionDays: { prod: number; other: number } };
 }

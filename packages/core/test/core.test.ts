@@ -429,7 +429,7 @@ describe('platform config', () => {
     members: [{ github: 'ada', role: 'admin' }],
     reservedAppNames: [],
     previewTtlDays: 7,
-    limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1 },
+    limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1, servicesPerApp: 1 },
     telemetry: { logRetentionDays: { prod: 1, other: 1 } },
   };
   const floor = (edgeRequestsPerMinute: number) =>

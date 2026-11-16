@@ -46,7 +46,8 @@ export type RequestEvent = typeof RequestEvent.Type;
 export const ErrorEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('err'),
-  source: Schema.Literals(['http', 'job', 'unhandled', 'log']),
+  /** `service`: a long-running service's `run` failed (it is rerun after a backoff). */
+  source: Schema.Literals(['http', 'job', 'unhandled', 'log', 'service']),
   name: Schema.String,
   message: Schema.String,
   stack: Schema.optional(Schema.String),
@@ -56,10 +57,15 @@ export const ErrorEvent = Schema.Struct({
 });
 export type ErrorEvent = typeof ErrorEvent.Type;
 
+/**
+ * One unit of work. `service` jobs come from long-running services: `<service>`
+ * is a run of the service that ended (it is rerun; `dur` is how long it ran),
+ * `<service>/<unit>` a unit of work it marked with `traced`.
+ */
 export const JobEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('job'),
-  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke']),
+  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke', 'service']),
   name: Schema.String,
   status: Schema.Literals(['ok', 'error']),
   dur: Schema.Finite,
@@ -111,11 +117,16 @@ export const LimitEvent = Schema.Struct({
 });
 export type LimitEvent = typeof LimitEvent.Type;
 
+/** A runtime process starting or stopping (`service`: a container of a long-running service). */
 export const EnvEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('env'),
   event: Schema.Literals(['start', 'stop']),
-  runtime: Schema.Literals(['web', 'worker']),
+  runtime: Schema.Literals(['web', 'worker', 'service']),
+  /** The service's name (`runtime: 'service'`). */
+  name: Schema.optional(Schema.String),
+  /** Why it stopped, e.g. `SIGTERM`. */
+  reason: Schema.optional(Schema.String),
   initMs: Schema.optional(Schema.Finite),
 });
 export type EnvEvent = typeof EnvEvent.Type;
@@ -193,9 +204,11 @@ export function bucketStart(ts: number, res: Resolution): number {
  * resolution; `sk` starts with the bucket time so a Query with `BETWEEN`
  * returns a time range.
  *
- * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold
+ * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold,
+ *                                                  and process starts: webStarts, workerStarts, serviceStarts
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
- * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]
+ * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]; `service:<name>` rows also
+ *                                                  count `starts` (containers of that service starting)
  * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum (and the unit)
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
