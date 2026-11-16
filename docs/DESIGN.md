@@ -248,9 +248,10 @@ used by `plat dev`):
   the deployer, `plat deploy`/`plat rollback` and the uptime pinger.
 - Unknown hosts get a 404.
 
-An AWS WAF web ACL runs before the function: the edge floor, which answers a
-client sending one host more than `limits.edgeRequestsPerMinute` requests a
-minute with a 429. See [Rate limits](#rate-limits).
+While the whole edge is busy, an AWS WAF web ACL runs before the function:
+the edge floor, which answers a client sending one host more than
+`limits.edgeRequestsPerMinute` requests a minute with a 429. See
+[Rate limits](#rate-limits).
 
 The cache key includes the rewritten URI (static keys contain the deployment
 id) plus `x-platform-host`, so apps never share cache entries. The origin
@@ -572,12 +573,12 @@ telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> ro
   rides on the error class itself, as `HttpApiSchema.encodeToWithHeaders`
   would attach it, so apps declare and fail with one class. A `cost` above
   `max`, a bad name or `per`, and a missing `db` are defects naming the fix.
-- **The edge floor** sits under every app's own limits: one AWS WAF web ACL
-  (`platform-edge`, foundation stack) on the router distribution with one
-  rate-based rule. A client (IP address) sending one host more than
-  `limits.edgeRequestsPerMinute` requests a minute (1,000) is answered at the
-  edge, static files and public stores' files included, before any function
-  runs:
+- **The edge floor** sits under every app's own limits while the whole edge
+  is busy: an AWS WAF web ACL (`platform-edge-floor`) on the router
+  distribution with one rate-based rule. A client (IP address) sending one
+  host more than `limits.edgeRequestsPerMinute` requests a minute (1,000) is
+  answered at the edge, static files and public stores' files included,
+  before any function runs:
   - a 429 with `Retry-After: 60` and the `RateLimited` body, so a generated web
     client decodes it like an app's own;
   - counted per client and host (lowercased, so spelling it differently
@@ -586,11 +587,47 @@ telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> ro
   - WAF checks the last minute's rate every few seconds and stops blocking
     once it falls back under the limit, usually within 30 seconds.
 
-  The Admin page shows blocked and allowed requests (WAF's CloudWatch
-  metrics) and a sample of recently blocked requests with their host and
-  client (WAF's free three-hour sample), so a flood can be traced to an app.
-  It costs about $6 a month plus $0.60 per million requests; without the
-  setting the stack has no web ACL.
+  ```
+  router distribution ── Requests (AWS/CloudFront, 1 min) ──► alarm platform-edge-floor ≥ limits.edgeFloorAt
+  alarm → ALARM ── EventBridge rule (default bus) ──► control plane worker, invoke job `edge-floor`
+  job, and the 5-minute watchdog: EdgeFloor.reconcile (services/control-plane/src/edge-floor.ts)
+     ALARM                      → create the web ACL, set it as the distribution's WebACLId
+     OK (or no data) for 60 min → clear WebACLId, delete the web ACL
+     the floor's state          → PLATFORM / EDGE_FLOOR in the state table: on, since, why
+  ```
+
+  - **On demand.** A web ACL bills by the hour whether or not anything is
+    flooding, so it exists only while the floor is on. The alarm watches the
+    distribution's requests per minute across every app
+    (`limits.edgeFloorAt`, 1,000: equal to the per-client limit, so the floor
+    is on whenever one client could be over it; the busiest minute before it
+    existed was 748). Below that, a client can send one host up to
+    `edgeFloorAt` a minute unblocked; apps' own `RateLimits` still apply.
+  - **The foundation** owns only the alarm and the EventBridge rule (its
+    target input is the worker's `invoke` payload). The worker exists only
+    after the stack, so the platform deploy grants the rule its invoke
+    permission afterwards (`foundation/src/deploy.ts`). The control plane
+    owns the web ACL: its definition is code there, and its IAM covers that
+    web ACL's name, the router distribution's config and the alarm, with or
+    without the setting, so a floor on when the setting goes can be taken
+    down.
+  - **Repair.** The watchdog reconciles every 5 minutes, so a lost alarm event
+    costs at most 5 minutes. A foundation deploy writes the whole
+    distribution config, and its drift-reverting change sets undo changes
+    made outside the stack, so a deploy during a flood drops the web ACL; the
+    watchdog puts it back. A web ACL that isn't the floor's is never replaced
+    or cleared.
+  - **Hold.** The floor stays on until the alarm has been OK for an hour, so a
+    flood that pauses doesn't flap it (each change is a distribution deploy).
+    WAF refuses to delete a web ACL still attached; a refused delete is
+    retried on the next run.
+
+  The Admin page shows whether the floor is on, since when and why, blocked
+  and allowed requests over the last day (WAF's CloudWatch metrics, which
+  keep the web ACL's name each time it's created), and while it's on a sample
+  of recently blocked requests with their host and client (WAF's free
+  three-hour sample, which goes with the web ACL), so a flood can be traced
+  to an app. Without the settings there is no alarm and no floor.
 
 ## Long-running services
 
@@ -824,8 +861,29 @@ writing any instrumentation:
       complaints, and the suppression list.
     - Data browser for collections and files.
     - Deployments with rollback; secrets; settings; cost.
-  - **Admin:** members, platform cost, and the edge floor's blocked requests.
-- **Uptime.** One pinger checks every prod app every 5 minutes.
+  - **Admin:** members, platform cost, and the edge floor's state and blocked requests.
+- **Uptime.** Every 5 minutes the pinger
+  (`services/control-plane/src/jobs/pinger.ts`) gives each prod stage a
+  result without waking servers that have nothing to do:
+  - _From traffic:_ a stage that served requests in the last 10 complete
+    minutes (its minute rollups) is up unless it served at least 3 and half or
+    more were 5xx. No request is sent.
+  - _Health checks_ (`GET /__platform/health`) only for a stage that served
+    nothing: every run for one without a server (the router answers at the
+    edge); for one with a server when its newest uptime row is a 6-hour-old
+    check, or is traffic (it just went quiet, which is also how a server that
+    can no longer start looks), and every run while its last result failed.
+    Otherwise nothing is recorded and its state stays. The control plane's
+    own app is never checked.
+  - Two failed results in a row are DOWN and alert, by email through the
+    alerts topic; a success after that alerts back up. So a server that can't
+    start any more alerts about 20 minutes after its last request: the window
+    ages out, then two checks fail.
+  - The platform's own health probes (the pinger's, deploys waiting for the
+    edge) are left out of the rollups, so they never read as traffic.
+  - Rows (`u#<app>#<stage>`, 35 days) say which kind they are; the console's
+    Overview shows uptime with how many came from traffic and how many were
+    checks. Rows from before have no source and were all checks.
 - **Cost.** A daily Cost Explorer pull grouped by the `platform:app` tag.
 - **CLI.** `plat logs|metrics|errors|traces|data --json` gives agents the same views.
 
@@ -908,10 +966,10 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
 | Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
 | Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
-| Edge floor (AWS WAF)                                | $5 web ACL + $1 rule, plus $0.60 per million requests; none without `limits.edgeRequestsPerMinute`                           |
+| Edge floor (AWS WAF)                                | $0.10 for the alarm; while on, $6 a month by the hour (~$0.01/h) plus $0.60 per million requests                             |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
-Baseline is about $1–3 a month, plus about $6 for the edge floor. `eric-minassian/aws` already puts a budget on
+Baseline is about $1–3 a month; the edge floor adds $0.10, and about a cent an hour while it's on. `eric-minassian/aws` already puts a budget on
 the account.
 
 ## Graduation
@@ -1019,6 +1077,24 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 - **The edge floor counts IPv6 clients per address.** WAF can't group by
   prefix, so a client rotating through its /64 gets a budget per address;
   apps' own limits group by /64 (`clientInfo().network`).
+- **The edge floor starts late.** It turns on only after CloudWatch has a
+  full minute over `edgeFloorAt` and the alarm evaluates it, so the first
+  minutes of a flood reach the apps (how long CloudFront's metric takes to
+  arrive wasn't measured), and a flood just under the threshold isn't
+  blocked at all.
+- **Edge floor on demand, verified 2026-11-16 on a throwaway distribution and
+  web ACL.**
+  - `UpdateDistribution` with a `WebACLId` needs `wafv2:GetWebACL` on that web
+    ACL besides `cloudfront:GetDistributionConfig` and
+    `cloudfront:UpdateDistribution` (without it: `InvalidWebACLId`, "Unable to
+    verify read permissions on Web ACL"); not `wafv2:AssociateWebACL`.
+    Clearing it needs CloudFront's permissions only.
+  - A web ACL created 8 s earlier attached fine. Attaching reached the nearest
+    edge within 6 s and the distribution was Deployed after 29 s; clearing,
+    15 s and 38 s.
+  - WAF refused to delete a web ACL still attached
+    (`WAFAssociatedItemException`) and deleted it 5 s after it was cleared,
+    while the distribution was still deploying.
 - **Public stores, verified 2026-11-16 on a throwaway bucket and
   distribution.**
   - A public file is served with its own `Content-Type` and `Cache-Control`
@@ -1084,3 +1160,5 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Deployments built with an SDK older than 0.4.0 are refused                            | Bindings (v2) and job payloads changed with pushed jobs, and an old worker can't read them. Live stages keep running what they run until they deploy again; their old queues drain, and their old dead letters move into the stage's queue.                                                                                                                                                                                                                                                                                                              |
 | The control plane's deploys run on a queue with a function of its own                 | The worker also processes every app's telemetry, and was 1 GB only because deploys ran there. Deploys and destroys get 1 GB and 15 minutes on a `stages` queue run once; the worker drops to 512 MB.                                                                                                                                                                                                                                                                                                                                                     |
 | Spans are written for failed, slow and 1-in-20 traces; the rest are counted           | Measured 2026-11-16: a span line per call made a typical request ~1 KB of CloudWatch Logs ($0.50/GB), about $0.50 per million requests, more than the Web Function's request fee. Deciding when a request ends keeps every failed or slow trace whole, which deciding at its start can't; choosing by trace id keeps every hop of a sampled one. Lines keep `app`, `stage` and `rev`, so no reader has to infer them.                                                                                                                                    |
+| The edge floor is on only while the edge is busy (revisits the always-on floor)       | Revisits Eric's 2026-11-16 always-on call: that web ACL was the largest fixed cost ($6 a month plus $0.60 per million requests). WAF bills by the hour and CloudFront doesn't bill requests WAF blocks, so a web ACL only while the edge is busy keeps the floor for $0.10 at rest; it starts minutes into a flood. The control plane owns it: an alarm can't run a stack deploy.                                                                                                                                                                        |
+| Uptime from traffic; health checks only for quiet stages                              | A Web Function bills held memory until ~290 s after its last request, so 5-minute checks kept every prod server warm (~$2.30 per app per month) and cold-started most checks. A stage's own requests already say whether it's up; checks stay where nothing else tells (no server, quiet 6 hours, just gone quiet, failing). Health probes are left out of the rollups.                                                                                                                                                                                  |
