@@ -641,6 +641,8 @@ describe('stages and deployments', () => {
         serverRoutes: ['/api/'],
         timeoutSeconds: 30,
         concurrency: 64,
+        compute: 'auto',
+        memoryMb: 1024,
       });
 
       const started = yield* request(`/v1/deployments/${deployment.id}/start`, {
@@ -1126,16 +1128,26 @@ describe('observability', () => {
 
   it.effect('prices the services that run all the time next to the cost history', () =>
     Effect.gen(function* () {
+      const estimate = {
+        at: '2026-11-16T07:30:00.000Z',
+        request: { monthlyUsd: 0.02, coldStartsPerMonth: 100 },
+        instance: { monthlyUsd: 2.4, environmentHoursPerMonth: 40 },
+        requestsPerMonth: 1000,
+        days: 3,
+      };
       const { request, signIn } = yield* setup({
         store: memoryStore({
           apps: [shop],
           stages: [
-            prodStage(),
+            prodStage({ computeEstimate: estimate }),
             prodStage({ stage: 'pr-4', preview: true, currentDeployment: 'd2' }),
             prodStage({ stage: 'staging', status: 'destroyed', currentDeployment: 'd3' }),
           ],
           deployments: [
-            configuredDeployment('d1', { services: { ais: { entry: 'src/ais.ts', spot: false } } }),
+            configuredDeployment('d1', {
+              web: { server: 'src/server.ts' },
+              services: { ais: { entry: 'src/ais.ts', spot: false } },
+            }),
             configuredDeployment('d2', { services: { ais: { entry: 'src/ais.ts' } } }, 'pr-4'),
             configuredDeployment('d3', { services: { ais: { entry: 'src/ais.ts' } } }, 'staging'),
           ],
@@ -1159,6 +1171,8 @@ describe('observability', () => {
             monthly: { computeUsd: 7.21, publicIpv4Usd: 3.65, totalUsd: 10.86 },
           },
         ],
+        // Its server, as the route says it runs, with the chooser's estimate.
+        compute: [{ stage: 'prod', setting: 'auto', compute: 'instance', estimate }],
       });
     }),
   );

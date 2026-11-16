@@ -2,8 +2,8 @@ import { useAtomValue } from '@effect/atom-react';
 import { Atom } from 'effect/reactivity';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, SERIES_COLORS } from '../../components/charts.tsx';
-import { Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
-import { fmtUsd, fmtUsdCents } from '../../format.ts';
+import { Badge, Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
+import { fmtNum, fmtUsd, fmtUsdCents, fmtUsdEstimate } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
 
 // Cost Explorer refreshes daily and charges per request, so an hour-old answer is fresh enough.
@@ -42,6 +42,46 @@ export function CostTab() {
                 appear under Admin.
               </p>
             </Card>
+            {c.compute && c.compute.length > 0 && (
+              <Card title="Server compute, per month">
+                <Table
+                  head={['Stage', 'Runs in', 'web.compute', 'Request mode', 'Instance mode', 'Requests']}
+                >
+                  {c.compute.map((s) => (
+                    <tr key={s.stage}>
+                      <td>
+                        <Mono>{s.stage}</Mono>
+                      </td>
+                      <td>
+                        <Badge tone="info">{s.compute}</Badge>
+                        {s.streak && (
+                          <span className="ml-2 text-[11px] text-muted">
+                            {s.streak.to} cheaper, day {s.streak.days} of 3
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        <Mono>{s.setting}</Mono>
+                      </td>
+                      <td className="tabular-nums">
+                        {s.estimate ? `≈ ${fmtUsdEstimate(s.estimate.request.monthlyUsd)}` : '—'}
+                      </td>
+                      <td className="tabular-nums">
+                        {s.estimate ? `≈ ${fmtUsdEstimate(s.estimate.instance.monthlyUsd)}` : '—'}
+                      </td>
+                      <td className="tabular-nums">
+                        {s.estimate ? fmtNum(s.estimate.requestsPerMonth) : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </Table>
+                <p className="pt-2 text-[11px] text-muted">
+                  Each mode priced daily from the stage’s recent traffic, before the free tier. On{' '}
+                  <Mono>auto</Mono>, a stage moves to the other mode once it has cost 25% less three days
+                  running.
+                </p>
+              </Card>
+            )}
             {c.alwaysOn && c.alwaysOn.length > 0 && (
               <Card title="Always on">
                 <Table head={['Stage', 'Service', 'Size', 'Compute', 'Public IPv4', '≈ Monthly']}>

@@ -20,7 +20,10 @@ describe('control plane plat.config.ts', () => {
     expect(m.worker).toMatchObject({ entry: 'src/worker.ts', timeoutSeconds: 300, memoryMb: 512 });
     // Deploys and destroys get a function of their own with the full Lambda timeout, run once.
     expect(m.queues).toEqual({ stages: { memoryMb: 1024, timeoutSeconds: 900, maxAttempts: 1 } });
+    // Its own server stays off the account's Lambda concurrency that apps' servers share.
+    expect(m.web?.compute).toBe('instance');
     expect(Object.keys(m.crons).toSorted()).toEqual([
+      'compute',
       'cost',
       'pinger',
       'realtime-key',

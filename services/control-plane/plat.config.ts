@@ -12,6 +12,9 @@ const app = defineApp({
     spa: true,
     serverRoutes: ['/v1/', '/auth/'],
     timeoutSeconds: 120,
+    // A Web Function scales on its own vCPU quota, so the console keeps answering when apps'
+    // request-mode servers and workers use up the account's Lambda concurrency.
+    compute: 'instance',
   },
   // The telemetry processor, crons and rollbacks: mostly waiting on DynamoDB and HTTP, so little
   // memory (Lambda bills GB-seconds). Below 512 MB this bundle's cold start, CPU-bound, drags.
@@ -27,6 +30,8 @@ const app = defineApp({
     pinger: '*/5 * * * *',
     watchdog: '*/5 * * * *',
     cost: '0 7 * * *',
+    // Prices each prod server's traffic in both compute modes, and switches those due.
+    compute: '30 7 * * *',
     reaper: '0 8 * * *',
     // Extends realtime's public subscribe key (AppSync keys last at most a year).
     'realtime-key': '0 9 * * *',

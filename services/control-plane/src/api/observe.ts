@@ -2,7 +2,7 @@
  * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
  * custom metrics, rate limits, services, errors, uptime, cost, logs, traces.
  */
-import type { AlwaysOnCost, JobStats } from '@ericminassian/platform-core';
+import type { JobStats, StageCompute } from '@ericminassian/platform-core';
 import { BadRequest, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Cause, Clock, Effect, Option, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
@@ -11,6 +11,7 @@ import { AppQueues } from '../jobs/queues.ts';
 import { AppRealtime } from '../jobs/realtime.ts';
 import { AppServices, alwaysOnCosts } from '../jobs/services.ts';
 import { Logs, logGroupOf } from '../logs.ts';
+import { type DeploymentItem, type StageItem, stageCompute } from '../records.ts';
 import { Store } from '../store.ts';
 import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
 import { Access, stageParam } from './access.ts';
@@ -27,6 +28,22 @@ const rangeOf = (query: RangeQuery, defaultRange?: string) =>
   Effect.map(Clock.currentTimeMillis, (now) =>
     parseRange({ from: query.from, to: query.to, range: query.range ?? defaultRange, res: query.res }, now),
   );
+
+/** A stage's server on the Cost tab: its mode and setting, and the chooser's latest estimate (pure). */
+export function stageComputeCost(stage: StageItem, live: DeploymentItem | undefined): StageCompute[] {
+  const web = live?.manifest?.web;
+  const compute = stageCompute(stage);
+  if (!web?.server || !compute) return [];
+  return [
+    {
+      stage: stage.stage,
+      setting: web.compute,
+      compute,
+      ...(stage.computeEstimate ? { estimate: stage.computeEstimate } : {}),
+      ...(stage.computeStreak ? { streak: stage.computeStreak } : {}),
+    },
+  ];
+}
 
 /** What a live tail sends when it stops on an error: the reason, as the CLI and console show it. */
 const tailError = (cause: Cause.Cause<unknown>): string => {
@@ -55,23 +72,22 @@ export const ObserveLive = HttpApiBuilder.group(
     });
 
     /**
-     * The services of the app's stages that run them all the time: not
-     * previews (they stop theirs minutes after a deploy), nor stages on their
-     * way out.
+     * The app's stages that run all the time, with their live deployments:
+     * not previews (they stop their services minutes after a deploy and run
+     * servers in request mode), nor stages on their way out.
      */
-    const alwaysOn = Effect.fnUntraced(function* (app: string) {
+    const liveStages = Effect.fnUntraced(function* (app: string) {
       const stages = (yield* store.listStages(app)).filter(
         (s) => !s.preview && s.status !== 'destroyed' && s.status !== 'destroying' && s.currentDeployment,
       );
-      const costs = yield* Effect.forEach(
+      return yield* Effect.forEach(
         stages,
-        Effect.fnUntraced(function* (s) {
-          const live = Option.getOrUndefined(yield* store.getDeployment(s.currentDeployment ?? ''));
-          return alwaysOnCosts(s.stage, live?.manifest?.services ?? {});
+        Effect.fnUntraced(function* (stage) {
+          const live = Option.getOrUndefined(yield* store.getDeployment(stage.currentDeployment ?? ''));
+          return { stage, live };
         }),
         { concurrency: 'unbounded' },
       );
-      return costs.flat() satisfies AlwaysOnCost[];
     });
 
     return handlers.handleAll({
@@ -180,11 +196,15 @@ export const ObserveLive = HttpApiBuilder.group(
       cost: ({ params, query }) =>
         Effect.gen(function* () {
           const { app } = yield* access.memberApp(params.app);
-          const [cost, running] = yield* Effect.all(
-            [telemetry.cost(app.name, Math.max(1, Math.min(query.days || 35, 400))), alwaysOn(app.name)],
+          const [cost, live] = yield* Effect.all(
+            [telemetry.cost(app.name, Math.max(1, Math.min(query.days || 35, 400))), liveStages(app.name)],
             { concurrency: 'unbounded' },
           );
-          return { ...cost, alwaysOn: running };
+          return {
+            ...cost,
+            alwaysOn: live.flatMap((l) => alwaysOnCosts(l.stage.stage, l.live?.manifest?.services ?? {})),
+            compute: live.flatMap((l) => stageComputeCost(l.stage, l.live)),
+          };
         }),
 
       logs: ({ params, query }) =>

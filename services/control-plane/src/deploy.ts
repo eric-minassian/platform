@@ -15,6 +15,7 @@ import {
   type ResolvedManifest,
   type RollbackResponse,
   type RouteRecord,
+  webComputeFor,
 } from '@ericminassian/platform-core';
 import {
   type ControlServiceInput,
@@ -49,7 +50,8 @@ import { HttpClient } from 'effect/http';
 import { type ArtifactRef, Artifacts } from './artifacts.ts';
 import { logRetentionDays, Settings, servicesLimitIssue } from './config.ts';
 import { EDGE_TIMEOUT_SECONDS, waitForEdge } from './edge.ts';
-import { type StageItem, Store } from './store.ts';
+import { stageCompute } from './records.ts';
+import { type DeploymentItem, type StageItem, Store } from './store.ts';
 
 /** A deployment step that can't go on; `message` lands in the deployment's record. */
 export class DeployFailed extends Schema.TaggedError<DeployFailed, { readonly brand: unique symbol }>()(
@@ -173,6 +175,10 @@ export function deployedServiceEvent(
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
+/** The server build a deploy put up: a Web Function revision or a request-mode function version. */
+const serverBuild = (result: DeployStageResult) =>
+  result.webFunction?.revisionId ?? result.requestFunction?.version;
+
 /** The message a failed deployment records. */
 const failureMessage = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause);
@@ -265,11 +271,13 @@ export class Deployer extends Context.Service<
 
       /** Everything up to the route flip and the edge check; the caller records the outcome. */
       const deployStage = Effect.fnUntraced(function* (
-        ref: ArtifactRef,
+        dep: DeploymentItem,
         before: Option.Option<StageItem>,
         push: Push,
       ) {
-        const { app, stage, deployment: id } = ref;
+        const { app, stage, id } = dep;
+        // A compute switch runs an earlier deployment's build again, from where it was uploaded.
+        const ref: ArtifactRef = { app, stage, deployment: dep.computeSwitchOf ?? id };
         const platform = yield* settings.runtime;
         push({ level: 'info', msg: `deploying ${app} to ${stage}` });
         const raw = yield* artifacts.readText(ref, 'manifest.json');
@@ -305,6 +313,22 @@ export class Deployer extends Context.Service<
         const overLimit = servicesLimitIssue(settings.platform, manifest);
         if (overLimit) return yield* new DeployFailed({ message: overLimit });
 
+        const previous = Option.getOrUndefined(before);
+        const previousCompute = previous ? stageCompute(previous) : undefined;
+        // A switch runs in the mode the chooser picked; any other deployment in the one its
+        // setting, stage and SDK give (prod on `auto` keeps the stage's).
+        const choice =
+          dep.computeSwitchOf && dep.compute
+            ? { compute: dep.compute }
+            : webComputeFor({
+                setting: manifest.web?.compute ?? 'auto',
+                stage,
+                current: previousCompute,
+                sdk: dep.sdk,
+              });
+        if ('error' in choice) return yield* new DeployFailed({ message: choice.error });
+        if (manifest.web?.server) push({ level: 'info', msg: `the server runs in ${choice.compute} mode` });
+
         const result = yield* engine.deploy(
           {
             manifest,
@@ -313,6 +337,7 @@ export class Deployer extends Context.Service<
             platform,
             artifacts: located,
             webMode: 'function',
+            webCompute: choice.compute,
             servicesMode: 'ecs',
             logRetentionDays: logRetentionDays(settings.platform, stage),
           },
@@ -320,15 +345,17 @@ export class Deployer extends Context.Service<
         );
         for (const service of result.services ?? []) push(deployedServiceEvent(app, stage, service));
 
-        const previous = Option.getOrUndefined(before);
         yield* store.updateStage(app, stage, {
           status: 'active',
           host: result.host,
           url: result.url,
           currentDeployment: id,
           previousDeployment: previous?.currentDeployment,
-          currentRevision: result.webFunction?.revisionId,
+          currentRevision: serverBuild(result),
           previousRevision: previous?.currentRevision,
+          compute: result.compute,
+          // The count toward a switch starts over in a new mode.
+          ...(result.compute !== previousCompute ? { computeStreak: undefined } : {}),
           route: result.route,
           previousRoute: previous?.route,
         });
@@ -377,7 +404,7 @@ export class Deployer extends Context.Service<
           const outcome = yield* Effect.scoped(
             Effect.gen(function* () {
               const push = yield* progress({ app, id });
-              const exit = yield* Effect.exit(deployStage({ app, stage, deployment: id }, before, push));
+              const exit = yield* Effect.exit(deployStage(found.value, before, push));
               if (Exit.isFailure(exit)) push({ level: 'error', msg: failureMessage(exit.cause) });
               return exit;
             }),
@@ -395,7 +422,9 @@ export class Deployer extends Context.Service<
                 url: result.url,
                 manifest,
                 route: result.route,
+                compute: result.compute,
                 revisionId: result.webFunction?.revisionId,
+                version: result.requestFunction?.version,
               })
               .pipe(
                 Effect.catchDefect(Effect.fail),
@@ -466,15 +495,20 @@ export class Deployer extends Context.Service<
             platform,
             route: target.route,
             ...(target.revisionId ? { revisionId: target.revisionId } : {}),
+            ...(target.version ? { version: target.version } : {}),
             services: Object.keys(target.manifest?.services ?? {}),
           })
           .pipe(Effect.catchTag('DeployFailed', (e) => refuse(e.message)));
+        // Rolling back restores the target's mode too.
+        const compute = stageCompute(target);
         yield* store.updateStage(app, stage, {
           status: 'active',
           currentDeployment: targetId,
           previousDeployment: current.currentDeployment,
-          currentRevision: target.revisionId,
+          currentRevision: target.revisionId ?? target.version,
           previousRevision: current.currentRevision,
+          compute,
+          ...(compute !== stageCompute(current) ? { computeStreak: undefined } : {}),
           route,
           previousRoute: current.route,
           ...(target.url ? { url: target.url } : {}),

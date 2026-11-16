@@ -141,6 +141,7 @@ describe('Deployer.run', () => {
       assert.strictEqual(dep.revisionId, 'rev1');
       assert.deepStrictEqual(messages, [
         'deploying shop to prod',
+        'the server runs in instance mode',
         'table shop--prod',
         'waiting for the edge to serve this deployment',
         'edge is serving this deployment',
@@ -301,6 +302,136 @@ describe('Deployer.run', () => {
     );
   });
 
+  describe('compute modes', () => {
+    /** The engine's answer for a request-mode server. */
+    const requestMode = (input: DeployStageInput): DeployStageResult => ({
+      ...deployed,
+      compute: input.webCompute ?? 'instance',
+      ...(input.webCompute === 'request'
+        ? {
+            webFunction: undefined,
+            requestFunction: { name: 'shop--prod--web', urlDomain: 'u.lambda-url.example', version: '7' },
+            route: { ...route('d1'), o: 'u.lambda-url.example', c: 'r' as const, k: 'secret' },
+          }
+        : {}),
+    });
+    const recording = (inputs: DeployStageInput[]) => (input: DeployStageInput) =>
+      Effect.sync(() => {
+        inputs.push(input);
+        return requestMode(input);
+      });
+
+    it.effect('starts a new prod stage in request mode, and records the version', () => {
+      const inputs: DeployStageInput[] = [];
+      return Effect.gen(function* () {
+        yield* Deployer.use((d) => d.run('d1'));
+        const { dep, stage, messages } = yield* read;
+        assert.strictEqual(inputs[0]?.webCompute, 'request');
+        assert.include(messages, 'the server runs in request mode');
+        assert.deepStrictEqual([dep.compute, dep.version, dep.revisionId], ['request', '7', undefined]);
+        assert.deepStrictEqual([stage.compute, stage.currentRevision], ['request', '7']);
+      }).pipe(
+        Effect.provide(
+          deployer({
+            deployments: [deployment('d1', { sdk: '0.4.0' })],
+            stages: [{ ...liveStage, currentDeployment: undefined, route: undefined }],
+            deploy: recording(inputs),
+          }),
+        ),
+      );
+    });
+
+    it.effect('keeps prod in the mode the chooser put it in, and previews on request mode', () => {
+      const inputs: DeployStageInput[] = [];
+      const run = (stage: StageItem) =>
+        Deployer.use((d) => d.run('d1')).pipe(
+          Effect.provide(
+            deployer({
+              deployments: [deployment('d1', { stage: stage.stage, sdk: '0.4.0' })],
+              stages: [stage],
+              deploy: recording(inputs),
+            }),
+          ),
+        );
+      return Effect.gen(function* () {
+        yield* run({ ...liveStage, compute: 'instance' });
+        yield* run({ ...liveStage, stage: 'pr-3', preview: true, compute: 'instance' });
+        assert.deepStrictEqual(
+          inputs.map((i) => [i.stage, i.webCompute]),
+          [
+            ['prod', 'instance'],
+            ['pr-3', 'request'],
+          ],
+        );
+      });
+    });
+
+    it.effect('runs a build from before request mode as a Web Function, and refuses it per request', () =>
+      Effect.gen(function* () {
+        const inputs: DeployStageInput[] = [];
+        const run = (manifest: unknown) =>
+          Effect.gen(function* () {
+            yield* Deployer.use((d) => d.run('d1'));
+            return (yield* read).dep;
+          }).pipe(
+            Effect.provide(
+              deployer({
+                deployments: [deployment('d1', { sdk: '0.3.0' })],
+                stages: [{ ...liveStage, currentDeployment: undefined, route: undefined }],
+                manifest,
+                deploy: recording(inputs),
+              }),
+            ),
+          );
+        const auto = yield* run({ name: 'shop', web: { server: 'src/server.ts' } });
+        assert.deepStrictEqual([auto.status, inputs[0]?.webCompute], ['succeeded', 'instance']);
+        const refused = yield* run({ name: 'shop', web: { server: 'src/server.ts', compute: 'request' } });
+        assert.deepStrictEqual(
+          [refused.status, refused.error],
+          [
+            'failed',
+            "web.compute is 'request', but this build's @ericminassian/platform is 0.3.0: request mode needs 0.4.0 or later",
+          ],
+        );
+      }),
+    );
+
+    it.effect('runs a compute switch in its mode, from the build it switches, and restarts the count', () => {
+      const inputs: DeployStageInput[] = [];
+      return Effect.gen(function* () {
+        yield* Deployer.use((d) => d.run('d1'));
+        const { dep, stage } = yield* read;
+        assert.strictEqual(dep.status, 'succeeded');
+        assert.deepStrictEqual(
+          [inputs[0]?.deploymentId, inputs[0]?.webCompute, inputs[0]?.artifacts.server?.key],
+          ['d1', 'request', 'd0/server.zip'],
+        );
+        assert.deepStrictEqual([stage.compute, stage.computeStreak], ['request', undefined]);
+      }).pipe(
+        Effect.provide(
+          deployer({
+            deployments: [
+              deployment('d1', {
+                actor: 'platform',
+                sdk: '0.4.0',
+                compute: 'request',
+                computeSwitchOf: 'd0',
+              }),
+            ],
+            stages: [
+              {
+                ...liveStage,
+                compute: 'instance',
+                computeStreak: { to: 'request', days: 3, day: '2026-11-16' },
+              },
+            ],
+            deploy: recording(inputs),
+          }),
+        ),
+      );
+    });
+  });
+
   it.effect('runs a deployment once, however often the job is retried', () =>
     Effect.gen(function* () {
       yield* Deployer.use((d) => d.run('d1'));
@@ -373,6 +504,43 @@ describe('Deployer.rollback', () => {
         deployer({
           deployments: [target, deployment('d1', { status: 'succeeded', route: route('d1') })],
           stages: [{ ...liveStage, status: 'active', currentDeployment: 'd1', previousDeployment: 'd0' }],
+          rollback: (input) => inputs.push(input),
+        }),
+      ),
+    );
+  });
+
+  it.effect('restores the target’s compute mode, with its version', () => {
+    const inputs: RollbackStageInput[] = [];
+    const requestRoute = { ...route('d0'), o: 'u.lambda-url.example', c: 'r' as const, k: 'secret' };
+    return Effect.gen(function* () {
+      yield* Deployer.use((d) => d.rollback('shop', 'prod'));
+      assert.deepStrictEqual(
+        [inputs[0]?.version, inputs[0]?.revisionId, inputs[0]?.route.c],
+        ['4', undefined, 'r'],
+      );
+      const stage = Option.getOrThrow(yield* (yield* Store).getStage('shop', 'prod'));
+      assert.deepStrictEqual(
+        [stage.compute, stage.currentRevision, stage.computeStreak],
+        ['request', '4', undefined],
+      );
+    }).pipe(
+      Effect.provide(
+        deployer({
+          deployments: [
+            deployment('d0', { status: 'succeeded', route: requestRoute, version: '4', compute: 'request' }),
+            deployment('d1', { status: 'succeeded', route: route('d1'), compute: 'instance' }),
+          ],
+          stages: [
+            {
+              ...liveStage,
+              status: 'active',
+              currentDeployment: 'd1',
+              previousDeployment: 'd0',
+              compute: 'instance',
+              computeStreak: { to: 'request', days: 1, day: '2026-11-16' },
+            },
+          ],
           rollback: (input) => inputs.push(input),
         }),
       ),

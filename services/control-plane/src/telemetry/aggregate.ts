@@ -118,7 +118,8 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
         // counted would make a silent stage look served, or a failed probe look like a quiet minute.
         if (e.route === HEALTH_PATH) break;
         const cls = statusClass(e.status);
-        const add: Record<string, number> = { req: 1, [`l${latencyBucket(e.dur)}`]: 1 };
+        // `dur` sums handling time: the compute chooser's concurrency and billed duration.
+        const add: Record<string, number> = { req: 1, dur: e.dur, [`l${latencyBucket(e.dur)}`]: 1 };
         if (cls) add[cls] = 1;
         if (e.cold) add.cold = 1;
         for (const res of STAGE_RES) {
@@ -194,9 +195,12 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
       case 'env': {
         if (e.event !== 'start') break;
         const field = { web: 'webStarts', worker: 'workerStarts', service: 'serviceStarts' }[e.runtime];
+        // A server's INIT, for the compute chooser's cold starts.
+        const init: Record<string, number> =
+          e.runtime === 'web' && e.initMs !== undefined ? { webInitMs: e.initMs, webInits: 1 } : {};
         for (const res of STAGE_RES) {
           const b = bucketStart(ts, res);
-          bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { [field]: 1 });
+          bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { [field]: 1, ...init });
         }
         // A service's container starts sit next to its runs, on its job series.
         if (e.runtime === 'service' && e.name) {

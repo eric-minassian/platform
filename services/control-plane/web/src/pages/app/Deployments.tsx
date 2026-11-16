@@ -83,7 +83,7 @@ export function DeploymentsTab() {
     <div className="space-y-3">
       <Card title="Stages">
         <ErrorBox error={failure(destroy)} />
-        <Table head={['Stage', 'Status', 'URL', 'Live deployment', 'Updated', '']}>
+        <Table head={['Stage', 'Status', 'URL', 'Live deployment', 'Compute', 'Updated', '']}>
           {summary.stages.map((s) => (
             <tr key={s.stage}>
               <td>
@@ -100,6 +100,7 @@ export function DeploymentsTab() {
               <td>
                 <Mono>{shortId(s.currentDeployment)}</Mono>
               </td>
+              <td>{s.compute ?? '—'}</td>
               <td>{relTime(s.updatedAt)}</td>
               <td className="text-right">
                 {s.preview && s.status !== 'destroying' && (
@@ -132,7 +133,7 @@ export function DeploymentsTab() {
                 No deployments to this stage yet. Push to main, open a PR, or run <Mono>plat deploy</Mono>.
               </Empty>
             ) : (
-              <Table head={['Deployment', 'Status', 'Commit', 'Actor', 'Created', 'Took', '']}>
+              <Table head={['Deployment', 'Status', 'Compute', 'Commit', 'Actor', 'Created', 'Took', '']}>
                 {deps.flatMap((d) => {
                   const live = stage?.currentDeployment === d.id;
                   const rows = [
@@ -147,7 +148,15 @@ export function DeploymentsTab() {
                       <td>
                         <Badge tone={statusTone(d.status)}>{d.status}</Badge>
                       </td>
-                      <td className="max-w-xs truncate">
+                      <td>
+                        {d.compute ?? '—'}
+                        {d.computeSwitchOf && (
+                          <span className="ml-2" title={`Runs the build of ${d.computeSwitchOf}`}>
+                            <Badge tone="info">switch</Badge>
+                          </span>
+                        )}
+                      </td>
+                      <td className="max-w-xs truncate" title={d.message}>
                         {d.commit && <Mono>{d.commit.slice(0, 7)}</Mono>}{' '}
                         <span className="text-muted">{d.message}</span>
                       </td>
@@ -176,7 +185,7 @@ export function DeploymentsTab() {
                   if (open === d.id) {
                     rows.push(
                       <tr key={`${d.id}-events`}>
-                        <td colSpan={7}>
+                        <td colSpan={8}>
                           <Events id={d.id} />
                         </td>
                       </tr>,
