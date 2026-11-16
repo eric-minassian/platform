@@ -1,17 +1,18 @@
 /**
- * Web Function entry wrapper. `plat build` generates:
+ * The server's entry wrapper. `plat build` generates:
  *
- *   import handler from '<app>/src/server.ts';   // `toFetchHandler(...)`
- *   import { startServer } from '@ericminassian/platform/server';
- *   startServer(handler);
+ *   import app from '<app>/src/server.ts';   // `toFetchHandler(...)`
+ *   import { serve } from '@ericminassian/platform/server';
+ *   export const handler = await serve(app);
  *
- * and bundles it to `index.mjs`. startServer listens on
- * `AWS_LAMBDA_HTTP_ENDPOINT` (Web Function contract; `plat dev` sets it too),
- * adds `/__platform/*` routes (health, auth, realtime token), auto-instruments every request
- * (telemetry `req`/`err`/`span` lines, traces) and maps `x-platform-host` to
- * the public URL the app sees.
+ * and bundles it to `index.mjs`, which runs either way a stage's server runs:
+ * as a Web Function (instance mode) it listens on `AWS_LAMBDA_HTTP_ENDPOINT`,
+ * as a regular Lambda function (request mode) Lambda calls `handler` per
+ * request. Both add the `/__platform/*` routes (health, auth, realtime
+ * token), instrument every request (telemetry `req`/`err`/`span` lines,
+ * traces) and map `x-platform-host` to the public URL the app sees.
  *
- * CONTRACT: used by the CLI build. Keep stable.
+ * CONTRACT: used by the CLI build (`serve`) and `plat dev` (`startServer`). Keep stable.
  */
 import {
   fingerprint,
@@ -26,6 +27,7 @@ import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
 import { parseTraceparent, runWithContext, startRoot } from './context.ts';
 import { createNodeServer, parseEndpoint } from './http.ts';
+import { createRequestModeHandler, type LambdaStreaming, type RequestModeHandler } from './lambda-http.ts';
 import { handleRealtimeRoute } from './realtime.ts';
 import {
   emit,
@@ -166,6 +168,45 @@ export function normalizePath(path: string): string {
 
 // ---------------------------------------------------------------- server
 
+export type { FunctionUrlEvent, RequestModeHandler } from './lambda-http.ts';
+
+/**
+ * The server bundle's entry. Where Lambda gives the process an HTTP endpoint
+ * (`AWS_LAMBDA_HTTP_ENDPOINT`: a Web Function, or `plat dev`) it starts the
+ * server there and answers undefined. Otherwise the bundle runs as a
+ * request-mode function, and this answers the streaming handler Lambda calls
+ * for each request.
+ */
+export async function serve(handler: FetchHandlerLike): Promise<RequestModeHandler | undefined> {
+  if (process.env.AWS_LAMBDA_HTTP_ENDPOINT) {
+    await startServer(handler);
+    return undefined;
+  }
+  return requestModeHandler(handler);
+}
+
+/**
+ * The request-mode handler on its own (`serve` outside a Web Function).
+ * `streaming` is the Lambda runtime's `awslambda` global unless given (tests).
+ */
+export function requestModeHandler(
+  handler: FetchHandlerLike,
+  streaming: LambdaStreaming | undefined = (globalThis as { awslambda?: LambdaStreaming }).awslambda,
+): RequestModeHandler {
+  // The AWS SDK's invoke store creates an empty `awslambda` outside Lambda too.
+  if (typeof streaming?.streamifyResponse !== 'function')
+    throw new Error(
+      'the server bundle runs as a Web Function (AWS_LAMBDA_HTTP_ENDPOINT) or a Lambda function with response streaming; this is neither',
+    );
+  installConsoleCapture();
+  installFetchInstrumentation();
+  reportUnhandledRejections();
+  const result = createRequestModeHandler(createPlatformFetch(handler), streaming);
+  // INIT ends with the module loaded; the first request is the one marked cold.
+  emit('env', { event: 'start', runtime: 'web', compute: 'request', initMs: Math.round(performance.now()) });
+  return result;
+}
+
 /** Start the HTTP server. Resolves once listening. */
 export async function startServer(handler: FetchHandlerLike): Promise<{ close(): Promise<void> }> {
   installConsoleCapture();
@@ -184,7 +225,14 @@ export async function startServer(handler: FetchHandlerLike): Promise<{ close():
       resolve();
     });
   });
-  emit('env', { event: 'start', runtime: 'web', initMs: Math.round(performance.now()) });
+  // A Web Function, unless `plat dev` runs it.
+  const local = process.env.PLATFORM_LOCAL === '1' || !process.env.AWS_LAMBDA_HTTP_ENDPOINT;
+  emit('env', {
+    event: 'start',
+    runtime: 'web',
+    ...(local ? {} : { compute: 'instance' as const }),
+    initMs: Math.round(performance.now()),
+  });
 
   const close = () =>
     new Promise<void>((resolve) => {
@@ -199,6 +247,14 @@ export async function startServer(handler: FetchHandlerLike): Promise<{ close():
     force.unref();
     void close().then(() => process.exit(0));
   });
-  process.on('unhandledRejection', (reason) => emitError(toError(reason), 'unhandled'));
+  reportUnhandledRejections();
   return { close };
+}
+
+let reportingRejections = false;
+
+function reportUnhandledRejections(): void {
+  if (reportingRejections) return;
+  reportingRejections = true;
+  process.on('unhandledRejection', (reason) => emitError(toError(reason), 'unhandled'));
 }
