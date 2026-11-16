@@ -117,6 +117,8 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `Metrics`                        | `yield* metrics.count('signups')`, `metrics.value('cart.total', 42.5, 'usd')`: free, shown in the console |
 | `Effect.log*`                    | `Effect.logInfo('charged').pipe(Effect.annotateLogs({ orderId }))`: structured, traced, searchable        |
 | `defineWorker`                   | `defineWorker({ layer: Platform.layer, queues: { emails: (msg) => Effect... }, events, crons, invoke })`  |
+| `defineService`                  | `export default defineService({ layer, run })` in a long-running service's entry (see the recipe)         |
+| `traced`                         | `save(batch).pipe(traced('save'))`: a unit of work in a service gets a trace and Jobs-tab stats           |
 | `toFetchHandler`                 | `export default toFetchHandler(layer)` in `src/server.ts`                                                 |
 | `Platform.layer` / `layerMemory` | Every service for real, or in memory for tests; `Platform.Memory` shows what was sent and published       |
 
@@ -282,6 +284,58 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   `example.net`, `example.org`, `*.test`, `*.example`, `*.invalid`, `localhost`) with a log line, so use
   those in tests and seed data.
 
+- **Long-running service.** Only for sources that push (a WebSocket or server-sent events feed) or that
+  need polling more often than once a minute. Everything else belongs in the worker: a service is the one
+  resource billed while it runs, about $6 a month on Spot at the default size (`plat deploy` prints the
+  estimate), and a stage may declare at most 3.
+  1. Declare it: `services: { firehose: { entry: 'src/firehose.ts' } }`. Options: `cpu` (0.25-4 vCPU),
+     `memoryMb` (a size Fargate pairs with `cpu`), `spot` (default `true`), `previewMinutes` (default 30).
+  2. Write the entry. `run` holds the connection and writes what arrives where the web side reads it:
+
+     ```ts
+     import { defineService, Platform, Storage, traced } from '@ericminassian/platform';
+     import { Effect, Layer, Schema, Stream } from 'effect';
+     import { Socket } from 'effect/socket';
+
+     const Post = Schema.Struct({ did: Schema.String, time_us: Schema.Finite });
+
+     // One JSON message per WebSocket frame.
+     const posts = Stream.unwrap(Effect.map(Socket.makeWebSocket(FEED_URL), Socket.toStream)).pipe(
+       Stream.decodeText(),
+       Stream.mapEffect((frame) => Schema.decodeEffect(Schema.fromJsonString(Post))(frame)),
+     );
+
+     const saveSnapshot = Effect.fn('saveSnapshot')(function* (batch: ReadonlyArray<typeof Post.Type>) {
+       const uploads = (yield* Storage).store('uploads');
+       yield* uploads.put('firehose/latest.json', JSON.stringify({ count: batch.length }));
+     });
+
+     export default defineService({
+       layer: Layer.mergeAll(Platform.layer, Socket.layerWebSocketConstructorGlobal),
+       run: posts.pipe(
+         Stream.timeout('2 minutes'), // a feed that goes quiet ends the run, so it reconnects
+         Stream.groupedWithin(1000, '10 seconds'),
+         Stream.runForEach((batch) => saveSnapshot(batch).pipe(traced('snapshot'))),
+       ),
+     });
+     ```
+  - `run` runs until the platform stops it. When it fails or ends, it is reported (an error group for a
+    failure) and run again after a backoff, 1 s growing to 1 min. So let errors out instead of retrying
+    inside, and end the stream when the source goes quiet.
+  - One instance runs per stage, but a deploy, a crash or a Spot reclaim (two minutes' notice) replaces
+    it, with a gap of about a minute and possibly a brief overlap. Write idempotently: overwrite
+    snapshots, key documents by the source's ids.
+  - Stopping interrupts `run`, so finalizers (`Effect.ensuring`, `Effect.acquireRelease`) can flush a
+    pending batch; they get 25 seconds.
+  - Wrap each unit of work in `traced(name)`. Without it the service has logs, errors and metrics but no
+    traces, since no request or job is running.
+  - It takes no inbound traffic. Browsers read what it writes through endpoints, or get it pushed with
+    `realtime`.
+  - Previews run it for `previewMinutes` after each deploy, then stop it; `plat services start <name>
+    --stage pr-12` runs it again. Use `previewMinutes: 0` for sources that allow one connection per key.
+  - Unit-test the pipeline on `Platform.layerMemory()` by feeding it sample messages from
+    `Stream.fromIterable`. `plat dev` runs the service for real (`plat dev --no-services` doesn't).
+
 - **Browser test.** Add a test to `e2e/`. Use it for what only a browser shows: rendering, styles, focus,
   client-side state.
   - CI runs the suite against the PR's preview and, after each deploy, production, with the stage's URL in
@@ -328,7 +382,8 @@ plat dev run-cron cleanup    # fire a cron in the running `plat dev`
   Signed-in realtime tokens aren't checked locally (the emulator skips the authorizer).
 - Email is never sent: it appears at `/__platform/mail` on the app's local URL.
 - The worker runs as a real Lambda inside the emulator.
-- The server restarts when you edit, and so does the worker.
+- The server restarts when you edit, and so do the worker and services. A service that crashes is
+  restarted after a backoff, as it would be deployed.
 - Sign-in uses a local page where any email works.
 - State is in memory and is gone when it stops.
 - It needs the `aws-emulator` binary (see the hint it prints).
@@ -353,6 +408,8 @@ plat logs --since 30m [--stage pr-12] [--filter "error"] [--follow]
 plat errors                         # grouped errors with sample stack + trace id
 plat traces <traceId>               # one request across server → queue → worker
 plat metrics --since 6h             # requests, 5xx, p95, cold starts, per-route, per-job and rate-limit stats
+plat services [--stage pr-12]       # long-running services: state, restarts, failed runs, cost
+plat services restart <name>        # also: start [--minutes 60], stop
 plat data todos --partition userId=<id>
 plat deployments / plat stages / plat rollback
 ```
