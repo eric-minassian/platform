@@ -26,7 +26,7 @@ import { createClients } from './clients.ts';
 import { ensureRealtimePlatform } from './drivers/appsync.ts';
 import { putObject } from './drivers/s3.ts';
 import { ensureLocal } from './local.ts';
-import { deployStage, destroyStage, listStageResources, rollbackStage } from './stage.ts';
+import { deployStage, destroyStage, expireStorage, listStageResources, rollbackStage } from './stage.ts';
 import type { EngineContext } from './util.ts';
 
 export type { AwsClients } from './clients.ts';
@@ -119,6 +119,16 @@ export interface DestroyStageInput {
   keepData?: boolean;
 }
 
+export interface ExpireStorageInput {
+  app: string;
+  stage: string;
+  platform: PlatformRuntimeConfig;
+  /** The live deployment's: its stores' `expireAfterDays` and where their files are. */
+  manifest: Pick<ResolvedManifest, 'storage' | 'storageOptions'>;
+  /** Default: the current time. */
+  now?: Date;
+}
+
 export interface Engine {
   readonly region: string;
   readonly target: 'aws' | 'emulator';
@@ -127,6 +137,12 @@ export interface Engine {
   /** Returns the route record it wrote. */
   rollbackStage(input: RollbackStageInput): Promise<RouteRecord>;
   destroyStage(input: DestroyStageInput): Promise<void>;
+  /**
+   * Delete the files of the stage's stores that set `expireAfterDays` and
+   * weren't written for that many days. Answers how many, by store. The
+   * control plane runs it daily for every live stage.
+   */
+  expireStorage(input: ExpireStorageInput): Promise<Record<string, number>>;
   /** Everything the engine owns for a stage (found by name + tags). */
   listStageResources(app: string, stage: string): Promise<ResourceRef[]>;
   /** Upload a local file/buffer into the artifacts bucket (used by `plat dev`). */
@@ -149,6 +165,7 @@ export function createEngine(opts: EngineOptions): Engine {
     deployStage: (input) => deployStage(ctx, input),
     rollbackStage: (input) => rollbackStage(ctx, input),
     destroyStage: (input) => destroyStage(ctx, input),
+    expireStorage: (input) => expireStorage(ctx, input),
     listStageResources: (app, stage) => listStageResources(ctx, app, stage),
     putArtifact: (platform, key, body) => putObject(ctx, { bucket: platform.artifactsBucket, key, body }),
     ensureRealtimePlatform: (platform) => ensureRealtimePlatform(ctx, platform),

@@ -202,3 +202,41 @@ export async function deletePrefix(ctx: EngineContext, bucket: string, prefix: s
   }
   return deleted;
 }
+
+/**
+ * Delete the objects under `prefix` last written before `cutoff` (an
+ * unversioned bucket). Returns how many were deleted.
+ */
+export async function deleteObjectsOlderThan(
+  ctx: EngineContext,
+  bucket: string,
+  prefix: string,
+  cutoff: Date,
+): Promise<number> {
+  const s3 = ctx.clients.s3;
+  let deleted = 0;
+  let ContinuationToken: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ContinuationToken }),
+    );
+    const stale = (res.Contents ?? [])
+      .filter((o) => o.Key && o.LastModified && o.LastModified < cutoff)
+      .map((o) => ({ Key: o.Key! }));
+    // A page is at most 1,000 keys, which is what one DeleteObjects takes.
+    if (stale.length) {
+      const out = await s3.send(
+        new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: stale, Quiet: true } }),
+      );
+      if (out.Errors?.length) {
+        const first = out.Errors[0]!;
+        throw new Error(
+          `could not delete ${out.Errors.length} of ${stale.length} files under ${prefix}: ${first.Code} ${first.Message} (${first.Key})`,
+        );
+      }
+      deleted += stale.length;
+    }
+    ContinuationToken = res.NextContinuationToken;
+  } while (ContinuationToken);
+  return deleted;
+}

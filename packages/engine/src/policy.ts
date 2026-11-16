@@ -5,6 +5,7 @@ import {
   names,
   type PlatformRuntimeConfig,
   platformNames,
+  publicStores,
   type ResolvedManifest,
   telemetryKeys,
 } from '@ericminassian/platform-core';
@@ -115,20 +116,21 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
   });
 
   if (manifest.storage.length > 0) {
-    const prefix = names.storagePrefix(app, stage);
+    const prefixes = [names.storagePrefix(app, stage)];
+    if (publicStores(manifest).length > 0) prefixes.push(names.publicStoragePrefix(app, stage));
     statements.push(
       {
         Sid: 'StorageObjects',
         Effect: 'Allow',
         Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject'],
-        Resource: `arn:aws:s3:::${input.platform.storageBucket}/${prefix}*`,
+        Resource: prefixes.map((prefix) => `arn:aws:s3:::${input.platform.storageBucket}/${prefix}*`),
       },
       {
         Sid: 'StorageList',
         Effect: 'Allow',
         Action: 's3:ListBucket',
         Resource: `arn:aws:s3:::${input.platform.storageBucket}`,
-        Condition: { StringLike: { 's3:prefix': [`${prefix}*`] } },
+        Condition: { StringLike: { 's3:prefix': prefixes.map((prefix) => `${prefix}*`) } },
       },
     );
   }

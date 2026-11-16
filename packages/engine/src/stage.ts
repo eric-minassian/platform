@@ -20,6 +20,7 @@ import {
   type PlatformRuntimeConfig,
   PROD_STAGE,
   platformNames,
+  publicStores,
   publicUrl,
   type ResolvedManifest,
   type RouteRecord,
@@ -50,7 +51,13 @@ import {
   removePermission,
 } from './drivers/lambda.ts';
 import { deleteLogGroup, ensureLogGroup, listLogGroups } from './drivers/logs.ts';
-import { deletePrefix, hasObjects, listChildPrefixes, publishStaticZip } from './drivers/s3.ts';
+import {
+  deleteObjectsOlderThan,
+  deletePrefix,
+  hasObjects,
+  listChildPrefixes,
+  publishStaticZip,
+} from './drivers/s3.ts';
 import {
   deleteSchedule,
   deleteScheduleGroup,
@@ -81,6 +88,7 @@ import type {
   DeployStageInput,
   DeployStageResult,
   DestroyStageInput,
+  ExpireStorageInput,
   ResourceRef,
   RollbackStageInput,
 } from './index.ts';
@@ -130,6 +138,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   const hasWorker = Boolean(m.worker);
   const resources: ResourceRef[] = [];
   const workerName = names.workerFunction(app, stage);
+  const servedStores = publicStores(m);
 
   if (hasWorker && !input.artifacts.worker)
     throw new Error('manifest declares a worker but no worker artifact was provided');
@@ -145,6 +154,15 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     );
 
   ctx.log('info', `deploying ${app}/${stage} (${deploymentId})`);
+
+  // The route the edge serves now. The new revision goes on the endpoint it doesn't use, GC keeps
+  // its static files (edges keep serving it until they pick up the new route), and its public
+  // stores are the ones whose files live under the public prefix.
+  const liveRoute =
+    webMode === 'function' && platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
+
+  // 0. Checked before anything changes.
+  await assertStoreVisibility(ctx, { app, stage, manifest: m, platform, liveRoute });
 
   // 1. Log groups (retention set before anything writes to them). These are all of them: the stage
   // role can't create log groups (see stageRolePolicy).
@@ -307,6 +325,9 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
             bucket: platform.storageBucket,
             prefix: names.storagePrefix(app, stage),
             stores: m.storage,
+            ...(servedStores.length
+              ? { public: servedStores, publicPrefix: names.publicStoragePrefix(app, stage) }
+              : {}),
           },
         }
       : {}),
@@ -363,11 +384,6 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await removeWorker(ctx, app, stage);
   }
 
-  // The route the edge serves now. The new revision goes on the endpoint it doesn't use, and GC keeps
-  // its static files: edges keep serving it until they pick up the new route.
-  const liveRoute =
-    webMode === 'function' && platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
-
   // 10. Static files (new prefix per deployment; the old one keeps serving until the route flips).
   let staticPrefix: string | undefined;
   if (input.artifacts.static) {
@@ -417,9 +433,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     await deleteWebFunction(ctx, names.webFunction(app, stage));
   }
 
-  // 12. Route flip — the only step that changes what users see.
+  // 12. Route flip — the only step that changes what users see. A stage with public stores is
+  // routed even without web, so its files have a host.
   let route: RouteRecord | undefined;
-  if (webMode === 'function' && (webFunction || staticPrefix)) {
+  if (webMode === 'function' && (webFunction || staticPrefix || servedStores.length)) {
     route = {
       v: 1,
       app,
@@ -437,6 +454,7 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
             },
           }
         : {}),
+      ...(servedStores.length ? { p: servedStores } : {}),
     };
     if (platform.kvsArn) {
       await putRoute(ctx, platform.kvsArn, host, route);
@@ -444,6 +462,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     } else {
       ctx.log('warn', 'platform has no route store; skipping route flip', `route ${host}`);
     }
+  } else if (liveRoute && platform.kvsArn) {
+    // Nothing left to serve (no server, files or public stores): the host stops answering.
+    await deleteRoute(ctx, platform.kvsArn, host);
+    ctx.log('info', 'nothing to serve; removed the route', `route ${host}`);
   }
 
   // 13. Garbage-collect old static deployments.
@@ -538,6 +560,62 @@ export async function reconcileStageEmail(
 async function deleteStageEmail(ctx: EngineContext, name: string): Promise<void> {
   await deleteTenant(ctx, name);
   await deleteConfigurationSet(ctx, name);
+}
+
+/**
+ * A public store's files live under the public prefix and a private one's
+ * don't (see core `storage.ts`), so a store can't switch once it has files:
+ * the files would stay where the other kind is read, and moving them while
+ * the live deployment still writes there could lose some. Whether a store is
+ * public now is what the live route serves; without one, nothing is.
+ */
+async function assertStoreVisibility(
+  ctx: EngineContext,
+  p: {
+    app: string;
+    stage: string;
+    manifest: ResolvedManifest;
+    platform: PlatformRuntimeConfig;
+    liveRoute: RouteRecord | undefined;
+  },
+): Promise<void> {
+  const served = new Set(p.liveRoute?.p ?? []);
+  const wanted = new Set(publicStores(p.manifest));
+  for (const store of p.manifest.storage) {
+    const wasPublic = served.has(store);
+    if (wasPublic === wanted.has(store)) continue;
+    const prefix = wasPublic
+      ? names.publicStoragePrefix(p.app, p.stage, store)
+      : names.storagePrefix(p.app, p.stage, store);
+    if (!(await hasObjects(ctx, p.platform.storageBucket, prefix))) continue;
+    const was = wasPublic ? 'public' : 'private';
+    const now = wasPublic ? 'private' : 'public';
+    throw new Error(
+      `store "${store}" has files from when it was ${was}, and a store with files can't become ${now}: ` +
+        `declare a new store in plat.config.ts for the ${now} files`,
+    );
+  }
+}
+
+/** Delete files not written for their store's `expireAfterDays`; answers how many, by store. */
+export async function expireStorage(
+  ctx: EngineContext,
+  input: ExpireStorageInput,
+): Promise<Record<string, number>> {
+  const { app, stage, platform, manifest: m } = input;
+  const now = input.now ?? new Date();
+  const deleted: Record<string, number> = {};
+  for (const store of m.storage) {
+    const options = m.storageOptions[store];
+    if (!options?.expireAfterDays) continue;
+    const prefix = options.public
+      ? names.publicStoragePrefix(app, stage, store)
+      : names.storagePrefix(app, stage, store);
+    const cutoff = new Date(now.getTime() - options.expireAfterDays * 86_400_000);
+    deleted[store] = await deleteObjectsOlderThan(ctx, platform.storageBucket, prefix, cutoff);
+    if (deleted[store]) ctx.log('info', `deleted ${deleted[store]} expired files`, `store ${prefix}`);
+  }
+  return deleted;
 }
 
 async function reconcileWorkerTriggers(
@@ -727,6 +805,7 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   if (!input.keepData) {
     await deleteTable(ctx, names.table(app, stage));
     await deletePrefix(ctx, platform.storageBucket, names.storagePrefix(app, stage));
+    await deletePrefix(ctx, platform.storageBucket, names.publicStoragePrefix(app, stage));
     await deleteParametersByPath(ctx, names.secretsPath(app, stage));
   }
   ctx.log('info', `destroyed ${app}/${stage}`);
