@@ -46,6 +46,7 @@ import {
   diurnal,
   findApp,
   INCIDENT,
+  inIncident,
   jobBucket,
   noise,
   pct,
@@ -487,7 +488,7 @@ const DeploymentsDemo = HttpApiBuilder.group(PlatformApi, 'deployments', (h) =>
             services: Object.fromEntries(
               app.services.map((s) => [
                 s,
-                { entry: `src/${s}.ts`, cpu: 256, memoryMb: 512, spot: true, previewMinutes: 30 },
+                { entry: `src/${s}.ts`, cpu: 0.25, memoryMb: 512, spot: true, previewMinutes: 30 },
               ]),
             ),
           } as never,
@@ -796,7 +797,7 @@ const ObserveDemo = HttpApiBuilder.group(PlatformApi, 'observe', (h) =>
               );
               return {
                 name: s,
-                cpu: 256,
+                cpu: 0.25,
                 memoryMb: 512,
                 spot: true,
                 state: 'running' as const,
@@ -1374,15 +1375,28 @@ const AdminDemo = HttpApiBuilder.group(PlatformApi, 'admin', (h) =>
         const res = storedRes(w);
         const step = { '1m': MIN, '1h': HOUR, '1d': DAY }[res];
         const points: Array<{ ts: string; blocked: number; allowed: number }> = [];
+        // Every app's traffic passes the edge; the floor was on for the incident's flood.
+        const peak = APPS.reduce((n, a) => n + a.peak, 0);
         for (let t = Math.floor(w.from / step) * step; t < w.to; t += step)
-          points.push({ ts: iso(t), blocked: 0, allowed: 0 });
+          points.push({
+            ts: iso(t),
+            blocked: inIncident(t) ? Math.round(9 * (step / MIN) * (0.5 + noise(t, 91))) : 0,
+            allowed: Math.round(peak * (step / MIN) * diurnal(t) * (0.8 + 0.4 * noise(t, 92))),
+          });
         return Effect.succeed({
           enabled: true,
-          state: { on: false },
+          state: {
+            on: false,
+            since: iso(INCIDENT.to),
+            why: 'requests across the edge fell below 3,000 a minute',
+          },
           limit: 600,
           threshold: 3000,
           res,
-          totals: { blocked: 0, allowed: 0 },
+          totals: {
+            blocked: points.reduce((n, p) => n + p.blocked, 0),
+            allowed: points.reduce((n, p) => n + p.allowed, 0),
+          },
           points,
           samples: [],
         });
