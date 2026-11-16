@@ -23,6 +23,8 @@ export const SERIES_COLORS = {
   p95: 'var(--accent)',
   p99: 'var(--bad)',
   value: 'var(--accent)',
+  cpu: 'var(--info)',
+  memory: 'var(--accent)',
 } as const;
 
 export interface Series {

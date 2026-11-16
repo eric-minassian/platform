@@ -8,6 +8,7 @@ import {
   type ArtifactFile,
   type DeploymentEventEntry,
   ManifestError,
+  names,
   type PlatformRuntimeConfig,
   parseManifest,
   type RealtimeEdgeEntry,
@@ -16,13 +17,18 @@ import {
   type RouteRecord,
 } from '@ericminassian/platform-core';
 import {
+  type ControlServiceInput,
   createEngine,
+  type DeployedService,
   type DeployStageInput,
   type DeployStageResult,
   type DestroyStageInput,
+  type Engine,
   type ExpireStorageInput,
   type EngineLogEntry,
   type RollbackStageInput,
+  type ServiceRuntimeState,
+  type StageServicesInput,
 } from '@ericminassian/platform-engine';
 import {
   Cause,
@@ -41,7 +47,7 @@ import {
 } from 'effect';
 import { HttpClient } from 'effect/http';
 import { type ArtifactRef, Artifacts } from './artifacts.ts';
-import { logRetentionDays, Settings } from './config.ts';
+import { logRetentionDays, Settings, servicesLimitIssue } from './config.ts';
 import { EDGE_TIMEOUT_SECONDS, waitForEdge } from './edge.ts';
 import { type StageItem, Store } from './store.ts';
 
@@ -84,11 +90,29 @@ export class StageEngine extends Context.Service<
     ): Effect.Effect<Option.Option<RealtimeEdgeEntry>, DeployFailed>;
     /** Deletes files their store's `expireAfterDays` no longer keeps; answers how many, by store. */
     expireStorage(input: ExpireStorageInput): Effect.Effect<Record<string, number>, DeployFailed>;
+    /** The stage's long-running services as ECS runs them now. */
+    describeServices(
+      input: StageServicesInput,
+    ): Effect.Effect<ReadonlyArray<ServiceRuntimeState>, DeployFailed>;
+    /** Starts, stops or restarts one of the stage's services. */
+    controlService(
+      input: ControlServiceInput,
+    ): Effect.Effect<{ readonly desired: number; readonly stopsAt?: string | undefined }, DeployFailed>;
   }
 >()('@ericminassian/platform-control-plane/StageEngine') {
-  static readonly layer: Layer.Layer<StageEngine> = Layer.succeed(
-    StageEngine,
-    StageEngine.of({
+  static readonly layer: Layer.Layer<StageEngine> = Layer.sync(StageEngine, () => {
+    // Service reads and controls log nothing, so they share one engine per region and
+    // the console's polling reuses its clients' connections.
+    const engines = new Map<string, Engine>();
+    const shared = (region: string): Engine => {
+      let engine = engines.get(region);
+      if (!engine) {
+        engine = createEngine({ region });
+        engines.set(region, engine);
+      }
+      return engine;
+    };
+    return StageEngine.of({
       deploy: (input, log) =>
         Effect.tryPromise({
           try: () => createEngine({ region: input.platform.region, log }).deployStage(input),
@@ -114,11 +138,38 @@ export class StageEngine extends Context.Service<
           try: () => createEngine({ region: input.platform.region }).expireStorage(input),
           catch: engineFailed,
         }),
-    }),
-  );
+      describeServices: (input) =>
+        Effect.tryPromise({
+          try: () => shared(input.platform.region).describeServices(input),
+          catch: engineFailed,
+        }),
+      controlService: (input) =>
+        Effect.tryPromise({
+          try: () => shared(input.platform.region).controlService(input),
+          catch: engineFailed,
+        }),
+    });
+  });
 }
 
 type Push = (entry: Omit<DeploymentEventEntry, 'ts'>) => void;
+
+/** The event a deployment records for each service it rolled out. */
+export function deployedServiceEvent(
+  app: string,
+  stage: string,
+  service: DeployedService,
+): Omit<DeploymentEventEntry, 'ts'> {
+  const msg =
+    service.desired === 0
+      ? `service ${service.name} is on this deployment, stopped`
+      : `service ${service.name} runs this deployment${service.stopsAt ? `, stopping at ${service.stopsAt}` : ''}`;
+  return {
+    level: 'info',
+    msg,
+    resource: `ecs-service ${names.service(app, stage, service.name)}`,
+  };
+}
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -200,6 +251,7 @@ export class Deployer extends Context.Service<
           ['server', 'server.zip'],
           ['worker', 'worker.zip'],
           ['static', 'static.zip'],
+          ['services', 'services.zip'],
         ];
         const found = yield* Effect.forEach(
           slots,
@@ -245,6 +297,13 @@ export class Deployer extends Context.Service<
           return yield* new DeployFailed({
             message: 'manifest needs a worker but worker.zip was not uploaded',
           });
+        if (Object.keys(manifest.services).length > 0 && !located.services)
+          return yield* new DeployFailed({
+            message: 'manifest declares services but services.zip was not uploaded',
+          });
+        // The API checked the manifest it was sent; manifest.json is uploaded separately.
+        const overLimit = servicesLimitIssue(settings.platform, manifest);
+        if (overLimit) return yield* new DeployFailed({ message: overLimit });
 
         const result = yield* engine.deploy(
           {
@@ -254,10 +313,12 @@ export class Deployer extends Context.Service<
             platform,
             artifacts: located,
             webMode: 'function',
+            servicesMode: 'ecs',
             logRetentionDays: logRetentionDays(settings.platform, stage),
           },
           push,
         );
+        for (const service of result.services ?? []) push(deployedServiceEvent(app, stage, service));
 
         const previous = Option.getOrUndefined(before);
         yield* store.updateStage(app, stage, {
@@ -405,6 +466,7 @@ export class Deployer extends Context.Service<
             platform,
             route: target.route,
             ...(target.revisionId ? { revisionId: target.revisionId } : {}),
+            services: Object.keys(target.manifest?.services ?? {}),
           })
           .pipe(Effect.catchTag('DeployFailed', (e) => refuse(e.message)));
         yield* store.updateStage(app, stage, {

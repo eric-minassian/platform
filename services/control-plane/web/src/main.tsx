@@ -32,6 +32,7 @@ const router = createBrowserRouter([
           { path: 'errors', lazy: page(() => import('./pages/app/Errors.tsx'), 'ErrorsTab') },
           { path: 'jobs', lazy: page(() => import('./pages/app/Jobs.tsx'), 'JobsTab') },
           { path: 'email', lazy: page(() => import('./pages/app/Email.tsx'), 'EmailTab') },
+          { path: 'services', lazy: page(() => import('./pages/app/Services.tsx'), 'ServicesTab') },
           { path: 'data', lazy: page(() => import('./pages/app/Data.tsx'), 'DataTab') },
           { path: 'deployments', lazy: page(() => import('./pages/app/Deployments.tsx'), 'DeploymentsTab') },
           { path: 'secrets', lazy: page(() => import('./pages/app/Secrets.tsx'), 'SecretsTab') },

@@ -1,15 +1,17 @@
 /**
  * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
- * custom metrics, rate limits, errors, uptime, cost, logs, traces.
+ * custom metrics, rate limits, services, errors, uptime, cost, logs, traces.
  */
-import type { JobStats } from '@ericminassian/platform-core';
-import { NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
+import type { AlwaysOnCost, JobStats } from '@ericminassian/platform-core';
+import { BadRequest, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Cause, Clock, Effect, Option, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { AppEmail } from '../email.ts';
 import { AppQueues } from '../jobs/queues.ts';
 import { AppRealtime } from '../jobs/realtime.ts';
-import { Logs } from '../logs.ts';
+import { AppServices, alwaysOnCosts } from '../jobs/services.ts';
+import { Logs, logGroupOf } from '../logs.ts';
+import { Store } from '../store.ts';
 import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
 import { Access, stageParam } from './access.ts';
 
@@ -42,12 +44,34 @@ export const ObserveLive = HttpApiBuilder.group(
     const logs = yield* Logs;
     const queues = yield* AppQueues;
     const realtime = yield* AppRealtime;
+    const services = yield* AppServices;
+    const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
 
     /** The app and validated stage an endpoint reads. */
     const scope = Effect.fnUntraced(function* (app: string, stage: string | undefined) {
       const found = yield* access.memberApp(app);
       return { app: found.app.name, stage: yield* stageParam(stage) };
+    });
+
+    /**
+     * The services of the app's stages that run them all the time: not
+     * previews (they stop theirs minutes after a deploy), nor stages on their
+     * way out.
+     */
+    const alwaysOn = Effect.fnUntraced(function* (app: string) {
+      const stages = (yield* store.listStages(app)).filter(
+        (s) => !s.preview && s.status !== 'destroyed' && s.status !== 'destroying' && s.currentDeployment,
+      );
+      const costs = yield* Effect.forEach(
+        stages,
+        Effect.fnUntraced(function* (s) {
+          const live = Option.getOrUndefined(yield* store.getDeployment(s.currentDeployment ?? ''));
+          return alwaysOnCosts(s.stage, live?.manifest?.services ?? {});
+        }),
+        { concurrency: 'unbounded' },
+      );
+      return costs.flat() satisfies AlwaysOnCost[];
     });
 
     return handlers.handleAll({
@@ -91,6 +115,13 @@ export const ObserveLive = HttpApiBuilder.group(
             stage,
             Option.match(manifest, { onNone: () => [], onSome: (m) => Object.keys(m.queues) }),
           );
+        }),
+
+      services: ({ params, query }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
+          return yield* services.stats(app, stage, manifest?.services ?? {}, yield* rangeOf(query));
         }),
 
       realtime: ({ params, query }) =>
@@ -143,7 +174,11 @@ export const ObserveLive = HttpApiBuilder.group(
       cost: ({ params, query }) =>
         Effect.gen(function* () {
           const { app } = yield* access.memberApp(params.app);
-          return yield* telemetry.cost(app.name, Math.max(1, Math.min(query.days || 35, 400)));
+          const [cost, running] = yield* Effect.all(
+            [telemetry.cost(app.name, Math.max(1, Math.min(query.days || 35, 400))), alwaysOn(app.name)],
+            { concurrency: 'unbounded' },
+          );
+          return { ...cost, alwaysOn: running };
         }),
 
       logs: ({ params, query }) =>
@@ -165,7 +200,10 @@ export const ObserveLive = HttpApiBuilder.group(
       tail: ({ params, query }) =>
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
-          return logs.tail({ app, stage, q: query.q }).pipe(
+          // Refused before the event stream opens, so a bad name is a 400 rather than an `error` event.
+          if (query.stream && !logGroupOf(app, stage, query.stream))
+            return yield* BadRequest.of('stream must be web, worker or service:<name>');
+          return logs.tail({ app, stage, q: query.q, stream: query.stream }).pipe(
             Stream.map((line) => ({ event: 'line' as const, data: line })),
             // The tail ends with the reason it stopped; a client that left needs none.
             Stream.catchCause((cause) =>

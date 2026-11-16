@@ -6,11 +6,13 @@ import {
   type ResolvedManifest,
 } from '@ericminassian/platform-core';
 import { Conflict } from '@ericminassian/platform-core/platform-api';
+import type { ControlServiceInput } from '@ericminassian/platform-engine';
 import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import { Effect, Ref, Stream } from 'effect';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach } from 'vitest';
 import { AwsError } from '../src/aws.ts';
+import { DeployFailed } from '../src/deploy.ts';
 import { WorkerJobFailed } from '../src/jobs/call.ts';
 import type { DeploymentItem, StageItem } from '../src/store.ts';
 import { api, ciToken, githubApp, memoryStore, type TestServices, testServices } from './support.ts';
@@ -72,8 +74,25 @@ const liveDeployment = (manifest: Partial<ResolvedManifest> = {}): DeploymentIte
     storageOptions: {},
     secrets: [],
     env: {},
+    services: {},
     ...manifest,
   },
+});
+
+/** A succeeded deployment of shop whose plat.config.ts is `config`. */
+const configuredDeployment = (
+  id: string,
+  config: Record<string, unknown>,
+  stage = 'prod',
+): DeploymentItem => ({
+  id,
+  app: 'shop',
+  stage,
+  status: 'succeeded',
+  actor: 'bob',
+  events: [],
+  createdAt: '2026-11-01T00:00:00.000Z',
+  manifest: parseManifest({ name: 'shop', ...config }),
 });
 
 const json = (res: Response) => Effect.promise(() => res.json());
@@ -301,7 +320,7 @@ describe('authentication', () => {
           { github: 'ada', role: 'admin' },
           { github: 'bob', role: 'member' },
         ],
-        limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000 },
+        limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000, servicesPerApp: 2 },
         apps: 1,
         stages: 1,
         previews: 0,
@@ -543,6 +562,33 @@ describe('stages and deployments', () => {
         ((yield* json(invalid)) as { error: { code: string } }).error.code,
         'invalid_manifest',
       );
+
+      // The test platform allows two services per app.
+      const services = { a: { entry: 'a.ts' }, b: { entry: 'b.ts' }, c: { entry: 'c.ts' } };
+      const tooMany = yield* request('/v1/apps/shop/deployments', {
+        method: 'POST',
+        headers: bob,
+        json: { stage: 'prod', manifest: { name: 'shop', services }, files: ['services.zip'] },
+      });
+      assert.strictEqual(tooMany.status, 422);
+      assert.deepStrictEqual(yield* json(tooMany), {
+        error: {
+          code: 'invalid_manifest',
+          message: 'plat.config.ts declares 3 services (a, b, c); an app may have 2',
+        },
+      });
+      const withServices = yield* request('/v1/apps/shop/deployments', {
+        method: 'POST',
+        headers: bob,
+        json: {
+          stage: 'pr-3',
+          manifest: { name: 'shop', services: { a: services.a } },
+          files: ['services.zip'],
+        },
+      });
+      assert.strictEqual(withServices.status, 201);
+      const { uploads: serviceUploads } = (yield* json(withServices)) as { uploads: Record<string, unknown> };
+      assert.deepStrictEqual(Object.keys(serviceUploads).toSorted(), ['manifest.json', 'services.zip']);
 
       const created = yield* request('/v1/apps/shop/deployments', {
         method: 'POST',
@@ -803,6 +849,7 @@ describe('observability', () => {
                 secrets: [],
                 env: {},
                 realtime: { subscribe: 'public', channels: ['board'] },
+                services: {},
               },
             },
           ],
@@ -971,6 +1018,123 @@ describe('observability', () => {
     }),
   );
 
+  it.effect('shows the live deployment’s services as ECS runs them', () =>
+    Effect.gen(function* () {
+      const described: string[] = [];
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage()],
+          deployments: [
+            configuredDeployment('d1', {
+              services: { ais: { entry: 'src/ais.ts' }, idle: { entry: 'src/idle.ts' } },
+            }),
+          ],
+        }),
+        engine: {
+          describeServices: (input) =>
+            Effect.sync(() => {
+              described.push(`${input.app}/${input.stage}`);
+              return [
+                {
+                  name: 'ais',
+                  desired: 1,
+                  running: 1,
+                  pending: 0,
+                  rollout: 'completed' as const,
+                  deploymentId: 'd1',
+                  startedAt: '2026-11-15T09:00:00.000Z',
+                  lastStop: {
+                    at: '2026-11-15T08:59:00.000Z',
+                    reason: 'Scaling activity initiated by (deployment ecs-svc/1)',
+                    exitCode: 0,
+                  },
+                  events: [
+                    {
+                      at: '2026-11-15T09:01:00.000Z',
+                      message: '(service shop--prod--ais) has reached a steady state.',
+                    },
+                  ],
+                },
+              ];
+            }),
+        },
+        telemetry: {
+          serviceRuns: () => Effect.succeed(new Map([['ais', { starts: 2, failedRuns: 1 }]])),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/services?range=1h', { headers: yield* signIn('bob') });
+      assert.strictEqual(res.status, 200);
+      const body = (yield* json(res)) as {
+        res: string;
+        services: Array<Record<string, unknown> & { points: unknown[] }>;
+      };
+      assert.deepStrictEqual(described, ['shop/prod']);
+      assert.strictEqual(body.res, '1m');
+      const [ais, idle] = body.services;
+      assert.deepInclude(ais, {
+        name: 'ais',
+        state: 'running',
+        desired: 1,
+        running: 1,
+        deployment: 'd1',
+        starts: 2,
+        failedRuns: 1,
+        cpu: 0.25,
+        memoryMb: 512,
+        spot: true,
+        monthly: { computeUsd: 2.21, publicIpv4Usd: 3.65, totalUsd: 5.86 },
+      });
+      // The test platform has no container compute to read metrics for.
+      assert.strictEqual(ais?.points.length, 61);
+      assert.deepInclude(idle, { name: 'idle', state: 'stopped', desired: 0, running: 0, starts: 0 });
+
+      // A stage with nothing live has no services to show, and ECS isn't asked.
+      const none = yield* request('/v1/apps/shop/services?stage=pr-9', { headers: yield* signIn('bob') });
+      assert.deepStrictEqual(((yield* json(none)) as { services: unknown[] }).services, []);
+      assert.strictEqual(described.length, 1);
+    }),
+  );
+
+  it.effect('prices the services that run all the time next to the cost history', () =>
+    Effect.gen(function* () {
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [
+            prodStage(),
+            prodStage({ stage: 'pr-4', preview: true, currentDeployment: 'd2' }),
+            prodStage({ stage: 'staging', status: 'destroyed', currentDeployment: 'd3' }),
+          ],
+          deployments: [
+            configuredDeployment('d1', { services: { ais: { entry: 'src/ais.ts', spot: false } } }),
+            configuredDeployment('d2', { services: { ais: { entry: 'src/ais.ts' } } }, 'pr-4'),
+            configuredDeployment('d3', { services: { ais: { entry: 'src/ais.ts' } } }, 'staging'),
+          ],
+        }),
+        telemetry: {
+          cost: (app) => Effect.succeed({ app, currency: 'USD' as const, days: [], monthToDateUsd: 1.5 }),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/cost', { headers: yield* signIn('bob') });
+      assert.deepStrictEqual(yield* json(res), {
+        app: 'shop',
+        currency: 'USD',
+        days: [],
+        monthToDateUsd: 1.5,
+        alwaysOn: [
+          {
+            stage: 'prod',
+            kind: 'service',
+            name: 'ais',
+            detail: '0.25 vCPU · 512 MB · on-demand',
+            monthly: { computeUsd: 7.21, publicIpv4Usd: 3.65, totalUsd: 10.86 },
+          },
+        ],
+      });
+    }),
+  );
+
   it.effect('lists and triages error groups', () =>
     Effect.gen(function* () {
       const group = {
@@ -1046,6 +1210,7 @@ describe('manage', () => {
                 storageOptions: {},
                 secrets: ['STRIPE_KEY', 'MAIL_KEY'],
                 env: {},
+                services: {},
               },
             },
           ],
@@ -1239,6 +1404,67 @@ describe('manage', () => {
         yield* json(yield* request('/v1/apps/shop/storage/url?store=snapshots&key=a.json', { headers: bob })),
         { url: 'https://s3.example/public/a.json' },
       );
+    }),
+  );
+  it.effect('starts, stops and restarts services the live deployment declares', () =>
+    Effect.gen(function* () {
+      const calls: Array<Pick<ControlServiceInput, 'stage' | 'name' | 'action' | 'minutes'>> = [];
+      const ais = { services: { ais: { entry: 'src/ais.ts', previewMinutes: 0 } } };
+      const { request, signIn } = yield* setup({
+        store: memoryStore({
+          apps: [shop],
+          stages: [prodStage(), prodStage({ stage: 'pr-4', preview: true, currentDeployment: 'd2' })],
+          deployments: [configuredDeployment('d1', ais), configuredDeployment('d2', ais, 'pr-4')],
+        }),
+        engine: {
+          controlService: ({ stage, name, action, minutes }) =>
+            Effect.suspend(() => {
+              calls.push({ stage, name, action, minutes });
+              if (stage === 'prod' && action === 'restart')
+                return Effect.fail(new DeployFailed({ message: 'service shop--prod--ais is draining' }));
+              return Effect.succeed(
+                action === 'stop'
+                  ? { desired: 0 }
+                  : { desired: 1, ...(minutes ? { stopsAt: '2026-11-16T12:30:00.000Z' } : {}) },
+              );
+            }),
+        },
+      });
+      const bob = yield* signIn('bob');
+      const post = (path: string, body?: unknown) =>
+        request(path, { method: 'POST', headers: bob, ...(body ? { json: body } : {}) });
+
+      const start = yield* post('/v1/apps/shop/services/ais/start', {});
+      assert.strictEqual(start.status, 202);
+      assert.deepStrictEqual(yield* json(start), { name: 'ais', desired: 1 });
+      const timed = yield* post('/v1/apps/shop/services/ais/start', { minutes: 90 });
+      assert.deepStrictEqual(yield* json(timed), {
+        name: 'ais',
+        desired: 1,
+        stopsAt: '2026-11-16T12:30:00.000Z',
+      });
+      // Previews always stop again: after previewMinutes, or 30 when that is 0.
+      yield* post('/v1/apps/shop/services/ais/start?stage=pr-4', {});
+      const stop = yield* post('/v1/apps/shop/services/ais/stop?stage=pr-4');
+      assert.deepStrictEqual(yield* json(stop), { name: 'ais', desired: 0 });
+      assert.deepStrictEqual(calls, [
+        { stage: 'prod', name: 'ais', action: 'start', minutes: undefined },
+        { stage: 'prod', name: 'ais', action: 'start', minutes: 90 },
+        { stage: 'pr-4', name: 'ais', action: 'start', minutes: 30 },
+        { stage: 'pr-4', name: 'ais', action: 'stop', minutes: undefined },
+      ]);
+
+      const refused = yield* post('/v1/apps/shop/services/ais/restart');
+      assert.strictEqual(refused.status, 409);
+      assert.deepStrictEqual(yield* json(refused), {
+        error: { code: 'service_action_failed', message: 'service shop--prod--ais is draining' },
+      });
+      const undeclared = yield* post('/v1/apps/shop/services/feeds/restart');
+      assert.strictEqual(undeclared.status, 404);
+      assert.deepStrictEqual(yield* json(undeclared), {
+        error: { code: 'not_found', message: 'service feeds on prod not found' },
+      });
+      assert.strictEqual(calls.length, 5);
     }),
   );
 });

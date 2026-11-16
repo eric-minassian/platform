@@ -1,6 +1,11 @@
 import { assert, describe, it } from '@effect/vitest';
-import type { AppRecord, DeploymentRecord } from '@ericminassian/platform-core';
-import type { DeployStageResult } from '@ericminassian/platform-engine';
+import {
+  type AppRecord,
+  type ArtifactFile,
+  type DeploymentRecord,
+  parseManifest,
+} from '@ericminassian/platform-core';
+import type { DeployStageInput, DeployStageResult, RollbackStageInput } from '@ericminassian/platform-engine';
 import { Effect, Exit, Layer, Option } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 import { Artifacts } from '../src/artifacts.ts';
@@ -57,7 +62,10 @@ const deployer = (options: {
   readonly deployments: ReadonlyArray<DeploymentItem>;
   readonly stages?: ReadonlyArray<StageItem>;
   readonly manifest?: unknown;
+  /** Artifacts that were uploaded (default: server.zip). */
+  readonly files?: ReadonlyArray<ArtifactFile>;
   readonly deploy?: StageEngine['Service']['deploy'];
+  readonly rollback?: (input: RollbackStageInput) => void;
   readonly served?: string;
   /** Wraps the in-memory store, e.g. to make some writes fail. */
   readonly store?: (store: Store['Service']) => Store['Service'];
@@ -73,7 +81,7 @@ const deployer = (options: {
           ),
         locate: (ref, file) =>
           Effect.succeed(
-            file === 'server.zip'
+            (options.files ?? ['server.zip']).includes(file)
               ? Option.some({ bucket: 'artifacts', key: `${ref.deployment}/${file}` })
               : Option.none(),
           ),
@@ -87,7 +95,11 @@ const deployer = (options: {
               return deployed;
             })),
         // The engine answers the route it wrote, which can differ from the target's recorded one.
-        rollback: (input) => Effect.succeed({ ...input.route, o: 'fn-rolled.example' }),
+        rollback: (input) =>
+          Effect.sync(() => {
+            options.rollback?.(input);
+            return { ...input.route, o: 'fn-rolled.example' };
+          }),
       }),
       FetchHttpClient.layer.pipe(
         Layer.provide(
@@ -213,6 +225,82 @@ describe('Deployer.run', () => {
     ),
   );
 
+  describe('services', () => {
+    const withServices = (services: Record<string, unknown>) => ({
+      name: 'shop',
+      web: { server: 'src/server.ts' },
+      services,
+    });
+
+    it.effect('rolls them out on ECS from services.zip and records each one', () => {
+      const inputs: DeployStageInput[] = [];
+      return Effect.gen(function* () {
+        yield* Deployer.use((d) => d.run('d1'));
+        const { dep, messages } = yield* read;
+        assert.strictEqual(dep.status, 'succeeded');
+        assert.deepStrictEqual(inputs[0]?.artifacts.services, {
+          bucket: 'artifacts',
+          key: 'd1/services.zip',
+        });
+        assert.strictEqual(inputs[0]?.servicesMode, 'ecs');
+        assert.deepStrictEqual(Object.keys(dep.manifest?.services ?? {}), ['ais', 'feeds']);
+        assert.includeMembers(messages, [
+          'service ais runs this deployment',
+          'service feeds is on this deployment, stopped',
+        ]);
+        assert.strictEqual(
+          dep.events.find((e) => e.msg.startsWith('service ais'))?.resource,
+          'ecs-service shop--prod--ais',
+        );
+      }).pipe(
+        Effect.provide(
+          deployer({
+            deployments: [deployment('d1')],
+            stages: [liveStage],
+            manifest: withServices({ ais: { entry: 'src/ais.ts' }, feeds: { entry: 'src/feeds.ts' } }),
+            files: ['server.zip', 'services.zip'],
+            deploy: (input) =>
+              Effect.sync(() => {
+                inputs.push(input);
+                return {
+                  ...deployed,
+                  services: [
+                    { name: 'ais', image: 'repo@sha256:a', taskDefinitionArn: 'td:1', desired: 1 },
+                    { name: 'feeds', image: 'repo@sha256:b', taskDefinitionArn: 'td:2', desired: 0 },
+                  ],
+                };
+              }),
+          }),
+        ),
+      );
+    });
+
+    it.effect('fails a deployment without services.zip, or with more services than allowed', () =>
+      Effect.gen(function* () {
+        const failed = (manifest: unknown, files: ReadonlyArray<ArtifactFile>) =>
+          Effect.gen(function* () {
+            yield* Deployer.use((d) => d.run('d1'));
+            return (yield* read).dep.error;
+          }).pipe(
+            Effect.provide(
+              deployer({ deployments: [deployment('d1')], stages: [liveStage], manifest, files }),
+            ),
+          );
+        assert.strictEqual(
+          yield* failed(withServices({ ais: { entry: 'src/ais.ts' } }), ['server.zip']),
+          'manifest declares services but services.zip was not uploaded',
+        );
+        assert.strictEqual(
+          yield* failed(withServices({ a: { entry: 'a.ts' }, b: { entry: 'b.ts' }, c: { entry: 'c.ts' } }), [
+            'server.zip',
+            'services.zip',
+          ]),
+          'plat.config.ts declares 3 services (a, b, c); an app may have 2',
+        );
+      }),
+    );
+  });
+
   it.effect('runs a deployment once, however often the job is retried', () =>
     Effect.gen(function* () {
       yield* Deployer.use((d) => d.run('d1'));
@@ -270,6 +358,26 @@ describe('Deployer.rollback', () => {
       ),
     ),
   );
+
+  it.effect('points services back at the target deployment’s build', () => {
+    const inputs: RollbackStageInput[] = [];
+    const target = deployment('d0', {
+      ...previous,
+      manifest: parseManifest({ name: 'shop', services: { ais: { entry: 'src/ais.ts' } } }),
+    });
+    return Effect.gen(function* () {
+      yield* Deployer.use((d) => d.rollback('shop', 'prod'));
+      assert.deepStrictEqual(inputs[0]?.services, ['ais']);
+    }).pipe(
+      Effect.provide(
+        deployer({
+          deployments: [target, deployment('d1', { status: 'succeeded', route: route('d1') })],
+          stages: [{ ...liveStage, status: 'active', currentDeployment: 'd1', previousDeployment: 'd0' }],
+          rollback: (input) => inputs.push(input),
+        }),
+      ),
+    );
+  });
 
   it.effect('refuses what it cannot roll back to', () =>
     Effect.gen(function* () {

@@ -1,23 +1,51 @@
 /**
  * Log search, live tail and traces over an app stage's CloudWatch log groups
- * (`/platform/apps/<app>/<stage>/{web,worker}`).
+ * (`/platform/apps/<app>/<stage>/{web,worker}`, and `services/<name>` for each
+ * long-running service).
  */
 import {
+  DescribeLogGroupsCommand,
   FilterLogEventsCommand,
   GetQueryResultsCommand,
   type LiveTailSessionLogEvent,
   StartLiveTailCommand,
   StartQueryCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
-import { type LogLine, type LogsResponse, names, type TelemetryEvent } from '@ericminassian/platform-core';
+import {
+  type LogLine,
+  type LogStream,
+  type LogsResponse,
+  names,
+  RESOURCE_KEY_PATTERN,
+  type TelemetryEvent,
+} from '@ericminassian/platform-core';
 import { BadRequest } from '@ericminassian/platform-core/platform-api';
-import { absurd, Clock, Context, Effect, Layer, Schedule, Stream } from 'effect';
+import { absurd, Clock, Context, Effect, Layer, Schedule, Schema, Stream } from 'effect';
 import { Aws, AwsError, toAwsError, tryAws } from './aws.ts';
 import { Settings } from './config.ts';
 import { parseLogMessage } from './telemetry/aggregate.ts';
 
-const STREAMS = ['web', 'worker'] as const;
-export type LogStream = (typeof STREAMS)[number];
+/** Every stage has these; services add `service:<name>`. */
+const STAGE_STREAMS = ['web', 'worker'] as const;
+const SERVICE_STREAM = 'service:';
+
+/** The log group a stream is read from; none for a name that isn't one of the stage's streams. */
+export function logGroupOf(app: string, stage: string, stream: LogStream): string | undefined {
+  if (stream === 'web' || stream === 'worker') return names.logGroup(app, stage, stream);
+  if (!stream.startsWith(SERVICE_STREAM)) return undefined;
+  const key = stream.slice(SERVICE_STREAM.length);
+  return RESOURCE_KEY_PATTERN.test(key) ? names.serviceLogGroup(app, stage, key) : undefined;
+}
+
+/** The stream a log group belongs to, from its name or ARN (Live Tail reports either). */
+export function streamOfLogGroup(group: string): LogStream {
+  const service = /\/services\/([^/:]+)(?::\*)?$/.exec(group);
+  if (service) return `${SERVICE_STREAM}${service[1]}`;
+  return /\/worker(?::\*)?$/.test(group) ? 'worker' : 'web';
+}
+
+/** Live Tail follows at most 10 log groups per session. */
+const LIVE_TAIL_MAX_GROUPS = 10;
 
 /**
  * The Lambda runtime writes its own JSON records (`platform.initReport`,
@@ -94,7 +122,9 @@ export function describe(e: TelemetryEvent): string {
     case 'limit':
       return `limit ${e.name} ${e.ok ? 'ok' : 'over'}`;
     case 'env':
-      return `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
+      return e.runtime === 'service'
+        ? `service ${e.name ?? ''} container ${e.event}${e.reason ? ` (${e.reason})` : ''}`
+        : `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
     default:
       return absurd(e);
   }
@@ -108,22 +138,20 @@ export function toFilterPattern(q: string | undefined): string | undefined {
   return `"${s.replace(/"/g, '\\"')}"`;
 }
 
-/** Which stream each page continues from (`next` is this, as base64url JSON). */
-interface Cursor {
-  web?: string;
-  worker?: string;
-}
+/** Each stream's token for the next page (`next` is this, as base64url JSON). */
+const Cursor = Schema.fromJsonString(Schema.Record(Schema.String, Schema.String));
+type Cursor = typeof Cursor.Type;
 
 /** Logs Insights query states that won't change any more. */
 const FINISHED = new Set(['Complete', 'Failed', 'Cancelled', 'Timeout']);
 
 const encodeCursor = (c: Cursor) => Buffer.from(JSON.stringify(c)).toString('base64url');
-const decodeCursor = (token: string) => JSON.parse(Buffer.from(token, 'base64url').toString()) as Cursor;
+const decodeCursor = Schema.decodeUnknownEffect(Cursor);
 
 export class Logs extends Context.Service<
   Logs,
   {
-    /** Newest first, across the web and worker log groups. */
+    /** Newest first, across the stage's log groups (or the one `stream` names). */
     search(options: {
       readonly app: string;
       readonly stage: string;
@@ -139,8 +167,10 @@ export class Logs extends Context.Service<
       readonly app: string;
       readonly stage: string;
       readonly q?: string | undefined;
-    }): Stream.Stream<LogLine, AwsError>;
-    /** Every telemetry event carrying `trace`, oldest first (Logs Insights over web + worker). */
+      /** Only this stream's log group. */
+      readonly stream?: LogStream | undefined;
+    }): Stream.Stream<LogLine, AwsError | BadRequest>;
+    /** Every telemetry event carrying `trace`, oldest first (Logs Insights over every stream). */
     trace(options: {
       readonly app: string;
       readonly stage: string;
@@ -156,6 +186,44 @@ export class Logs extends Context.Service<
       const aws = yield* Aws;
       const settings = yield* Settings;
 
+      /**
+       * Every stream of the stage with its log group: web, worker, and each
+       * service log group it has, including those of services a later deploy
+       * dropped (the engine removes service log groups only with the stage).
+       */
+      const stageStreams = Effect.fnUntraced(function* (app: string, stage: string) {
+        const prefix = names.serviceLogGroup(app, stage, '');
+        const streams: Array<{ stream: LogStream; group: string }> = STAGE_STREAMS.map((stream) => ({
+          stream,
+          group: names.logGroup(app, stage, stream),
+        }));
+        let nextToken: string | undefined;
+        do {
+          const res = yield* tryAws(() =>
+            aws.logs().send(new DescribeLogGroupsCommand({ logGroupNamePrefix: prefix, nextToken })),
+          );
+          for (const { logGroupName: group } of res.logGroups ?? []) {
+            const key = group?.slice(prefix.length) ?? '';
+            if (group && RESOURCE_KEY_PATTERN.test(key))
+              streams.push({ stream: `${SERVICE_STREAM}${key}`, group });
+          }
+          nextToken = res.nextToken;
+        } while (nextToken);
+        return streams;
+      });
+
+      /** Each named stream with its log group; a name that isn't a stream fails with `invalid`. */
+      const withGroups = (
+        app: string,
+        stage: string,
+        streams: ReadonlyArray<LogStream>,
+        invalid: () => BadRequest,
+      ) =>
+        Effect.forEach(streams, (stream) => {
+          const group = logGroupOf(app, stage, stream);
+          return group ? Effect.succeed({ stream, group }) : Effect.fail(invalid());
+        });
+
       const search = Effect.fn('Logs.search')(
         function* (options: {
           readonly app: string;
@@ -167,24 +235,36 @@ export class Logs extends Context.Service<
           readonly limit?: number | undefined;
           readonly nextToken?: string | undefined;
         }) {
+          const { app, stage } = options;
           const limit = Math.min(options.limit ?? 200, 1000);
           const nextToken = options.nextToken;
-          const cursor = nextToken
-            ? yield* Effect.try({
-                try: () => decodeCursor(nextToken),
-                catch: () => BadRequest.of('invalid next token'),
-              })
+          const invalidToken = () => BadRequest.of('invalid next token');
+          const cursor: Cursor = nextToken
+            ? yield* decodeCursor(Buffer.from(nextToken, 'base64url').toString()).pipe(
+                Effect.mapError(invalidToken),
+              )
             : {};
-          const streams = options.stream ? [options.stream] : STREAMS;
+          const targets = nextToken
+            ? // A continued search only reads the streams that had more.
+              yield* withGroups(
+                app,
+                stage,
+                Object.keys(cursor).filter((stream) => !options.stream || stream === options.stream),
+                invalidToken,
+              )
+            : options.stream
+              ? yield* withGroups(app, stage, [options.stream], () =>
+                  BadRequest.of('stream must be web, worker or service:<name>'),
+                )
+              : yield* stageStreams(app, stage);
           const pattern = toFilterPattern(options.q);
           const pages = yield* Effect.forEach(
-            // A continued search only reads the streams that had more.
-            streams.filter((stream) => !nextToken || cursor[stream]),
-            (stream) =>
+            targets,
+            ({ stream, group }) =>
               tryAws(() =>
                 aws.logs().send(
                   new FilterLogEventsCommand({
-                    logGroupName: names.logGroup(options.app, options.stage, stream),
+                    logGroupName: group,
                     startTime: options.from,
                     endTime: options.to,
                     limit,
@@ -193,7 +273,7 @@ export class Logs extends Context.Service<
                   }),
                 ),
               ).pipe(
-                // A stage that never logged on this stream has no log group yet.
+                // A stage that never logged on this stream has no log group (yet, or any more).
                 Effect.catchIf(AwsError.is('ResourceNotFoundException'), () =>
                   Effect.succeed({ events: [], nextToken: undefined }),
                 ),
@@ -201,7 +281,7 @@ export class Logs extends Context.Service<
               ),
             { concurrency: 'unbounded' },
           );
-          const next: Cursor = {};
+          const next: Record<LogStream, string> = {};
           const lines: LogLine[] = [];
           for (const { stream, res } of pages) {
             for (const e of res.events ?? [])
@@ -221,12 +301,17 @@ export class Logs extends Context.Service<
         readonly app: string;
         readonly stage: string;
         readonly q?: string | undefined;
+        readonly stream?: LogStream | undefined;
       }) =>
         Stream.unwrap(
           Effect.gen(function* () {
             const { accountId, region } = yield* settings.runtime;
-            const arn = (stream: LogStream) =>
-              `arn:aws:logs:${region}:${accountId}:log-group:${names.logGroup(options.app, options.stage, stream)}`;
+            const groups = options.stream
+              ? yield* withGroups(options.app, options.stage, [options.stream], () =>
+                  BadRequest.of('stream must be web, worker or service:<name>'),
+                )
+              : yield* stageStreams(options.app, options.stage);
+            const arn = (group: string) => `arn:aws:logs:${region}:${accountId}:log-group:${group}`;
             const pattern = toFilterPattern(options.q);
             // Aborted when the stream ends: the client went away, or 15 minutes passed.
             const session = yield* Effect.acquireRelease(
@@ -236,7 +321,7 @@ export class Logs extends Context.Service<
             const res = yield* tryAws(() =>
               aws.logs().send(
                 new StartLiveTailCommand({
-                  logGroupIdentifiers: STREAMS.map(arn),
+                  logGroupIdentifiers: groups.slice(0, LIVE_TAIL_MAX_GROUPS).map(({ group }) => arn(group)),
                   ...(pattern ? { logEventFilterPattern: pattern } : {}),
                 }),
                 { abortSignal: session.signal },
@@ -248,7 +333,7 @@ export class Logs extends Context.Service<
               Stream.mapEffect((r: LiveTailSessionLogEvent) =>
                 Effect.map(Clock.currentTimeMillis, (now) =>
                   toLogLine(
-                    r.logGroupIdentifier?.endsWith('/worker') ? 'worker' : 'web',
+                    streamOfLogGroup(r.logGroupIdentifier ?? ''),
                     r.timestamp ?? now,
                     r.message ?? '',
                   ),
@@ -267,10 +352,11 @@ export class Logs extends Context.Service<
           readonly to: number;
         }) {
           if (!/^[0-9a-f-]{8,64}$/i.test(options.trace)) return yield* BadRequest.of('invalid trace id');
+          const groups = yield* stageStreams(options.app, options.stage);
           const start = yield* tryAws(() =>
             aws.logs().send(
               new StartQueryCommand({
-                logGroupNames: STREAMS.map((s) => names.logGroup(options.app, options.stage, s)),
+                logGroupNames: groups.map(({ group }) => group),
                 startTime: Math.floor(options.from / 1000),
                 endTime: Math.ceil(options.to / 1000),
                 queryString: `fields @timestamp, @message | filter @message like "${options.trace}" | sort @timestamp asc | limit 1000`,
