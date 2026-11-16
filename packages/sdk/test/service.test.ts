@@ -270,6 +270,9 @@ describe('runService', () => {
 describe('traced', () => {
   const sent: Array<{ trace?: string }> = [];
   beforeEach(() => {
+    // These are about which trace a span joins; whether it's written has tests of its own.
+    telemetry.stop();
+    telemetry = captureTelemetry({ spans: 'all' });
     sent.length = 0;
     useTestBindings({
       app: 'atlas',

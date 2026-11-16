@@ -25,9 +25,16 @@ import { APP_CONFIG_FILE, type JobPayload, newId, toJob } from '@ericminassian/p
 import type { AnyPayload, CronName, EventDetail, EventType, QueueBody, QueueName } from '../register.ts';
 import { getBindings, tryBindings } from './bindings.ts';
 import { client } from './clients.ts';
-import { currentTrace, newContext, runWithContext } from './context.ts';
+import { currentTrace, newContext, runWithContext, startRoot } from './context.ts';
 import { afterFailure, deadLetter, LOCAL_WORKER_URL_ENV } from './jobs.ts';
-import { emit, emitError, installConsoleCapture, installFetchInstrumentation, log } from './telemetry.ts';
+import {
+  emit,
+  emitError,
+  endRoot,
+  installConsoleCapture,
+  installFetchInstrumentation,
+  log,
+} from './telemetry.ts';
 
 export interface JobContext {
   /** Trace id propagated from whoever enqueued/published/invoked this job. */
@@ -130,7 +137,7 @@ async function runJob<R>(
   fn: (ctx: JobContext) => R | Promise<R>,
   onFailure?: (error: unknown) => Promise<'retry' | 'dead'>,
 ): Promise<Outcome<R>> {
-  const ctx = newContext(trace);
+  const ctx = startRoot(trace);
   ctx.job = `${kind}:${name}`;
   return runWithContext(ctx, async () => {
     const t0 = performance.now();
@@ -146,17 +153,17 @@ async function runJob<R>(
       outcome = { ok: false, error };
     }
     if (outcome.ok) {
-      emit('job', { kind, name, status: 'ok', dur: ms(t0), attempt, span: ctx.span });
+      endRoot(ctx, 'job', { kind, name, status: 'ok', dur: ms(t0), attempt });
       return outcome;
     }
     emitError(outcome.error, 'job', { job: `${kind}:${name}` });
     const next = onFailure ? await onFailure(outcome.error).catch((e: unknown) => e as Error) : undefined;
-    const line = { kind, name, status: 'error' as const, dur: ms(t0), attempt, span: ctx.span };
+    const line = { kind, name, status: 'error' as const, dur: ms(t0), attempt };
     if (next instanceof Error) {
-      emit('job', line);
+      endRoot(ctx, 'job', line);
       throw next;
     }
-    emit('job', next ? { ...line, next } : line);
+    endRoot(ctx, 'job', next ? { ...line, next } : line);
     return outcome;
   });
 }

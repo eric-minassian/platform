@@ -24,10 +24,17 @@ import {
 } from '@ericminassian/platform-core';
 import { authGate, handleAuthRoute } from './auth/index.ts';
 import { getBindings, tryBindings } from './bindings.ts';
-import { newContext, parseTraceparent, runWithContext } from './context.ts';
+import { parseTraceparent, runWithContext, startRoot } from './context.ts';
 import { createNodeServer, parseEndpoint } from './http.ts';
 import { handleRealtimeRoute } from './realtime.ts';
-import { emit, emitError, installConsoleCapture, installFetchInstrumentation, toError } from './telemetry.ts';
+import {
+  emit,
+  emitError,
+  endRoot,
+  installConsoleCapture,
+  installFetchInstrumentation,
+  toError,
+} from './telemetry.ts';
 
 /** A web-standard fetch: what `toFetchHandler` returns, or a bare function. */
 export type FetchHandlerLike =
@@ -43,7 +50,7 @@ export function createPlatformFetch(handler: FetchHandlerLike): (request: Reques
   return async (incoming: Request): Promise<Response> => {
     const t0 = performance.now();
     const trace = incoming.headers.get(TRACE_HEADER) ?? parseTraceparent(incoming.headers.get('traceparent'));
-    const ctx = newContext(trace);
+    const ctx = startRoot(trace);
     const wasCold = cold;
     cold = false;
 
@@ -78,7 +85,7 @@ export function createPlatformFetch(handler: FetchHandlerLike): (request: Reques
           emitError(e, 'http', { route });
         }
       }
-      emit('req', {
+      endRoot(ctx, 'req', {
         method: request.method,
         route,
         path: url.pathname,
@@ -90,7 +97,6 @@ export function createPlatformFetch(handler: FetchHandlerLike): (request: Reques
           : {}),
         ...(ctx.user ? { user: fingerprint([ctx.user.id]) } : {}),
         ...(wasCold ? { cold: true } : {}),
-        span: ctx.span,
       });
       return response;
     });
