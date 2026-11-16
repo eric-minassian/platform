@@ -67,7 +67,7 @@ const dashboardsRoute = createRoute({
   component: page(() => import('./pages/dashboards/list.tsx'), 'DashboardsPage'),
 });
 
-const dashboardRoute = createRoute({
+export const dashboardRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/dashboards/$id',
   staticData: { time: true, title: 'Dashboard' },
@@ -121,6 +121,7 @@ export const logsRoute = createRoute({
     f: LogFilters,
     insights: Schema.String,
     live: Schema.Boolean,
+    saved: Schema.String,
   }),
   component: page(() => import('./pages/app/logs.tsx'), 'LogsPage'),
 });
@@ -129,7 +130,7 @@ export const tracesRoute = createRoute({
   getParentRoute: () => appRoute,
   path: 'traces',
   staticData: { title: 'Traces', time: true },
-  validateSearch: searchSchema({ f: TraceFilters }),
+  validateSearch: searchSchema({ f: TraceFilters, saved: Schema.String }),
   component: page(() => import('./pages/app/traces.tsx'), 'TracesPage'),
 });
 

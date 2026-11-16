@@ -7,6 +7,7 @@ import { Link } from '@tanstack/react-router';
 import { BellPlus, ChartSpline, LayoutGrid, MoreHorizontal } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import type { TimeSearch } from '../../lib/time.ts';
+import { plainQuery } from '../../lib/view.ts';
 import { AddToDashboardDialog } from '../dashboards/add-to-dashboard.tsx';
 import { Panel } from '../page.tsx';
 import { Button } from '../ui/button.tsx';
@@ -16,7 +17,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu.tsx';
-import { plainQuery, MetricView } from './metric-view.tsx';
+import { MetricView } from './metric-view.tsx';
 
 export function ChartMenu({
   app,

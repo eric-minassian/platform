@@ -22,7 +22,6 @@ import type { ReactNode } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Sparkline } from '../../components/charts/sparkline.tsx';
 import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
-import { viewResolution } from '../../components/metrics/metric-view.tsx';
 import {
   EmptyState,
   Loaded,
@@ -40,6 +39,7 @@ import { stageOf, useAppSummary, useDeployment } from '../../data/hooks.ts';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
+import { viewResolution } from '../../lib/view.ts';
 import { overviewRoute } from '../../router.tsx';
 
 const STATUS: MetricsView = {

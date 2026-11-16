@@ -9,55 +9,23 @@
  * chart, stacked one under another.
  */
 import { useAtomValue } from '@effect/atom-react';
-import {
-  autoQueryResolution,
-  type MetricsView,
-  type NamedSeriesQuery,
-  QUERY_RESOLUTION_MS,
-  type QueryResolution,
-  RESOLUTION_TTL_DAYS,
-  type SeriesQuery,
-  type SeriesResponse,
+import type {
+  MetricsView,
+  NamedSeriesQuery,
+  QueryResolution,
+  SeriesResponse,
 } from '@ericminassian/platform-core';
 import { AsyncResult, Atom } from 'effect/reactivity';
 import { useMemo } from 'react';
 import { family, seriesAtom } from '../../data/atoms.ts';
-import { evalExpr, ExprError, exprRefs, parseExpr } from '../../lib/expr.ts';
 import { useAutoRefresh } from '../../lib/hooks.ts';
-import {
-  colorSlots,
-  formatterFor,
-  isAdditive,
-  linesOf,
-  type ResolvedLine,
-  summarize,
-  unitLabel,
-} from '../../lib/series.ts';
-import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
+import { formatterFor, isAdditive, type ResolvedLine, summarize, unitLabel } from '../../lib/series.ts';
+import type { TimeSearch } from '../../lib/time.ts';
 import { cn } from '../../lib/utils.ts';
+import { plainQuery, resolveView, viewResolution } from '../../lib/view.ts';
 import { LatencyHeatmap } from '../charts/heatmap.tsx';
 import { type ChartSeries, TimeChart } from '../charts/time-chart.tsx';
 import { EmptyState, ErrorNotice, Loading } from '../page.tsx';
-
-const MINUTE_HORIZON_MS = RESOLUTION_TTL_DAYS['1m'] * 86_400_000;
-
-/** The resolution every query of a view asks for, so their buckets line up for expressions. */
-export function viewResolution(time: TimeSearch, now = Date.now()): QueryResolution {
-  const w = resolveWindow(time, now);
-  return autoQueryResolution(w.from, w.to, now, MINUTE_HORIZON_MS);
-}
-
-/** A query without the view-only fields, as the series endpoint takes it. */
-export function plainQuery(q: NamedSeriesQuery): SeriesQuery {
-  return {
-    metric: q.metric,
-    stat: q.stat,
-    ...(q.filter ? { filter: q.filter } : {}),
-    ...(q.groupBy ? { groupBy: q.groupBy } : {}),
-    ...(q.app ? { app: q.app } : {}),
-    ...(q.stage ? { stage: q.stage } : {}),
-  };
-}
 
 interface ViewKey {
   readonly app: string;
@@ -86,79 +54,6 @@ const viewAtom = family((k: ViewKey) =>
   ),
 );
 
-export interface ResolvedView {
-  readonly timestamps: readonly number[];
-  readonly stepMs: number;
-  readonly lines: readonly ResolvedLine[];
-  readonly histogram?: { readonly query: NamedSeriesQuery; readonly response: SeriesResponse } | undefined;
-  readonly notes: readonly string[];
-  readonly errors: readonly string[];
-}
-
-/** Lines for the view's visible queries and expressions, aligned on the first answer's buckets. */
-export function resolveView(view: MetricsView, responses: readonly SeriesResponse[]): ResolvedView {
-  const first = responses[0];
-  const timestamps = first ? first.timestamps.map((t) => Date.parse(t)) : [];
-  const stepMs = first ? QUERY_RESOLUTION_MS[first.res] : 60_000;
-  const nextSlot = colorSlots();
-  const lines: ResolvedLine[] = [];
-  const byId = new Map<string, ResolvedLine[]>();
-  const notes = new Set<string>();
-  const errors: string[] = [];
-  let histogram: ResolvedView['histogram'];
-  view.queries.forEach((q, i) => {
-    const response = responses[i];
-    if (!response) return;
-    if (response.note) notes.add(response.note);
-    if (q.stat === 'histogram' && response.histogram && !histogram) histogram = { query: q, response };
-    // Answers of other lengths (another app's clock, a coarser fallback) are aligned by timestamp.
-    const index = new Map(response.timestamps.map((t, j) => [Date.parse(t), j]));
-    const aligned = (values: ReadonlyArray<number | null>) =>
-      timestamps.map((t) => {
-        const j = index.get(t);
-        return j === undefined ? null : (values[j] ?? null);
-      });
-    const qLines = linesOf(q, response, nextSlot).map((l) => ({ ...l, values: aligned(l.values) }));
-    byId.set(q.id, qLines);
-    if (!q.hidden && q.stat !== 'histogram') lines.push(...qLines);
-  });
-  for (const e of view.expressions ?? []) {
-    try {
-      const expr = parseExpr(e.expr);
-      const refs = [...exprRefs(expr)];
-      const missing = refs.filter((r) => !byId.has(r));
-      if (missing.length)
-        throw new ExprError(
-          `${missing.join(', ')} ${missing.length > 1 ? "aren't queries" : "isn't a query"}`,
-        );
-      // A grouped query stands for the sum of its groups.
-      const units = new Set(refs.map((r) => byId.get(r)![0]?.unit).filter(Boolean));
-      const values = timestamps.map((_, t) => {
-        const scope = new Map<string, number | null>();
-        for (const r of refs) {
-          const parts = byId.get(r)!.map((l) => l.values[t] ?? null);
-          const present = parts.filter((v): v is number => v !== null);
-          scope.set(r, present.length ? present.reduce((a, b) => a + b, 0) : null);
-        }
-        return evalExpr(expr, scope);
-      });
-      if (!e.hidden) {
-        lines.push({
-          id: e.id,
-          label: e.label ?? e.expr,
-          // An expression's unit is its inputs' when they share one; a ratio of counts is a plain number.
-          unit: units.size === 1 && !/[*/]/.test(e.expr) ? [...units][0]! : 'count',
-          color: nextSlot(),
-          values,
-        });
-      }
-    } catch (error) {
-      errors.push(`${e.id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  return { timestamps, stepMs, lines, histogram, notes: [...notes], errors };
-}
-
 export function MetricView({
   view,
   app,
@@ -167,6 +62,8 @@ export function MetricView({
   height = 200,
   legend = true,
   className,
+  res: fixedRes,
+  fit = false,
 }: {
   view: MetricsView;
   app: string;
@@ -175,8 +72,12 @@ export function MetricView({
   height?: number;
   legend?: boolean;
   className?: string;
+  /** Buckets of this size instead of the window's default (an alert rule's window). */
+  res?: QueryResolution | undefined;
+  /** `height` is all the room there is, legend included (a dashboard widget's body). */
+  fit?: boolean;
 }) {
-  const res = viewResolution(time);
+  const res = fixedRes ?? viewResolution(time);
   const atom = viewAtom({ app, stage, time, res, queries: view.queries });
   useAutoRefresh(atom, time.from === undefined);
   const result = useAtomValue(atom);
@@ -185,7 +86,7 @@ export function MetricView({
     onFailure: ({ cause }) => <ErrorNotice error={cause} className={className} />,
     onSuccess: ({ value, waiting }) => (
       <div className={cn('min-w-0 transition-opacity', waiting && 'opacity-70', className)}>
-        <ViewBody view={view} responses={value} height={height} legend={legend} />
+        <ViewBody view={view} responses={value} height={height} legend={legend} fit={fit} />
       </div>
     ),
   });
@@ -194,13 +95,15 @@ export function MetricView({
 function ViewBody({
   view,
   responses,
-  height,
+  height: room,
   legend,
+  fit,
 }: {
   view: MetricsView;
   responses: readonly SeriesResponse[];
   height: number;
   legend: boolean;
+  fit: boolean;
 }) {
   const resolved = useMemo(() => resolveView(view, responses), [view, responses]);
   const notes = (
@@ -229,7 +132,7 @@ function ViewBody({
           timestamps={resolved.timestamps}
           stepMs={resolved.stepMs}
           histogram={resolved.histogram.response.histogram}
-          height={height}
+          height={room}
           ariaLabel="Latency distribution"
         />
       </>
@@ -262,12 +165,21 @@ function ViewBody({
 
   // One chart per unit: different units never share an axis.
   const units = [...new Set(resolved.lines.map((l) => l.unit))];
+  const showLegend = legend && resolved.lines.length > 1;
+  // Fitting a fixed box, the legend's rows (and a unit label per chart) come out of the charts' height.
+  const legendRows = showLegend ? Math.ceil(resolved.lines.length / 4) : 0;
+  const height = fit
+    ? Math.max(
+        80,
+        room - legendRows * 20 - (showLegend ? 12 : 0) - (units.length > 1 ? units.length * 20 : 0),
+      )
+    : room;
   const kind = view.chart === 'area' ? 'area' : view.chart === 'bar' ? 'bar' : 'line';
   const each = units.length > 1 ? Math.max(120, Math.round(height / units.length)) : height;
   return (
     <div className="flex flex-col gap-3">
       {notes}
-      {legend && resolved.lines.length > 1 && <Legend lines={resolved.lines} kind={kind} />}
+      {showLegend && <Legend lines={resolved.lines} kind={kind} />}
       {units.map((unit, i) => {
         const lines = resolved.lines.filter((l) => l.unit === unit);
         const series: ChartSeries[] = lines.map((l) => ({
