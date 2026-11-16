@@ -9,6 +9,7 @@
  */
 import { Schema, SchemaGetter } from 'effect';
 import { MemberRole } from './config.ts';
+import { QueryResolution } from './explore.ts';
 import { ResolvedManifest } from './manifest.ts';
 import { Resolution, TelemetryEvent } from './telemetry.ts';
 import { WEB_COMPUTE, WEB_COMPUTE_SETTINGS } from './web-compute.ts';
@@ -195,6 +196,10 @@ export const AppSummary = Schema.Struct({
   health: Schema.NullOr(AppHealth),
   costMonthToDateUsd: optional(Schema.Finite),
   lastDeployment: optional(DeploymentRecord),
+  /** Prod's requests in each of the last 24 hours, oldest first (absent without a prod stage). */
+  traffic: optional(Schema.Array(Schema.Finite)),
+  /** The app's alert rules on every stage: how many there are and how many are firing. */
+  alerts: optional(Schema.Struct({ total: Schema.Finite, alarm: Schema.Finite })),
 });
 export type AppSummary = typeof AppSummary.Type;
 
@@ -578,6 +583,120 @@ export const TraceResponse = Schema.Struct({
   events: Schema.Array(TelemetryEvent),
 });
 export type TraceResponse = typeof TraceResponse.Type;
+
+/** Lines around one line of a stream, oldest first; `anchor` is that line's index. */
+export const LogContextResponse = Schema.Struct({
+  lines: Schema.Array(LogLine),
+  anchor: Schema.Finite,
+});
+export type LogContextResponse = typeof LogContextResponse.Type;
+
+/** How many lines of a range have a value of a field. */
+export const FacetCount = Schema.Struct({ value: Schema.String, count: Schema.Finite });
+export type FacetCount = typeof FacetCount.Type;
+
+/** Lines per bucket by level, and counts of each field's commonest values, for the range and filters. */
+export const LogStatsResponse = Schema.Struct({
+  res: QueryResolution,
+  timestamps: Schema.Array(Schema.String),
+  levels: Schema.Struct({
+    error: Schema.Array(Schema.Finite),
+    warn: Schema.Array(Schema.Finite),
+    info: Schema.Array(Schema.Finite),
+    debug: Schema.Array(Schema.Finite),
+    system: Schema.Array(Schema.Finite),
+  }),
+  total: Schema.Finite,
+  facets: Schema.Struct({
+    level: Schema.Array(FacetCount),
+    stream: Schema.Array(FacetCount),
+    route: Schema.Array(FacetCount),
+    status: Schema.Array(FacetCount),
+    rev: Schema.Array(FacetCount),
+  }),
+});
+export type LogStatsResponse = typeof LogStatsResponse.Type;
+
+/** A request or job that started a trace (its root line). */
+export const TraceSummary = Schema.Struct({
+  trace: Schema.String,
+  /** When it started, ISO. */
+  ts: Schema.String,
+  kind: Schema.Literals(['req', 'job']),
+  /** `GET /api/items/:id` or `queue refresh`. */
+  name: Schema.String,
+  /** The HTTP status of a request. */
+  status: optional(Schema.Finite),
+  /** A 5xx request or a failed job. */
+  failed: Schema.Boolean,
+  dur: Schema.Finite,
+  /** Its spans were written (it failed, was slow, or its trace was sampled). */
+  recorded: Schema.Boolean,
+  /** Calls it made that weren't written. */
+  calls: optional(Schema.Finite),
+  rev: optional(Schema.String),
+});
+export type TraceSummary = typeof TraceSummary.Type;
+
+export const TracesResponse = Schema.Struct({
+  traces: Schema.Array(TraceSummary),
+  /** More matched than `limit`; narrow the range or filters to see the rest. */
+  truncated: Schema.Boolean,
+});
+export type TracesResponse = typeof TracesResponse.Type;
+
+export const InsightsRequest = Schema.Struct({
+  stage: optional(Schema.String),
+  /**
+   * A Logs Insights query (the Logs Insights language only). It runs on the
+   * stage's own log groups; one that picks its own (`SOURCE`) is refused.
+   */
+  query: Schema.String.check(Schema.isNonEmpty(), Schema.isMaxLength(10_000)),
+  from: optional(Schema.String),
+  to: optional(Schema.String),
+  range: optional(Schema.String),
+});
+export type InsightsRequest = typeof InsightsRequest.Type;
+
+export const InsightsResponse = Schema.Struct({
+  /** Result fields in the order the query produced them (hidden `@ptr` left out). */
+  columns: Schema.Array(Schema.String),
+  rows: Schema.Array(Schema.Array(Schema.NullOr(Schema.String))),
+  recordsMatched: Schema.Finite,
+  recordsScanned: Schema.Finite,
+  bytesScanned: Schema.Finite,
+});
+export type InsightsResponse = typeof InsightsResponse.Type;
+
+/** An error group's events per bucket, and the deployments they happened on (Logs Insights). */
+export const ErrorOccurrencesResponse = Schema.Struct({
+  res: QueryResolution,
+  timestamps: Schema.Array(Schema.String),
+  counts: Schema.Array(Schema.Finite),
+  revs: Schema.Array(FacetCount),
+});
+export type ErrorOccurrencesResponse = typeof ErrorOccurrencesResponse.Type;
+
+/** One line of a series answer: a group's values (key `all` when ungrouped), one per timestamp. */
+export const SeriesLine = Schema.Struct({
+  key: Schema.String,
+  values: Schema.Array(Schema.NullOr(Schema.Finite)),
+});
+export type SeriesLine = typeof SeriesLine.Type;
+
+export const SeriesResponse = Schema.Struct({
+  res: QueryResolution,
+  /** Bucket start times, ISO, oldest first. */
+  timestamps: Schema.Array(Schema.String),
+  /** `count`, `per_second`, `percent`, `ms`, or a custom metric's own unit. */
+  unit: Schema.String,
+  series: Schema.Array(SeriesLine),
+  /** `stat: histogram`: per timestamp, the count in each latency bucket (`LATENCY_BUCKETS_MS`, then the overflow). */
+  histogram: optional(Schema.Array(Schema.Array(Schema.Finite))),
+  /** Why the answer differs from what was asked (coarser buckets past minute data's 3 days, groups cut to the top 10). */
+  note: optional(Schema.String),
+});
+export type SeriesResponse = typeof SeriesResponse.Type;
 
 /** A GET of the stage's health path, for a stage that served nothing lately or has no server. */
 export const UptimeCheck = Schema.Struct({
