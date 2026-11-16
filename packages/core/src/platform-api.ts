@@ -37,6 +37,7 @@ import {
   ErrorGroup,
   ErrorStatus,
   JobsResponse,
+  LimitsResponse,
   LogLine,
   LogsResponse,
   MeResponse,
@@ -371,6 +372,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       params: app,
       query: rangeQuery,
       success: EmailStatsResponse,
+      error: errors,
+    }),
+    /** `RateLimits` checks per limit: allowed and denied, at 1h or 1d. */
+    HttpApiEndpoint.get('limits', '/apps/:app/limits', {
+      params: app,
+      query: rangeQuery,
+      success: LimitsResponse,
       error: errors,
     }),
     HttpApiEndpoint.get('errors', '/apps/:app/errors', {

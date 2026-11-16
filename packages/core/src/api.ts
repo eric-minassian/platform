@@ -323,6 +323,33 @@ export const RealtimeStatsResponse = Schema.Struct({
 });
 export type RealtimeStatsResponse = typeof RealtimeStatsResponse.Type;
 
+/** One rate limit's checks in one bucket. */
+export const LimitPoint = Schema.Struct({
+  ts: Schema.String,
+  allowed: Schema.Finite,
+  denied: Schema.Finite,
+});
+export type LimitPoint = typeof LimitPoint.Type;
+
+/** A rate limit's checks over the range, by its name in `RateLimits`. */
+export const LimitStats = Schema.Struct({
+  name: Schema.String,
+  allowed: Schema.Finite,
+  denied: Schema.Finite,
+  /** One per bucket in the range, zero-filled. */
+  points: Schema.Array(LimitPoint),
+});
+export type LimitStats = typeof LimitStats.Type;
+
+/** A stage's rate limits that were checked in the range, most denied first. */
+export const LimitsResponse = Schema.Struct({
+  app: Schema.String,
+  stage: Schema.String,
+  res: Resolution,
+  limits: Schema.Array(LimitStats),
+});
+export type LimitsResponse = typeof LimitsResponse.Type;
+
 /** Per-tenant SES counts in one bucket (CloudWatch `Sum`s of `AWS/SES` by tenant). */
 export const EmailPoint = Schema.Struct({
   ts: Schema.String,

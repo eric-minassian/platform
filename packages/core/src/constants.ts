@@ -47,6 +47,13 @@ export const VIEWER_ADDRESS_HEADER = 'cloudfront-viewer-address';
 /** The client's country (ISO 3166-1 alpha-2), from the edge; absent locally. */
 export const VIEWER_COUNTRY_HEADER = 'cloudfront-viewer-country';
 
+/**
+ * Partition-key prefix of the SDK's rate-limit counters in a stage's table
+ * (`_rl#<limit>#<key>`). Collection names start with a letter, so no
+ * document shares it; the data browser leaves these items out.
+ */
+export const RATE_LIMIT_PK_PREFIX = '_rl#';
+
 /** Tags on every AWS resource the engine creates. */
 export const TAGS = {
   managed: 'platform:managed',

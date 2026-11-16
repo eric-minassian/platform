@@ -8,7 +8,7 @@
 import { Schema } from 'effect';
 import { fingerprint } from './fingerprint.ts';
 
-export const TelemetryKind = Schema.Literals(['req', 'err', 'job', 'span', 'log', 'metric', 'env']);
+export const TelemetryKind = Schema.Literals(['req', 'err', 'job', 'span', 'log', 'metric', 'limit', 'env']);
 export type TelemetryKind = typeof TelemetryKind.Type;
 
 const base = {
@@ -101,6 +101,16 @@ export const MetricEvent = Schema.Struct({
 });
 export type MetricEvent = typeof MetricEvent.Type;
 
+/** One `RateLimits` check, and whether the limit let it through. */
+export const LimitEvent = Schema.Struct({
+  ...base,
+  t: Schema.Literal('limit'),
+  /** The limit's name (`signups`). Its key (whom it counts) is never sent: it can be a client address. */
+  name: Schema.String,
+  ok: Schema.Boolean,
+});
+export type LimitEvent = typeof LimitEvent.Type;
+
 export const EnvEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('env'),
@@ -118,13 +128,14 @@ export const TelemetryEvent = Schema.Union([
   SpanEvent,
   LogEvent,
   MetricEvent,
+  LimitEvent,
   EnvEvent,
 ]);
 export type TelemetryEvent = typeof TelemetryEvent.Type;
 
 /** Account-level subscription filter: only aggregate-worthy kinds reach the processor. */
 export const TELEMETRY_FILTER_PATTERN =
-  '{ ($._p = 1) && (($.t = "req") || ($.t = "err") || ($.t = "job") || ($.t = "metric") || ($.t = "env")) }';
+  '{ ($._p = 1) && (($.t = "req") || ($.t = "err") || ($.t = "job") || ($.t = "metric") || ($.t = "limit") || ($.t = "env")) }';
 
 export function isTelemetryEvent(v: unknown): v is TelemetryEvent {
   return (
@@ -186,6 +197,7 @@ export function bucketStart(ts: number, res: Resolution): number {
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
  * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]
  * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum, min, max
+ * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
  * - `u#<app>#<stage>`        sk `<iso>`           uptime checks: ok, status, ms
  */
@@ -194,6 +206,7 @@ export const telemetryKeys = {
   route: (app: string, stage: string, res: Resolution) => `r#${app}#${stage}#${res}`,
   job: (app: string, stage: string, res: Resolution) => `j#${app}#${stage}#${res}`,
   metric: (app: string, stage: string, res: Resolution) => `c#${app}#${stage}#${res}`,
+  limit: (app: string, stage: string, res: Resolution) => `l#${app}#${stage}#${res}`,
   errors: (app: string, stage: string) => `e#${app}#${stage}`,
   uptime: (app: string, stage: string) => `u#${app}#${stage}`,
   /**
