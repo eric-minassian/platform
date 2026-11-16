@@ -40,6 +40,7 @@ const TABS = [
   ['errors', 'Errors'],
   ['jobs', 'Jobs'],
   ['email', 'Email'],
+  ['services', 'Services'],
   ['data', 'Data'],
   ['deployments', 'Deployments'],
   ['secrets', 'Secrets'],

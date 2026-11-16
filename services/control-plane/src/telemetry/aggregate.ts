@@ -188,11 +188,24 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
       }
       case 'env': {
         if (e.event !== 'start') break;
+        const field = { web: 'webStarts', worker: 'workerStarts', service: 'serviceStarts' }[e.runtime];
         for (const res of STAGE_RES) {
           const b = bucketStart(ts, res);
-          bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, {
-            [e.runtime === 'web' ? 'webStarts' : 'workerStarts']: 1,
-          });
+          bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { [field]: 1 });
+        }
+        // A service's container starts sit next to its runs, on its job series.
+        if (e.runtime === 'service' && e.name) {
+          for (const res of SERIES_RES) {
+            const b = bucketStart(ts, res);
+            bump(
+              telemetryKeys.job(app, stage, res),
+              `${telemetryKeys.time(b)}#service:${e.name}`,
+              res,
+              b,
+              { starts: 1 },
+              { kind: 'service', name: e.name },
+            );
+          }
         }
         break;
       }

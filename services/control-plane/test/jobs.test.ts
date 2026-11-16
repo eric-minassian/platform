@@ -1,4 +1,5 @@
 import type { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
@@ -29,7 +30,15 @@ import {
 import { stalePreviews } from '../src/jobs/reaper.ts';
 import { liveStages, StorageExpiry } from '../src/jobs/storage.ts';
 import { STUCK_AFTER_MS, stuckDeployments, suspectStages } from '../src/jobs/watchdog.ts';
-import { describe as describeEvent, runtimeRecord, toFilterPattern, toLogLine } from '../src/logs.ts';
+import {
+  describe as describeEvent,
+  Logs,
+  logGroupOf,
+  runtimeRecord,
+  streamOfLogGroup,
+  toFilterPattern,
+  toLogLine,
+} from '../src/logs.ts';
 import { type DeploymentItem, type StageItem, Store } from '../src/store.ts';
 import { awsLayer, memoryStore, runtime, settingsLayer } from './support.ts';
 
@@ -185,6 +194,87 @@ describe('logs', () => {
     expect(toFilterPattern('timeout')).toBe('"timeout"');
     expect(toFilterPattern('{ $.status = 500 }')).toBe('{ $.status = 500 }');
   });
+
+  it('names service streams after their log groups', () => {
+    expect(logGroupOf('shop', 'prod', 'worker')).toBe('/platform/apps/shop/prod/worker');
+    expect(logGroupOf('shop', 'prod', 'service:ais')).toBe('/platform/apps/shop/prod/services/ais');
+    expect(logGroupOf('shop', 'prod', 'service:../web')).toBeUndefined();
+    expect(logGroupOf('shop', 'prod', 'web.local')).toBeUndefined();
+    const arn = 'arn:aws:logs:us-east-1:000000000000:log-group:/platform/apps/shop/prod';
+    expect(streamOfLogGroup(`${arn}/services/ais`)).toBe('service:ais');
+    expect(streamOfLogGroup(`${arn}/services/ais:*`)).toBe('service:ais');
+    expect(streamOfLogGroup('/platform/apps/shop/prod/worker')).toBe('worker');
+    expect(streamOfLogGroup(`${arn}/web`)).toBe('web');
+    const start = {
+      _p: 1 as const,
+      t: 'env' as const,
+      ts: 0,
+      app: 'shop',
+      stage: 'prod',
+      rev: 'd1',
+      runtime: 'service' as const,
+      name: 'ais',
+    };
+    expect(toLogLine('service:ais', 0, JSON.stringify({ ...start, event: 'start' }))).toMatchObject({
+      stream: 'service:ais',
+      level: 'info',
+      message: 'service ais container start',
+    });
+    expect(describeEvent({ ...start, event: 'stop', reason: 'SIGTERM' })).toBe(
+      'service ais container stop (SIGTERM)',
+    );
+  });
+
+  effect.effect('searches service log groups too, and filters by stream', () =>
+    Effect.gen(function* () {
+      const filtered: string[] = [];
+      const logs = {
+        send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+          if (command.constructor.name === 'DescribeLogGroupsCommand') {
+            assert.strictEqual(command.input.logGroupNamePrefix, '/platform/apps/shop/prod/services/');
+            return Promise.resolve({
+              logGroups: [{ logGroupName: '/platform/apps/shop/prod/services/ais' }],
+            });
+          }
+          const group = String(command.input.logGroupName);
+          filtered.push(group);
+          const ts = group.endsWith('/ais') ? 3000 : group.endsWith('/worker') ? 2000 : 1000;
+          return Promise.resolve({
+            events: [{ timestamp: ts, message: `from ${group.split('/').at(-1)}` }],
+            ...(group.endsWith('/ais') ? { nextToken: 'more' } : {}),
+          });
+        },
+      } as unknown as CloudWatchLogsClient;
+      const search = (options: { stream?: string; nextToken?: string }) =>
+        Logs.use((l) => l.search({ app: 'shop', stage: 'prod', from: 0, to: 10_000, ...options })).pipe(
+          Effect.provide(Logs.layer.pipe(Layer.provide([awsLayer({ logs: () => logs }), settingsLayer()]))),
+        );
+
+      const all = yield* search({});
+      assert.deepStrictEqual(
+        all.lines.map((l) => [l.stream, l.message]),
+        [
+          ['service:ais', 'from ais'],
+          ['worker', 'from worker'],
+          ['web', 'from web'],
+        ],
+      );
+      // The next page only reads the streams that had more.
+      filtered.length = 0;
+      yield* search({ nextToken: all.nextToken ?? '' });
+      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/services/ais']);
+
+      filtered.length = 0;
+      const one = yield* search({ stream: 'service:ais' });
+      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/services/ais']);
+      assert.strictEqual(one.lines.length, 1);
+
+      const bad = yield* Effect.flip(search({ stream: 'service:Nope' }));
+      assert.strictEqual(bad.message, 'stream must be web, worker or service:<name>');
+      const forged = Buffer.from(JSON.stringify({ 'service:../../other': 'x' })).toString('base64url');
+      assert.strictEqual((yield* Effect.flip(search({ nextToken: forged }))).message, 'invalid next token');
+    }),
+  );
 });
 
 describe('watchdog', () => {
@@ -358,6 +448,7 @@ describe('pinger', () => {
     storageOptions: {},
     secrets: [],
     env: {},
+    services: {},
     ...(email ? { email } : {}),
   });
   const deployment = (app: string, id: string, m: ResolvedManifest): DeploymentItem => ({

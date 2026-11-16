@@ -2,7 +2,7 @@ import { useAtomValue } from '@effect/atom-react';
 import { Atom } from 'effect/reactivity';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, SERIES_COLORS } from '../../components/charts.tsx';
-import { Card, Loaded, Stat } from '../../components/ui.tsx';
+import { Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
 import { fmtUsd } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
 
@@ -42,6 +42,31 @@ export function CostTab() {
                 appear under Admin.
               </p>
             </Card>
+            {c.alwaysOn && c.alwaysOn.length > 0 && (
+              <Card title="Always on">
+                <Table head={['Stage', 'Service', 'Size', 'Compute', 'Public IPv4', '≈ Monthly']}>
+                  {c.alwaysOn.map((a) => (
+                    <tr key={`${a.stage}:${a.kind}:${a.name}`}>
+                      <td>
+                        <Mono>{a.stage}</Mono>
+                      </td>
+                      <td>
+                        <Mono>{a.name}</Mono>
+                      </td>
+                      <td>{a.detail}</td>
+                      <td className="tabular-nums">{fmtUsd(a.monthly.computeUsd)}</td>
+                      <td className="tabular-nums">{fmtUsd(a.monthly.publicIpv4Usd)}</td>
+                      <td className="font-medium tabular-nums">{fmtUsd(a.monthly.totalUsd)}</td>
+                    </tr>
+                  ))}
+                </Table>
+                <p className="pt-2 text-[11px] text-muted">
+                  Estimated from each service’s size, running all month. Cost Explorer doesn’t attribute a
+                  container’s public IPv4 address to the app; it is counted with the shared platform resources
+                  under Admin.
+                </p>
+              </Card>
+            )}
           </div>
         );
       }}

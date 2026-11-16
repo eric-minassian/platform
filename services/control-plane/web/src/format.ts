@@ -28,16 +28,17 @@ export const fmtBytes = (n: number): string => {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
 };
 
+/** `5m ago`, or `in 5m` for a time still ahead (a scheduled stop). */
 export function relTime(iso: string | undefined): string {
   if (!iso) return '—';
   const diff = Date.now() - Date.parse(iso);
-  const s = Math.round(diff / 1000);
-  if (s < 60) return `${Math.max(s, 0)}s ago`;
+  // Clock skew between the browser and AWS can put a just-written time a moment ahead.
+  const ahead = diff < -1000;
+  const s = Math.round(Math.abs(diff) / 1000);
   const m = Math.round(s / 60);
-  if (m < 60) return `${m}m ago`;
   const h = Math.round(m / 60);
-  if (h < 48) return `${h}h ago`;
-  return `${Math.round(h / 24)}d ago`;
+  const span = s < 60 ? `${s}s` : m < 60 ? `${m}m` : h < 48 ? `${h}h` : `${Math.round(h / 24)}d`;
+  return ahead ? `in ${span}` : `${span} ago`;
 }
 
 export const fmtDateTime = (iso: string | number): string =>

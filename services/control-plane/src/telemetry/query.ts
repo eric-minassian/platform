@@ -144,7 +144,11 @@ export function toRouteStats(items: readonly Item[]): RouteStats[] {
     .toSorted((x, y) => y.req - x.req);
 }
 
-/** Sums per-job items (sk = `<iso>#<kind>:<name>`). `declared` adds never-run jobs from the manifest. */
+/**
+ * Sums per-job items (sk = `<iso>#<kind>:<name>`). `declared` adds never-run
+ * jobs from the manifest. A service's row can hold only container starts;
+ * without a run it isn't a job.
+ */
 export function toJobStats(
   items: readonly Item[],
   declared: readonly { kind: JobStats['kind']; name: string }[] = [],
@@ -163,6 +167,7 @@ export function toJobStats(
     return a;
   };
   for (const d of declared) get(d.kind, d.name);
+  const listed = new Set(acc.keys());
   for (const i of items) {
     const a = get(i.kind as JobStats['kind'], String(i.name));
     a.ok += num(i.ok);
@@ -170,14 +175,38 @@ export function toJobStats(
     addHist(a.hist, histogramOf(i));
     a.last = Math.max(a.last, num(i.lastRun));
   }
-  return [...acc.values()].map((a) => ({
-    kind: a.kind,
-    name: a.name,
-    ok: a.ok,
-    error: a.error,
-    p95: percentile(a.hist, 95),
-    ...(a.last ? { lastRun: new Date(a.last).toISOString() } : {}),
-  }));
+  return [...acc.entries()]
+    .filter(([key, a]) => a.ok + a.error > 0 || listed.has(key))
+    .map(([, a]) => ({
+      kind: a.kind,
+      name: a.name,
+      ok: a.ok,
+      error: a.error,
+      p95: percentile(a.hist, 95),
+      ...(a.last ? { lastRun: new Date(a.last).toISOString() } : {}),
+    }));
+}
+
+export interface ServiceRuns {
+  /** Containers of the service that started. */
+  readonly starts: number;
+  /** Runs of its `run` that failed (and were rerun). */
+  readonly failedRuns: number;
+}
+
+/**
+ * Starts and failed runs per service, from its job rows (`service:<name>`).
+ * Rows of units of work it traced (`service:<name>/<unit>`) aren't runs.
+ */
+export function toServiceRuns(items: readonly Item[]): Map<string, ServiceRuns> {
+  const out = new Map<string, ServiceRuns>();
+  for (const i of items) {
+    const name = str(i.name);
+    if (i.kind !== 'service' || !name || name.includes('/')) continue;
+    const prev = out.get(name) ?? { starts: 0, failedRuns: 0 };
+    out.set(name, { starts: prev.starts + num(i.starts), failedRuns: prev.failedRuns + num(i.error) });
+  }
+  return out;
 }
 
 /** Items of a `<iso>#<name>` series family, by name and then bucket time. */
@@ -314,6 +343,12 @@ export class TelemetryQuery extends Context.Service<
     customMetrics(app: string, stage: string, range: TimeRange): Effect.Effect<CustomMetricsResponse>;
     /** Rate limit checks per limit, at 1h or 1d. */
     limits(app: string, stage: string, range: TimeRange): Effect.Effect<LimitsResponse>;
+    /** Container starts and failed runs of each of the stage's services. */
+    serviceRuns(
+      app: string,
+      stage: string,
+      range: TimeRange,
+    ): Effect.Effect<ReadonlyMap<string, ServiceRuns>>;
     /** Most recently seen first. */
     errors(app: string, stage: string): Effect.Effect<ReadonlyArray<ErrorGroup>>;
     /** Triage from the console (the one write the API makes here); false when there's no such group. */
@@ -420,6 +455,16 @@ export class TelemetryQuery extends Context.Service<
         return { app, stage, res: r.res, limits: toLimitStats(items, r) } satisfies LimitsResponse;
       }, Effect.orDie);
 
+      const serviceRuns = Effect.fn('TelemetryQuery.serviceRuns')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const r = seriesRange(range);
+        const [a, b] = isoRange(r);
+        return toServiceRuns(yield* queryRange(telemetryKeys.job(app, stage, r.res), a, b));
+      }, Effect.orDie);
+
       const errors = Effect.fn('TelemetryQuery.errors')(function* (app: string, stage: string) {
         const { telemetryTable } = yield* settings.runtime;
         const res = yield* tryAws(() =>
@@ -505,6 +550,7 @@ export class TelemetryQuery extends Context.Service<
         jobs,
         customMetrics,
         limits,
+        serviceRuns,
         errors,
         setErrorStatus,
         uptime,

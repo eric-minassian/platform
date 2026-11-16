@@ -1,11 +1,11 @@
 import { useAtomSet, useAtomValue } from '@effect/atom-react';
 import type { LogLine } from '@ericminassian/platform-core';
 import { TailEvent } from '@ericminassian/platform-core/platform-api';
-import { Schema } from 'effect';
+import { Option, Schema } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { ApiClient, apiUrl, loadedPages, pages } from '../../client.ts';
+import { ApiClient, apiUrl, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
 import {
   Badge,
   Button,
@@ -24,6 +24,41 @@ import { type Scope, useApp } from '../AppLayout.tsx';
 const levelTone = (l?: string): Tone =>
   l === 'error' ? 'bad' : l === 'warn' ? 'warn' : l === 'debug' || l === 'system' ? 'muted' : 'info';
 
+const streamColor = (stream: string): string =>
+  stream === 'worker' ? 'text-warn' : stream === 'web' ? 'text-info' : 'text-ok';
+
+// A deployment's manifest never changes, so one read serves the tab.
+const deploymentAtom = Atom.family((id: string) =>
+  fresh(ApiClient.query('deployments', 'get', { params: { id }, timeToLive }), { staleTime: '1 hour' }),
+);
+
+interface StreamPickerProps {
+  value: string;
+  onChange: (stream: string) => void;
+}
+
+function StreamSelect({ services, ...props }: StreamPickerProps & { services: readonly string[] }) {
+  return (
+    <Select
+      {...props}
+      options={[
+        { value: '', label: 'all streams' },
+        { value: 'web', label: 'web' },
+        { value: 'worker', label: 'worker' },
+        ...services.map((name) => ({ value: `service:${name}`, label: `service:${name}` })),
+      ]}
+    />
+  );
+}
+
+/** The stream picker, with each service the stage's live deployment declares. */
+function LiveStreamSelect({ deployment, ...props }: StreamPickerProps & { deployment: string }) {
+  const manifest = Option.getOrUndefined(
+    AsyncResult.value(useAtomValue(deploymentAtom(deployment))),
+  )?.manifest;
+  return <StreamSelect {...props} services={Object.keys(manifest?.services ?? {})} />;
+}
+
 export function LogRows({ lines, app, search }: { lines: readonly LogLine[]; app: string; search: string }) {
   return (
     <div className="divide-y divide-border/60 font-mono text-[11.5px]">
@@ -34,7 +69,7 @@ export function LogRows({ lines, app, search }: { lines: readonly LogLine[]; app
           className="flex gap-3 px-1 py-1 hover:bg-panel-2"
         >
           <span className="shrink-0 text-muted">{fmtDateTime(l.ts)}</span>
-          <span className={cx('w-12 shrink-0', l.stream === 'worker' ? 'text-warn' : 'text-info')}>
+          <span className={cx('w-24 shrink-0 truncate', streamColor(l.stream))} title={l.stream}>
             {l.stream}
           </span>
           <span className="w-12 shrink-0">
@@ -71,7 +106,7 @@ const logPages = Atom.family(({ app, stage, range, q, stream }: LogsQuery) =>
             stage,
             range,
             q: q || undefined,
-            stream: stream === 'web' || stream === 'worker' ? stream : undefined,
+            stream: stream || undefined,
             next,
           },
         }),
@@ -147,7 +182,7 @@ function Lines({
 function Tail({ query, showSystem, search }: { query: LogsQuery; showSystem: boolean; search: string }) {
   const url = apiUrl.observe.tail({
     params: { app: query.app },
-    query: { stage: query.stage, q: query.q || undefined },
+    query: { stage: query.stage, q: query.q || undefined, stream: query.stream || undefined },
   });
   const tail = useLiveTail(url);
   return (
@@ -189,7 +224,8 @@ function History({ query, showSystem, search }: { query: LogsQuery; showSystem: 
 }
 
 export function LogsTab() {
-  const { app, scope, search } = useApp();
+  const { app, scope, search, summary } = useApp();
+  const deployment = summary.stages.find((s) => s.stage === scope.stage)?.currentDeployment;
   const [draft, setDraft] = useState('');
   const [q, setQ] = useState('');
   const [stream, setStream] = useState('');
@@ -217,15 +253,11 @@ export function LogsTab() {
               className="w-64"
             />
           </form>
-          <Select
-            value={stream}
-            onChange={setStream}
-            options={[
-              { value: '', label: 'all streams' },
-              { value: 'web', label: 'web' },
-              { value: 'worker', label: 'worker' },
-            ]}
-          />
+          {deployment ? (
+            <LiveStreamSelect deployment={deployment} value={stream} onChange={setStream} />
+          ) : (
+            <StreamSelect value={stream} onChange={setStream} services={[]} />
+          )}
           <Select
             value={showSystem ? 'all' : 'app'}
             onChange={(v) => setShowSystem(v === 'all')}
