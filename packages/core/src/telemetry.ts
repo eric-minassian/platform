@@ -259,18 +259,27 @@ export function bucketStart(ts: number, res: Resolution): number {
  * resolution; `sk` starts with the bucket time so a Query with `BETWEEN`
  * returns a time range.
  *
+ * Every rollup family is written at `1m`, `1h` and `1d` (`RESOLUTION_TTL_DAYS`).
+ * Route, job, custom metric and rate limit rows have had minute buckets only
+ * since November 2026; before, they started at `1h`.
+ *
  * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold,
  *                                                  dur (ms handling them, summed), and process starts:
  *                                                  webStarts (webInits of them reported webInitMs, summed),
  *                                                  workerStarts, serviceStarts
- * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
+ * - `r#<app>#<stage>#<res>`  sk `<iso>#<METHOD> <route>`  per-route HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[],
+ *                                                  cold, method, route. Rows from before November 2026 have no
+ *                                                  s2xx, s3xx or cold: their req − s4xx − s5xx were 2xx
  * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]; `service:<name>` rows also
  *                                                  count `starts` (containers of that service starting)
- * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum (and the unit)
+ * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum, max (and the unit); rows from
+ *                                                  before November 2026 have no max
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
  * - `u#<app>#<stage>`        sk `<iso>`           uptime: ok, source (`traffic`: req, s5xx; `check`, or none on
  *                                                  rows before traffic counted: status, ms)
+ * - `a#<app>#<stage>`        sk `<iso>#<ruleId>`  alert rule state changes (`AlertEvent` fields but `ts`),
+ *                                                  kept `ALERT_HISTORY_DAYS`
  */
 export const telemetryKeys = {
   stage: (app: string, stage: string, res: Resolution) => `m#${app}#${stage}#${res}`,
@@ -280,6 +289,7 @@ export const telemetryKeys = {
   limit: (app: string, stage: string, res: Resolution) => `l#${app}#${stage}#${res}`,
   errors: (app: string, stage: string) => `e#${app}#${stage}`,
   uptime: (app: string, stage: string) => `u#${app}#${stage}`,
+  alerts: (app: string, stage: string) => `a#${app}#${stage}`,
   /**
    * Email usage: sk `YYYY-MM-DD` (UTC), `n` recipients sent. The SDK writes it
    * with the stage role, whose IAM grant covers only this partition.

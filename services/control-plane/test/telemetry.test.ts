@@ -6,7 +6,7 @@ import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { GitHub } from '../src/github.ts';
 import { toLogLine } from '../src/logs.ts';
-import { aggregate, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
+import { aggregate, maxFollowUps, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
 import {
   parseRange,
   summarizeHealth,
@@ -103,6 +103,7 @@ describe('aggregate', () => {
     // Only the app's request counts, its handling time included (the compute chooser reads `dur`).
     expect(minute!.add).toEqual({ req: 1, dur: 42, s2xx: 1, l3: 1 });
     expect(agg.rollups.filter((r) => r.pk.startsWith('r#')).map((r) => r.sk)).toEqual([
+      '2026-11-14T10:15:00.000Z#GET /api/todos',
       '2026-11-14T10:00:00.000Z#GET /api/todos',
       '2026-11-14T00:00:00.000Z#GET /api/todos',
     ]);
@@ -148,8 +149,38 @@ describe('aggregate', () => {
       ['2026-11-14T10:00:00.000Z#writes', { allowed: 1 }, { name: 'writes' }],
     ]);
     expect(agg.rollups.filter((r) => r.pk === 'l#todo#prod#1d')).toHaveLength(2);
-    // Minute buckets are for the whole stage only.
-    expect(agg.rollups.some((r) => r.pk === 'l#todo#prod#1m')).toBe(false);
+    // Minute buckets too, for the explorer and alert rules.
+    expect(agg.rollups.filter((r) => r.pk === 'l#todo#prod#1m').map((r) => r.sk)).toEqual([
+      '2026-11-14T10:15:00.000Z#signups',
+      '2026-11-14T10:15:00.000Z#writes',
+    ]);
+  });
+
+  it('writes every series by the minute, routes with each status class and cold starts', () => {
+    const agg = aggregate([
+      req(),
+      req({ status: 302, cold: true }),
+      req({ status: 503 }),
+      { ...base, t: 'job', ts: T, kind: 'queue', name: 'emails', status: 'ok', dur: 20 },
+      { ...base, t: 'metric', ts: T, name: 'cart', value: 40, unit: 'usd' },
+      { ...base, t: 'metric', ts: T + 1, name: 'cart', value: 90, unit: 'usd' },
+      { ...base, t: 'metric', ts: T + 2, name: 'cart', value: 10, unit: 'usd' },
+    ]);
+    const minute = (prefix: string) => agg.rollups.find((r) => r.pk === `${prefix}#todo#prod#1m`);
+    expect(minute('r')).toMatchObject({
+      sk: '2026-11-14T10:15:00.000Z#GET /api/todos',
+      add: { req: 3, s2xx: 1, s3xx: 1, s5xx: 1, cold: 1 },
+      set: { method: 'GET', route: '/api/todos' },
+    });
+    // A minute row lives as long as the whole stage's.
+    expect(minute('r')!.ttl).toBe(minute('m')!.ttl);
+    expect(minute('j')).toMatchObject({ sk: '2026-11-14T10:15:00.000Z#queue:emails', add: { ok: 1 } });
+    // Custom metrics keep their largest value too, at every resolution.
+    expect(agg.rollups.filter((r) => r.pk.startsWith('c#')).map((r) => [r.pk, r.add, r.max])).toEqual([
+      ['c#todo#prod#1m', { count: 3, sum: 140 }, { max: 90 }],
+      ['c#todo#prod#1h', { count: 3, sum: 140 }, { max: 90 }],
+      ['c#todo#prod#1d', { count: 3, sum: 140 }, { max: 90 }],
+    ]);
   });
   it('counts a service’s container starts on the stage and next to its runs', () => {
     const agg = aggregate([
@@ -204,6 +235,30 @@ describe('aggregate', () => {
     expect(input.UpdateExpression).toBe('SET #ttl = :ttl, #s0 = :s0 ADD #a0 :a0');
     expect(input.ExpressionAttributeNames).toEqual({ '#ttl': 'ttl', '#a0': 'req', '#s0': 'route' });
     expect(input.ExpressionAttributeValues).toEqual({ ':ttl': 9, ':a0': 2, ':s0': '/x' });
+    expect(input).not.toHaveProperty('ReturnValues');
+  });
+
+  it('keeps a maximum: set when the row has none, raised after when the batch beat it', () => {
+    const u = { pk: 'p', sk: 's', add: { count: 1, sum: 7 }, set: {}, max: { max: 7 }, ttl: 9 };
+    const input = rollupUpdateInput('tel', u);
+    expect(input.UpdateExpression).toBe(
+      'SET #ttl = :ttl, #x0 = if_not_exists(#x0, :x0) ADD #a0 :a0, #a1 :a1',
+    );
+    expect(input.ExpressionAttributeNames).toMatchObject({ '#x0': 'max' });
+    expect(input.ReturnValues).toBe('ALL_NEW');
+    // The row came back with its own (the batch's, or a larger one): nothing more to write.
+    expect(maxFollowUps('tel', u, { max: 7 })).toEqual([]);
+    expect(maxFollowUps('tel', u, { max: 12 })).toEqual([]);
+    expect(maxFollowUps('tel', u, { max: 3 })).toEqual([
+      {
+        TableName: 'tel',
+        Key: { pk: 'p', sk: 's' },
+        UpdateExpression: 'SET #m = :m',
+        ConditionExpression: '#m < :m',
+        ExpressionAttributeNames: { '#m': 'max' },
+        ExpressionAttributeValues: { ':m': 7 },
+      },
+    ]);
   });
 });
 
@@ -366,6 +421,37 @@ describe('query mapping', () => {
 });
 
 describe('telemetry processor', () => {
+  effect.effect('raises a custom metric’s max a batch beat, and lets a larger concurrent one stand', () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const ddb = {
+      send: async (command: { input: Record<string, unknown> }) => {
+        updates.push(command.input);
+        if (command.input.ConditionExpression) {
+          // The daily row was raised past this batch's meanwhile.
+          if ((command.input.Key as { pk: string }).pk.endsWith('#1d'))
+            throw Object.assign(new Error('condition'), { name: 'ConditionalCheckFailedException' });
+          return {};
+        }
+        // Rows already hold a max of 50, but the minute row is new (it gets the batch's).
+        const pk = (command.input.Key as { pk: string }).pk;
+        return { Attributes: { max: pk.endsWith('#1m') ? 90 : 50 } };
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const layer = TelemetryWriter.layer.pipe(
+      Layer.provide([awsLayer({ ddb: () => ddb }), settingsLayer(), memoryStore(), Layer.mock(GitHub, {})]),
+    );
+    return Effect.gen(function* () {
+      yield* TelemetryWriter.use((w) =>
+        w.apply(aggregate([{ ...base, t: 'metric', ts: T, name: 'cart', value: 90 }])),
+      );
+      const raised = updates.filter((u) => u.ConditionExpression === '#m < :m');
+      assert.deepStrictEqual(
+        raised.map((u) => (u.Key as { pk: string }).pk),
+        ['c#todo#prod#1h', 'c#todo#prod#1d'],
+      );
+    }).pipe(Effect.provide(layer));
+  });
+
   const err = (fingerprint: string, stage = 'prod'): TelemetryEvent => ({
     ...base,
     stage,
