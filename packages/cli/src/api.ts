@@ -6,6 +6,9 @@
  * stored by `plat login`.
  */
 import {
+  type AlertHistoryResponse,
+  type AlertRule,
+  type AlertRuleInput,
   type AppRecord,
   type AppSummary,
   type CliLoginRequest,
@@ -29,6 +32,7 @@ import {
   type MeResponse,
   type MetricsResponse,
   PLATFORM_DEFAULTS,
+  type QueryResolution,
   type QueueStats,
   type RealtimeStatsResponse,
   type Resolution,
@@ -36,6 +40,8 @@ import {
   type RollbackResponse,
   type RouteStats,
   type SecretInfo,
+  type SeriesQuery,
+  type SeriesResponse,
   type ServiceActionResponse,
   type ServicesResponse,
   type StageRecord,
@@ -245,6 +251,34 @@ export class ApiClient {
   // ------------------------------------------------------------- observability
   metrics(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
     return this.request<MetricsResponse>('GET', `/v1/apps/${enc(app)}/metrics`, { query: q });
+  }
+  /** The explorer's query over the range; without `res`, the API picks about 150 buckets. */
+  series(
+    app: string,
+    q: { stage: string; query: SeriesQuery; from: number; to: number; res?: QueryResolution },
+  ) {
+    const { query, ...rest } = q;
+    return this.request<SeriesResponse>('GET', `/v1/apps/${enc(app)}/series`, {
+      query: { ...rest, q: JSON.stringify(query) },
+    });
+  }
+  /** Alert rules of every stage, or of `stage`. */
+  async alertRules(app: string, q: { stage?: string } = {}): Promise<AlertRule[]> {
+    return list(await this.request('GET', `/v1/apps/${enc(app)}/alerts`, { query: q }), 'rules');
+  }
+  createAlertRule(app: string, input: AlertRuleInput) {
+    return this.request<AlertRule>('POST', `/v1/apps/${enc(app)}/alerts`, { body: input });
+  }
+  /** Replaces a rule's settings; a changed stage, query or condition starts it over in `no_data`. */
+  updateAlertRule(app: string, id: string, input: AlertRuleInput) {
+    return this.request<AlertRule>('PUT', `/v1/apps/${enc(app)}/alerts/${enc(id)}`, { body: input });
+  }
+  deleteAlertRule(app: string, id: string) {
+    return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/alerts/${enc(id)}`);
+  }
+  /** State changes of the app's rules (or `stage`'s), newest first. */
+  alertHistory(app: string, q: { stage?: string; from: number; to: number }) {
+    return this.request<AlertHistoryResponse>('GET', `/v1/apps/${enc(app)}/alerts/history`, { query: q });
   }
   async routes(app: string, q: { stage: string; from: number; to: number }): Promise<RouteStats[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/routes`, { query: q }), 'routes');
