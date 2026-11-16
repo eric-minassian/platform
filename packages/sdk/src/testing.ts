@@ -24,7 +24,7 @@ import { resetClients, type SendClient, setClient } from './runtime/clients.ts';
 import { setEmailCapture } from './runtime/email.ts';
 import { setRealtimeTransport } from './runtime/realtime.ts';
 import { clearSecretsCache } from './runtime/secrets.ts';
-import { setTelemetrySink, uninstallInstrumentation } from './runtime/telemetry.ts';
+import { setTelemetrySink, setTraceSampler, uninstallInstrumentation } from './runtime/telemetry.ts';
 
 export type { CapturedEmail } from '@ericminassian/platform-core';
 export type { SendClient } from './runtime/clients.ts';
@@ -139,11 +139,28 @@ export function mockClient(
   return fake;
 }
 
-/** Collect telemetry events instead of writing them to stdout. Call `stop()` to restore. */
-export function captureTelemetry(): { events: TelemetryEvent[]; stop(): void } {
+/**
+ * Collect telemetry events instead of writing them to stdout. Call `stop()` to restore.
+ *
+ * A request or job writes its spans as deployed: when it fails, is slow, or its
+ * trace is sampled (core's `TRACE_SAMPLE_RATE`), so whether a passing request's
+ * spans appear depends on its trace id. `spans: 'all'` writes them for every
+ * request and job, for tests about what a handler calls.
+ */
+export function captureTelemetry(options: { readonly spans?: 'sampled' | 'all' } = {}): {
+  events: TelemetryEvent[];
+  stop(): void;
+} {
   const events: TelemetryEvent[] = [];
   setTelemetrySink((e) => events.push(e));
-  return { events, stop: () => setTelemetrySink(null) };
+  if (options.spans === 'all') setTraceSampler(() => true);
+  return {
+    events,
+    stop: () => {
+      setTelemetrySink(null);
+      setTraceSampler(null);
+    },
+  };
 }
 
 /** An event the `Realtime` service sent, as subscribers would receive it (after a JSON round trip). */
@@ -228,5 +245,6 @@ export function resetPlatform(): void {
   resetClients();
   clearSecretsCache();
   setTelemetrySink(null);
+  setTraceSampler(null);
   uninstallInstrumentation();
 }

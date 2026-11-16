@@ -155,7 +155,7 @@ describe('cognito hosted-login flow', () => {
     });
     const app = await f(new Request('https://todo.example.com/anything', { headers: { cookie: session } }));
     expect(((await app.json()) as { id: string }).id).toBe('user-1');
-    expect(tel.events.find((e) => e.t === 'req' && e.path === '/anything')).toHaveProperty('user');
+    expect(tel.events.find((e) => e.t === 'req' && e.route === '/anything')).toHaveProperty('user');
   });
 
   it('refreshes an expired id token and sets the new cookie on the response', async () => {

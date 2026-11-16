@@ -3,11 +3,13 @@ import {
   type ErrorEvent,
   errorFingerprint,
   newSpanId,
+  SLOW_TRACE_MS,
   type TelemetryEvent,
   type TelemetryKind,
+  traceSampled,
 } from '@ericminassian/platform-core';
 import { tryBindings } from './bindings.ts';
-import { currentContext, type RequestContext } from './context.ts';
+import { currentContext, type HeldSpans, type RequestContext, type SpanFields } from './context.ts';
 
 /**
  * Telemetry writer. Every line is one core `TelemetryEvent` as JSON on stdout
@@ -15,6 +17,9 @@ import { currentContext, type RequestContext } from './context.ts';
  * filter forwards `_p: 1` lines to the telemetry processor). Under `plat dev`
  * (`PLATFORM_LOG_PRETTY=1`) lines are printed compactly for humans instead.
  * Nothing here may ever throw into app code.
+ *
+ * A request's or job's spans are held until it ends (`endRoot`), which writes
+ * them only when they're worth their bytes; see core's `TRACE_SAMPLE_RATE`.
  */
 
 type Sink = (event: TelemetryEvent) => void;
@@ -27,6 +32,16 @@ let sink: Sink | null = null;
 export function setTelemetrySink(s: Sink | null): void {
   sink = s;
 }
+
+let sampled: (trace: string) => boolean = traceSampled;
+
+/** Replace which traces keep their spans (tests). `null` restores core's `traceSampled`. */
+export function setTraceSampler(s: ((trace: string) => boolean) | null): void {
+  sampled = s ?? traceSampled;
+}
+
+/** Under `plat dev` a person reads every line and nothing is billed, so spans aren't held. */
+const isPretty = () => process.env.PLATFORM_LOG_PRETTY === '1';
 
 type Fields<K extends TelemetryKind> = Omit<
   Extract<TelemetryEvent, { t: K }>,
@@ -49,11 +64,25 @@ export function emit<K extends TelemetryKind>(t: K, fields: Fields<K>): void {
       ...(ctx ? { trace: ctx.trace } : {}),
       ...fields,
     } as unknown as TelemetryEvent;
-    if (sink) sink(event);
-    else rawWrite(`${process.env.PLATFORM_LOG_PRETTY === '1' ? pretty(event) : JSON.stringify(event)}\n`);
+    const line = compact(event);
+    if (sink) sink(line);
+    else rawWrite(`${isPretty() ? pretty(line) : JSON.stringify(line)}\n`);
   } catch {
     // never throw from telemetry
   }
+}
+
+/** Leaves out what a reader can tell without it: a `path` that is its `route`, a first `attempt`. */
+function compact(event: TelemetryEvent): TelemetryEvent {
+  if (event.t === 'req' && event.path === event.route) {
+    const { path, ...rest } = event;
+    return rest;
+  }
+  if (event.t === 'job' && event.attempt === 1) {
+    const { attempt, ...rest } = event;
+    return rest;
+  }
+  return event;
 }
 
 /** Time `fn` as a span (`db.get`, `queue.send`, ...) under the current trace. */
@@ -72,7 +101,14 @@ export async function span<T>(op: string, name: string | undefined, fn: () => Pr
   }
 }
 
-/** Emit a finished span of `ctx`'s trace that started at `t0` (`performance.now()`). */
+/** A request or job holds at most this many spans; it only counts the rest. */
+export const MAX_HELD_SPANS = 500;
+
+/**
+ * A finished span of `ctx`'s trace that started at `t0` (`performance.now()`).
+ * A request or job (`startRoot`) holds it until `endRoot`; any other context
+ * writes it now.
+ */
 export function emitSpan(
   ctx: RequestContext,
   op: string,
@@ -80,7 +116,8 @@ export function emitSpan(
   t0: number,
   status: 'ok' | 'error',
 ): void {
-  emit('span', {
+  const line: SpanFields = {
+    ts: Date.now(),
     trace: ctx.trace,
     op,
     ...(name ? { name } : {}),
@@ -89,6 +126,54 @@ export function emitSpan(
     span: newSpanId(),
     parent: ctx.span,
     start: round(t0 - ctx.startedAt),
+  };
+  const held = ctx.spans;
+  if (!held || held.keep || isPretty()) return emit('span', line);
+  // One that ends after its request or job (work it didn't wait for) follows the choice made then.
+  if (held.ended) return;
+  if (held.lines.length < MAX_HELD_SPANS) held.lines.push(line);
+  else {
+    held.unwritten += 1;
+    held.unwrittenMs += line.dur;
+  }
+}
+
+/** Keeps a request's or job's spans: writes those it holds, and the rest as they end. */
+function keepSpans(held: HeldSpans): void {
+  held.keep = true;
+  for (const line of held.lines) emit('span', line);
+  held.lines = [];
+}
+
+/**
+ * Ends the request or job `ctx` is the root of (`startRoot`) by writing its
+ * `req` or `job` line. Its spans are written first if it failed (a 5xx, a
+ * failed job, or an `err` line while it ran), took `SLOW_TRACE_MS` or longer,
+ * or its trace is sampled; otherwise they're dropped and the line counts them
+ * (`calls`, `callMs`). The line names its own `span` id only when spans that
+ * point to it are written.
+ */
+export function endRoot<K extends 'req' | 'job'>(
+  ctx: RequestContext,
+  t: K,
+  fields: Fields<K> & { readonly status: number | 'ok' | 'error'; readonly dur: number },
+): void {
+  const held = ctx.spans;
+  if (!held) return emit(t, { ...fields, span: ctx.span });
+  if (!held.ended) {
+    held.ended = true;
+    const failed = typeof fields.status === 'number' ? fields.status >= 500 : fields.status === 'error';
+    if (failed || fields.dur >= SLOW_TRACE_MS || sampled(ctx.trace)) keepSpans(held);
+    for (const line of held.lines) {
+      held.unwritten += 1;
+      held.unwrittenMs += line.dur;
+    }
+    held.lines = [];
+  }
+  emit(t, {
+    ...fields,
+    ...(held.keep || isPretty() ? { span: ctx.span } : {}),
+    ...(held.unwritten > 0 ? { calls: held.unwritten, callMs: Math.round(held.unwrittenMs) } : {}),
   });
 }
 
@@ -99,6 +184,9 @@ export function emitError(
   extra: { route?: string; job?: string } = {},
 ): void {
   const e = toError(err);
+  // An error keeps the spans of the request or job it happened in, written before it.
+  const held = currentContext()?.spans;
+  if (held && !held.keep) keepSpans(held);
   emit('err', {
     source,
     name: e.name,
@@ -245,7 +333,7 @@ export function pretty(e: TelemetryEvent): string {
   switch (e.t) {
     case 'req': {
       const color = e.status >= 500 ? 'red' : e.status >= 400 ? 'yellow' : 'green';
-      return `${c('dim', time)} ${c(color, String(e.status))} ${e.method} ${e.path} ${c('dim', `${e.dur}ms${e.cold ? ' cold' : ''}`)}`;
+      return `${c('dim', time)} ${c(color, String(e.status))} ${e.method} ${e.path ?? e.route} ${c('dim', `${e.dur}ms${e.cold ? ' cold' : ''}`)}`;
     }
     case 'err':
       return `${c('dim', time)} ${c('red', `✖ ${e.name}: ${e.message}`)}${e.stack ? `\n${c('dim', e.stack.split('\n').slice(1, 6).join('\n'))}` : ''}`;

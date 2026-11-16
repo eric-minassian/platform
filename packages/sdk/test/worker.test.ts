@@ -91,9 +91,10 @@ describe('worker dispatch', () => {
       job: { kind: 'queue', name: 'emails', attempt: 2 },
       error: { name: 'Error', message: 'boom' },
     });
+    // A first attempt isn't written (compact lines).
     expect(jobLines().map((j) => [j.status, j.attempt, j.next])).toEqual([
-      ['ok', 1, undefined],
-      ['error', 1, 'retry'],
+      ['ok', undefined, undefined],
+      ['error', undefined, 'retry'],
       ['error', 2, 'dead'],
     ]);
     expect(tel.events.find((e) => e.t === 'err')).toMatchObject({
@@ -115,7 +116,7 @@ describe('worker dispatch', () => {
       },
     });
     await expect(handler(job('queue', 'emails', 1, { body: {} }), {})).rejects.toThrow('throttled');
-    expect(jobLines()).toMatchObject([{ status: 'error', attempt: 1 }]);
+    expect(jobLines()).toMatchObject([{ status: 'error', kind: 'queue', name: 'emails' }]);
     expect(jobLines()[0]!.next).toBeUndefined();
   });
 

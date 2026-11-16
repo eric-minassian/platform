@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { newSpanId, newTraceId, type PlatformUser } from '@ericminassian/platform-core';
+import { newSpanId, newTraceId, type PlatformUser, type SpanEvent } from '@ericminassian/platform-core';
 
 /** Per-request / per-job context carried through async calls. */
 export interface RequestContext {
@@ -20,6 +20,26 @@ export interface RequestContext {
   error?: unknown;
   /** Whether `error` was a defect (an unexpected failure) rather than an expected one. */
   errorIsDefect?: boolean;
+  /** Spans held until the request or job ends (`startRoot`); without it they're written as they end. */
+  spans?: HeldSpans;
+}
+
+/** A span line as `emit` takes it. */
+export type SpanFields = Omit<SpanEvent, '_p' | 't' | 'app' | 'stage' | 'rev'>;
+
+/** The spans of a request or job, held until it ends and decides whether to write them (`endRoot`). */
+export interface HeldSpans {
+  lines: SpanFields[];
+  /** Spans that won't be written (dropped, or past the cap): how many, and their total ms. */
+  unwritten: number;
+  unwrittenMs: number;
+  /**
+   * They're written: an error was reported in the context, or it ended and
+   * kept them. Spans that end after that are written as they end.
+   */
+  keep: boolean;
+  /** The request or job has ended: later spans are written if `keep`, else dropped. */
+  ended: boolean;
 }
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -32,8 +52,20 @@ export function runWithContext<T>(ctx: RequestContext, fn: () => T): T {
   return storage.run(ctx, fn);
 }
 
+/** A context whose spans are written as they end: for code that no `req` or `job` line ends. */
 export function newContext(trace?: string | null): RequestContext {
   return { trace: trace || newTraceId(), span: newSpanId(), startedAt: performance.now(), cookies: [] };
+}
+
+/**
+ * The context of a request or job: its spans are held until `endRoot`, called
+ * for its `req` or `job` line, writes or drops them.
+ */
+export function startRoot(trace?: string | null): RequestContext {
+  return {
+    ...newContext(trace),
+    spans: { lines: [], unwritten: 0, unwrittenMs: 0, keep: false, ended: false },
+  };
 }
 
 /** Trace id of the current request/job, or a fresh one outside any context. */
