@@ -6,6 +6,7 @@
  */
 import {
   bucketStart,
+  HEALTH_PATH,
   latencyBucket,
   RESOLUTION_TTL_DAYS,
   type Resolution,
@@ -112,6 +113,10 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
     const { app, stage, ts } = e;
     switch (e.t) {
       case 'req': {
+        // The platform's own probes of the health path (the uptime pinger, deploys waiting for the
+        // edge) aren't traffic. The pinger reads a stage's traffic as its uptime, so a probe it
+        // counted would make a silent stage look served, or a failed probe look like a quiet minute.
+        if (e.route === HEALTH_PATH) break;
         const cls = statusClass(e.status);
         const add: Record<string, number> = { req: 1, [`l${latencyBucket(e.dur)}`]: 1 };
         if (cls) add[cls] = 1;

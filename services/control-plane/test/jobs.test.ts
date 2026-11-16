@@ -4,16 +4,18 @@ import type { InvokeCommandInput, LambdaClient } from '@aws-sdk/client-lambda';
 import type { SchedulerClient } from '@aws-sdk/client-scheduler';
 import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
 import type { SQSClient } from '@aws-sdk/client-sqs';
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { type DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
 import {
   type EmailSending,
   type ManifestInput,
   parseManifest,
   type ResolvedManifest,
+  telemetryKeys,
 } from '@ericminassian/platform-core';
 import { type Duration, Effect, Layer, Option, Ref } from 'effect';
 import { FetchHttpClient } from 'effect/http';
+import { TestClock } from 'effect/testing';
 import { describe, expect, it } from 'vitest';
 import { AwsError } from '../src/aws.ts';
 import { cloudWatchRange } from '../src/cloudwatch.ts';
@@ -22,7 +24,16 @@ import { Dns, type Resolver } from '../src/dns.ts';
 import { waitForEdge } from '../src/edge.ts';
 import { AppEmail } from '../src/email.ts';
 import { PLATFORM_COST_KEY, parseCostResults, TOTAL_COST_KEY } from '../src/jobs/cost.ts';
-import { emailAlert, nextEmailState, nextUptimeState, Pinger } from '../src/jobs/pinger.ts';
+import {
+  describeResult,
+  emailAlert,
+  needsCheck,
+  nextEmailState,
+  nextUptimeState,
+  Pinger,
+  QUIET_CHECK_EVERY_MS,
+  trafficResult,
+} from '../src/jobs/pinger.ts';
 import { AppQueues } from '../src/jobs/queues.ts';
 import {
   AppRealtime,
@@ -44,6 +55,7 @@ import {
   toLogLine,
 } from '../src/logs.ts';
 import { type DeploymentItem, type StageItem, Store } from '../src/store.ts';
+import { TelemetryQuery, toUptimePoint } from '../src/telemetry/query.ts';
 import { awsLayer, memoryStore, runtime, settingsLayer } from './support.ts';
 
 /** Effect's HTTP client over a fake `fetch`. */
@@ -271,6 +283,44 @@ describe('uptime state', () => {
     expect(s).toEqual({ up: false, failures: 3, transition: null });
     expect(nextUptimeState(s, true)).toEqual({ up: true, failures: 0, transition: 'up' });
     expect(nextUptimeState({ up: true }, true).transition).toBeNull();
+  });
+
+  it('reads a stage’s own requests as up unless half of at least 3 were 5xx', () => {
+    expect(trafficResult(0, 0)).toBeUndefined();
+    expect(trafficResult(2, 2)).toEqual({ source: 'traffic', ok: true, req: 2, s5xx: 2 });
+    expect(trafficResult(3, 2)?.ok).toBe(false);
+    expect(trafficResult(4, 2)?.ok).toBe(false);
+    expect(trafficResult(5, 2)?.ok).toBe(true);
+  });
+
+  it('checks a quiet server once it went quiet, every 6 hours, and every run while it fails', () => {
+    const now = Date.parse('2026-11-16T12:00:00.000Z');
+    const ago = (ms: number) => new Date(now - ms).toISOString();
+    const quiet = { app: 'shop', server: true, stage: { up: true }, now };
+    const checked = (ms: number) => ({ ts: ago(ms), source: 'check' as const });
+    expect(needsCheck({ ...quiet, last: undefined })).toBe(true);
+    // It served requests the last time anything was recorded, and nothing since.
+    expect(needsCheck({ ...quiet, last: { ts: ago(5 * 60_000), source: 'traffic' } })).toBe(true);
+    expect(needsCheck({ ...quiet, last: checked(3 * 3_600_000) })).toBe(false);
+    expect(needsCheck({ ...quiet, last: checked(QUIET_CHECK_EVERY_MS) })).toBe(true);
+    expect(needsCheck({ ...quiet, stage: { up: true, failures: 1 }, last: checked(5 * 60_000) })).toBe(true);
+    expect(needsCheck({ ...quiet, stage: { up: false, failures: 0 }, last: checked(5 * 60_000) })).toBe(true);
+    // The router answers a stage without a server, so no function wakes.
+    expect(needsCheck({ ...quiet, server: false, last: checked(5 * 60_000) })).toBe(true);
+    // The control plane's worker is what runs this.
+    expect(
+      needsCheck({ ...quiet, app: 'platform', stage: { up: false, failures: 3 }, last: undefined }),
+    ).toBe(false);
+  });
+
+  it('says what a result saw, for the alert', () => {
+    const url = 'https://shop.example.com';
+    expect(describeResult(url, { source: 'check', ok: false, status: 0, ms: 10_000 })).toBe(
+      'https://shop.example.com/__platform/health → no response in 10000ms',
+    );
+    expect(describeResult(url, { source: 'traffic', ok: false, req: 40, s5xx: 31 })).toBe(
+      '31 of 40 requests in the last 10 minutes were 5xx',
+    );
   });
 });
 
@@ -616,6 +666,7 @@ describe('pinger', () => {
       readonly aws?: Parameters<typeof awsLayer>[0];
       readonly store?: Layer.Layer<Store>;
       readonly email?: Partial<AppEmail['Service']>;
+      readonly telemetry?: Partial<TelemetryQuery['Service']>;
     } = {},
   ) =>
     Pinger.layer.pipe(
@@ -625,6 +676,12 @@ describe('pinger', () => {
           settingsLayer({ runtime: Effect.succeed({ ...runtime, alertsTopicArn: 'arn:alerts' }) }),
           options.store ?? memoryStore(),
           Layer.mock(AppEmail, options.email ?? {}),
+          // No traffic, and no earlier uptime rows, unless a test says otherwise.
+          Layer.mock(TelemetryQuery, {
+            metrics: (app, stage, range) => Effect.succeed({ app, stage, res: range.res, points: [] }),
+            lastUptime: () => Effect.succeedNone,
+            ...options.telemetry,
+          }),
         ),
       ),
       Layer.provideMerge(fetchLayer(fetch)),
@@ -689,6 +746,7 @@ describe('pinger', () => {
     createdAt: '2026-11-01T00:00:00.000Z',
     updatedAt: '2026-11-01T00:00:00.000Z',
     up: true,
+    route: { v: 1, app, stage: 'prod', d: `${app}-d1`, s: `${app}/prod/${app}-d1` },
     ...over,
   });
   const store = () =>
@@ -798,6 +856,224 @@ describe('pinger', () => {
       assert.strictEqual(shop?.failures, 3);
       assert.strictEqual(shop?.emailPaused, undefined);
     }),
+  );
+
+  /**
+   * The uptime rows the pinger writes, kept the way the telemetry table
+   * would, so `lastUptime` answers the newest; and the requests it sent.
+   */
+  const uptimeWorld = (seed: ReadonlyArray<Record<string, unknown>> = []) => {
+    const rows: Array<Record<string, unknown>> = [...seed];
+    const published: PublishCommandInput[] = [];
+    const fetched: string[] = [];
+    const ddb = {
+      send: async (command: unknown) => {
+        if (command instanceof PutCommand) rows.push(command.input.Item as Record<string, unknown>);
+        return {};
+      },
+    } as unknown as DynamoDBDocumentClient;
+    const telemetry = (traffic: (app: string) => { req: number; s5xx: number } | undefined) =>
+      ({
+        metrics: (app, stage, range) =>
+          Effect.succeed({
+            app,
+            stage,
+            res: range.res,
+            points: [traffic(app)]
+              .filter((t) => t !== undefined)
+              .map((t) => ({ ts: telemetryKeys.time(range.from), ...t, s2xx: 0, s3xx: 0, s4xx: 0, cold: 0 }))
+              .map((p) => ({ ...p, p50: null, p95: null, p99: null })),
+          }),
+        lastUptime: (app) =>
+          Effect.sync(() =>
+            Option.map(Option.fromNullishOr(rows.findLast((r) => r.pk === `u#${app}#prod`)), toUptimePoint),
+          ),
+      }) satisfies Partial<TelemetryQuery['Service']>;
+    const fetch = (status: number) => async (input: string | URL | Request) => {
+      fetched.push(input instanceof Request ? input.url : input.toString());
+      return new Response(null, { status });
+    };
+    const aws = {
+      ddb: () => ddb,
+      sns: () =>
+        ({
+          send: async (command: { input: PublishCommandInput }) => {
+            published.push(command.input);
+            return {};
+          },
+        }) as unknown as SNSClient,
+    };
+    return { rows, published, fetched, telemetry, fetch, aws };
+  };
+  const server = (app: string) =>
+    deployment(app, `${app}-d1`, parseManifest({ name: app, web: { server: 'src/server.ts' } }));
+  const now = Date.parse('2026-11-16T12:00:20.000Z');
+  const rowAt = (app: string, ms: number, row: Record<string, unknown>) => ({
+    pk: `u#${app}#prod`,
+    sk: new Date(ms).toISOString(),
+    ...row,
+  });
+
+  effect.effect('takes uptime from traffic, and sends a check only where nothing else tells', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now);
+      const w = uptimeWorld([
+        rowAt('blog', now - 3_600_000, { source: 'check', ok: true, status: 200, ms: 40 }),
+        rowAt('wiki', now - 7 * 3_600_000, { ok: true, status: 200, ms: 40 }),
+      ]);
+      const windows: Array<{ from: string; to: string }> = [];
+      const traffic = w.telemetry((app) => (app === 'shop' ? { req: 40, s5xx: 1 } : undefined));
+      const layer = pinger(w.fetch(200), {
+        aws: w.aws,
+        telemetry: {
+          ...traffic,
+          metrics: (app, stage, range) => {
+            if (app === 'shop')
+              windows.push({
+                from: new Date(range.from).toISOString(),
+                to: new Date(range.to).toISOString(),
+              });
+            return traffic.metrics(app, stage, range);
+          },
+        },
+        store: memoryStore({
+          stages: [
+            prod('shop'),
+            prod('blog'),
+            prod('wiki'),
+            prod('docs'),
+            prod('platform'),
+            prod('ticker', { route: undefined }),
+          ],
+          deployments: [
+            server('shop'),
+            server('blog'),
+            server('wiki'),
+            // Static files only: the router answers its health.
+            deployment('docs', 'docs-d1', parseManifest({ name: 'docs', web: { static: 'dist' } })),
+            server('platform'),
+            deployment(
+              'ticker',
+              'ticker-d1',
+              parseManifest({ name: 'ticker', crons: { tick: 'rate(1 minute)' } }),
+            ),
+          ],
+        }),
+      });
+      const result = yield* Pinger.use((p) => p.run).pipe(Effect.provide(layer));
+      assert.deepStrictEqual(result, { checked: 6, down: [] });
+      // The 10 complete minutes before the run.
+      assert.deepStrictEqual(windows, [{ from: '2026-11-16T11:50:00.000Z', to: '2026-11-16T11:59:59.999Z' }]);
+      // wiki's last check (an old row, before rows had a source) is 7 hours old; docs has no server.
+      assert.deepStrictEqual(w.fetched.toSorted(), [
+        'https://docs.example.com/__platform/health',
+        'https://wiki.example.com/__platform/health',
+      ]);
+      const written: Array<Record<string, unknown>> = w.rows
+        .slice(2)
+        .map(({ pk, sk: _, ttl: __, ms: ___, ...r }) => ({ pk, ...r }));
+      assert.deepStrictEqual(
+        written.toSorted((a, b) => String(a.pk).localeCompare(String(b.pk))),
+        [
+          { pk: 'u#docs#prod', source: 'check', ok: true, status: 200 },
+          { pk: 'u#shop#prod', source: 'traffic', ok: true, req: 40, s5xx: 1 },
+          { pk: 'u#wiki#prod', source: 'check', ok: true, status: 200 },
+        ],
+      );
+    }),
+  );
+
+  effect.effect('goes down after two failing windows of traffic, and says what it saw', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now);
+      const w = uptimeWorld();
+      const layer = pinger(w.fetch(200), {
+        aws: w.aws,
+        telemetry: w.telemetry(() => ({ req: 40, s5xx: 31 })),
+        store: memoryStore({ stages: [prod('shop')], deployments: [server('shop')] }),
+      });
+      const { first, second, shop } = yield* Effect.gen(function* () {
+        const before = yield* Pinger.use((p) => p.run);
+        yield* TestClock.adjust('5 minutes');
+        return {
+          first: before,
+          second: yield* Pinger.use((p) => p.run),
+          shop: Option.getOrUndefined(yield* Store.use((s) => s.getStage('shop', 'prod'))),
+        };
+      }).pipe(Effect.provide(layer));
+      assert.deepStrictEqual([first.down, second.down], [[], ['shop']]);
+      assert.deepStrictEqual([shop?.up, shop?.failures], [false, 2]);
+      assert.deepStrictEqual(w.fetched, []);
+      assert.deepStrictEqual(
+        w.published.map((p) => [p.Subject, p.Message]),
+        [
+          [
+            '[platform] shop is DOWN',
+            '31 of 40 requests in the last 10 minutes were 5xx\n\nhttps://platform.example.com/apps/shop',
+          ],
+        ],
+      );
+    }),
+  );
+
+  effect.effect('checks a server once it goes quiet, then leaves it for 6 hours', () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(now);
+      const w = uptimeWorld([
+        rowAt('shop', now - 5 * 60_000, { source: 'traffic', ok: true, req: 3, s5xx: 0 }),
+      ]);
+      const layer = pinger(w.fetch(200), {
+        aws: w.aws,
+        telemetry: w.telemetry(() => undefined),
+        store: memoryStore({ stages: [prod('shop')], deployments: [server('shop')] }),
+      });
+      const fetchedAfter = yield* Effect.gen(function* () {
+        const counts: number[] = [];
+        for (const step of ['5 minutes', '5 hours', '55 minutes'] as const) {
+          yield* Pinger.use((p) => p.run);
+          counts.push(w.fetched.length);
+          yield* TestClock.adjust(step);
+        }
+        yield* Pinger.use((p) => p.run);
+        counts.push(w.fetched.length);
+        return counts;
+      }).pipe(Effect.provide(layer));
+      // Just quiet: checked. 5 minutes and 5 hours later: nothing. 6 hours after the check: checked.
+      assert.deepStrictEqual(fetchedAfter, [1, 1, 1, 2]);
+      assert.strictEqual(w.rows.length, 3);
+    }),
+  );
+
+  effect.effect(
+    'checks a quiet server that failed again on the next run, so two failures still take it down',
+    () =>
+      Effect.gen(function* () {
+        yield* TestClock.setTime(now);
+        const w = uptimeWorld([
+          rowAt('shop', now - 7 * 3_600_000, { source: 'check', ok: true, status: 200, ms: 9 }),
+        ]);
+        const layer = pinger(w.fetch(503), {
+          aws: w.aws,
+          telemetry: w.telemetry(() => undefined),
+          store: memoryStore({ stages: [prod('shop')], deployments: [server('shop')] }),
+        });
+        const downs = yield* Effect.gen(function* () {
+          const first = yield* Pinger.use((p) => p.run);
+          yield* TestClock.adjust('5 minutes');
+          const second = yield* Pinger.use((p) => p.run);
+          return [first.down, second.down];
+        }).pipe(Effect.provide(layer));
+        assert.deepStrictEqual(downs, [[], ['shop']]);
+        assert.strictEqual(w.fetched.length, 2);
+        assert.deepStrictEqual(
+          w.published.map((p) => p.Subject),
+          ['[platform] shop is DOWN'],
+        );
+        assert.match(
+          w.published[0]?.Message ?? '',
+          /^https:\/\/shop\.example\.com\/__platform\/health → 503 in \d+ms/,
+        );
+      }),
   );
 });
 

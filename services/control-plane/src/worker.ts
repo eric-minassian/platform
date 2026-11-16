@@ -18,6 +18,7 @@ import { StorageExpiry } from './jobs/storage.ts';
 import { Watchdog } from './jobs/watchdog.ts';
 import { BaseLive } from './layers.ts';
 import { aggregate, parseLogMessage } from './telemetry/aggregate.ts';
+import { TelemetryQuery } from './telemetry/query.ts';
 import { TelemetryWriter } from './telemetry/write.ts';
 
 const WorkerLive = Layer.mergeAll(
@@ -36,6 +37,7 @@ const WorkerLive = Layer.mergeAll(
       Artifacts.layer,
       GitHub.layer,
       StageEngine.layer,
+      TelemetryQuery.layer,
       WorkerJobs.layer.pipe(Layer.provide(Queues.layer)),
     ),
   ),

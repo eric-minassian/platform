@@ -262,7 +262,8 @@ export function bucketStart(ts: number, res: Resolution): number {
  * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum (and the unit)
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
- * - `u#<app>#<stage>`        sk `<iso>`           uptime checks: ok, status, ms
+ * - `u#<app>#<stage>`        sk `<iso>`           uptime: ok, source (`traffic`: req, s5xx; `check`, or none on
+ *                                                  rows before traffic counted: status, ms)
  */
 export const telemetryKeys = {
   stage: (app: string, stage: string, res: Resolution) => `m#${app}#${stage}#${res}`,
