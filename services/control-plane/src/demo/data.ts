@@ -209,7 +209,8 @@ export function deploymentsOf(app: string, stage?: string): DeploymentRecord[] {
   return stages
     .flatMap((s) =>
       (STAGE_DEPLOYMENTS[`${app}/${s}`] ?? []).map((d, i) => ({
-        id: `dep_${app}_${s}_${d.commit.slice(0, 7)}`,
+        // Real ids end in random characters; these end in the commit, which reads better in pictures.
+        id: `dep_${app}_${s}_${d.commit.slice(0, 8)}`,
         app,
         stage: s,
         status: d.status ?? (i === 0 ? 'succeeded' : 'succeeded'),

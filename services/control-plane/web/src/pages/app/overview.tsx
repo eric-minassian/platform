@@ -41,7 +41,7 @@ import {
 import { Button } from '../../components/ui/button.tsx';
 import { alertRulesAtom, deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
 import { stageOf, useAppSummary, useDeployment } from '../../data/hooks.ts';
-import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../../format.ts';
+import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime, shortId } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { formatterFor } from '../../lib/series.ts';
 import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
@@ -679,7 +679,7 @@ function Activity({ app, stage, time }: { app: string; stage: string; time: Time
             : d.computeSwitchOf
               ? 'Switched compute of'
               : 'Deployed'}{' '}
-          <Mono>{d.commit?.slice(0, 7) ?? d.id.slice(-7)}</Mono>
+          <Mono>{d.commit?.slice(0, 7) ?? shortId(d.id)}</Mono>
         </>
       ),
       detail: [d.message?.split('\n')[0], d.actor.replace(/^ci:/, 'CI ')].filter(Boolean).join(' · '),

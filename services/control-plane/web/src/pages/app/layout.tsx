@@ -14,6 +14,7 @@ import { EmptyState, ErrorNotice, Loading } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import { deploymentsAtom } from '../../data/atoms.ts';
 import { useAppSummary } from '../../data/hooks.ts';
+import { shortId } from '../../format.ts';
 import { useStage, useTime } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { appRoute } from '../../router.tsx';
@@ -23,7 +24,7 @@ export function deploymentMarker(d: DeploymentRecord): ChartMarker | undefined {
   if (d.status !== 'succeeded' && d.status !== 'rolled_back') return undefined;
   const at = Date.parse(d.finishedAt ?? d.createdAt);
   if (!Number.isFinite(at)) return undefined;
-  const label = d.commit ? d.commit.slice(0, 7) : d.id.slice(-7);
+  const label = d.commit ? d.commit.slice(0, 7) : shortId(d.id);
   const what = d.computeSwitchOf
     ? `Switched to ${d.compute === 'request' ? 'request' : 'instance'} mode`
     : `Deployed ${label}${d.message ? ` · ${d.message.split('\n')[0]}` : ''}`;
