@@ -10,6 +10,9 @@ import { dirExists, zipDirectory } from './util/zip.ts';
 
 export const SDK_SERVER = '@ericminassian/platform/server';
 export const SDK_WORKER = '@ericminassian/platform/worker';
+export const SDK_SERVICE = '@ericminassian/platform/service';
+
+export type BuildPart = 'server' | 'worker' | 'static' | 'services';
 
 export interface BuildOptions {
   cwd: string;
@@ -20,7 +23,7 @@ export interface BuildOptions {
   /** Skip `web.build` (e.g. `plat dev`, which runs the dev server instead). */
   skipWebBuild?: boolean;
   /** Only build these parts. Default: everything the manifest declares. */
-  only?: Array<'server' | 'worker' | 'static'>;
+  only?: BuildPart[];
   /**
    * Replace module specifiers during bundling (absolute paths). Tests use it to
    * stand in for the SDK; nothing else should need it.
@@ -40,6 +43,7 @@ export interface BuildResult {
  * Builds an app into deployable artifacts:
  *  - `server.zip`  → `index.mjs` (+ map): the app's fetch handler wrapped by the SDK server
  *  - `worker.zip`  → `index.mjs` (+ map): `export const handler` for the worker Lambda
+ *  - `services.zip` → `<service>/index.mjs` (+ map) per long-running service, run by its container
  *  - `static.zip`  → the built frontend
  *  - `manifest.json` → `{ manifest, resolved, build }` (`manifest` is plat.config.ts evaluated to JSON)
  */
@@ -47,7 +51,7 @@ export async function buildApp(opts: BuildOptions): Promise<BuildResult> {
   const project = opts.project ?? (await loadProject(opts.cwd));
   const { root, manifest, raw } = project;
   const outDir = resolve(opts.outDir ?? join(root, '.plat', 'build'));
-  const want = (part: 'server' | 'worker' | 'static') => !opts.only || opts.only.includes(part);
+  const want = (part: BuildPart) => !opts.only || opts.only.includes(part);
   const log = opts.quiet ? () => {} : step;
 
   validateForBuild(root, manifest);
@@ -75,6 +79,16 @@ export async function buildApp(opts: BuildOptions): Promise<BuildResult> {
     log('bundling worker');
     const dir = await bundleWorker(root, manifest, join(outDir, 'worker'), { plugins, minify });
     files['worker.zip'] = writeZip(outDir, 'worker.zip', zipDirectory(dir));
+  }
+
+  const services = Object.keys(manifest.services);
+  if (services.length && want('services')) {
+    const servicesDir = join(outDir, 'services');
+    for (const name of services) {
+      log(`bundling service ${name}`);
+      await bundleService(root, manifest, name, join(servicesDir, name), { plugins, minify });
+    }
+    files['services.zip'] = writeZip(outDir, 'services.zip', zipDirectory(servicesDir));
   }
 
   if (manifest.web?.static && want('static')) {
@@ -138,6 +152,26 @@ export async function bundleWorker(
   });
 }
 
+/** Bundle one long-running service into `outDir/index.mjs`: the bundle its container runs. */
+export async function bundleService(
+  root: string,
+  manifest: ResolvedManifest,
+  name: string,
+  outDir: string,
+  opts: { plugins?: Plugin[]; minify?: boolean } = {},
+): Promise<string> {
+  const service = manifest.services[name];
+  if (!service) throw new Error(`manifest has no service ${name}`);
+  const entry = resolve(root, service.entry);
+  return bundle({
+    root,
+    outDir,
+    contents: `import def from ${JSON.stringify(entry)};\nimport { runService } from ${JSON.stringify(SDK_SERVICE)};\nawait runService(def);\n`,
+    plugins: opts.plugins ?? [],
+    minify: opts.minify ?? true,
+  });
+}
+
 /** Zip of a bundled directory, for UpdateFunctionCode. */
 export function zipBundle(dir: string): Uint8Array {
   return zipDirectory(dir);
@@ -154,6 +188,10 @@ export function validateForBuild(root: string, manifest: ResolvedManifest): void
     problems.push(
       `worker entry ${manifest.worker.entry} does not exist (needed for ${describeWorkerNeeds(manifest)})`,
     );
+  }
+  for (const [name, service] of Object.entries(manifest.services)) {
+    if (!existsSync(resolve(root, service.entry)))
+      problems.push(`service ${name} entry ${service.entry} does not exist`);
   }
   if (problems.length)
     throw new CliError(`can't build ${manifest.name}:\n  - ${problems.join('\n  - ')}`, {

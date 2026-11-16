@@ -34,6 +34,8 @@ import {
   type RollbackResponse,
   type RouteStats,
   type SecretInfo,
+  type ServiceActionResponse,
+  type ServicesResponse,
   type StageRecord,
   type StoredObjectInfo,
   type SuppressedResponse,
@@ -267,24 +269,36 @@ export class ApiClient {
   async errors(app: string, q: { stage: string }): Promise<ErrorGroup[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/errors`, { query: q }), 'errors');
   }
+  /** `stream`: `web`, `worker` or `service:<name>`. */
   logs(
     app: string,
-    q: { stage: string; from: number; to?: number; filter?: string; nextToken?: string; limit?: number },
+    q: {
+      stage: string;
+      from: number;
+      to?: number;
+      filter?: string;
+      stream?: string;
+      nextToken?: string;
+      limit?: number;
+    },
   ) {
     const { filter, nextToken, ...rest } = q;
     return this.request<LogsResponse>('GET', `/v1/apps/${enc(app)}/logs`, {
       query: { ...rest, ...(filter ? { q: filter } : {}), ...(nextToken ? { next: nextToken } : {}) },
     });
   }
-  tailLogs(app: string, q: { stage: string; filter?: string }, signal?: AbortSignal) {
+  tailLogs(app: string, q: { stage: string; filter?: string; stream?: string }, signal?: AbortSignal) {
     return this.stream<LogLine>(
       `/v1/apps/${enc(app)}/logs/tail`,
-      { stage: q.stage, ...(q.filter ? { q: q.filter } : {}) },
+      { stage: q.stage, ...(q.filter ? { q: q.filter } : {}), ...(q.stream ? { stream: q.stream } : {}) },
       signal,
     );
   }
   trace(app: string, trace: string, q: { stage: string }) {
     return this.request<TraceResponse>('GET', `/v1/apps/${enc(app)}/traces/${enc(trace)}`, { query: q });
+  }
+  services(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
+    return this.request<ServicesResponse>('GET', `/v1/apps/${enc(app)}/services`, { query: q });
   }
 
   // ------------------------------------------------------------- data
@@ -305,7 +319,7 @@ export class ApiClient {
     );
   }
 
-  // ------------------------------------------------------------- secrets & jobs
+  // ------------------------------------------------------------- secrets, services & jobs
   async listSecrets(app: string, q: { stage: string }): Promise<SecretInfo[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/secrets`, { query: q }), 'secrets');
   }
@@ -319,6 +333,22 @@ export class ApiClient {
     return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/secrets/${enc(name)}`, {
       query: secretScope(q),
     });
+  }
+  /** `restart`: a fresh task on the same build; `stop`: until started again or redeployed. */
+  serviceAction(
+    app: string,
+    name: string,
+    action: 'restart' | 'start' | 'stop',
+    q: { stage: string; minutes?: number },
+  ) {
+    return this.request<ServiceActionResponse>(
+      'POST',
+      `/v1/apps/${enc(app)}/services/${enc(name)}/${action}`,
+      {
+        query: { stage: q.stage },
+        body: action === 'start' && q.minutes !== undefined ? { minutes: q.minutes } : {},
+      },
+    );
   }
   runCron(app: string, name: string, stage: string) {
     return this.request<unknown>('POST', `/v1/apps/${enc(app)}/crons/${enc(name)}/run`, {

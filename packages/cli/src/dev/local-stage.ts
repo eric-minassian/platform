@@ -34,7 +34,8 @@ import { type LocalRealtime, localRealtime, type PublicFiles, type StoredFile } 
  * (`ensureLocalPlatform`) plus this app's resources, created by the same
  * engine that deploys to AWS. The web server runs outside the emulator
  * (`webMode: 'external'`) because the emulator doesn't serve Web Function
- * endpoints yet.
+ * endpoints yet, and so do long-running services (`servicesMode:
+ * 'external'`): `plat dev` runs them as local processes, `plat test` not at all.
  */
 export interface LocalStage {
   conn: EmulatorConnection;
@@ -81,6 +82,7 @@ export async function startLocalStage(opts: StartLocalStageOptions): Promise<Loc
       platform,
       artifacts: worker ? { worker } : {},
       webMode: 'external',
+      servicesMode: 'external',
       logRetentionDays: 1,
     });
     await seedSecrets(conn, result.bindings, opts.root);

@@ -44,6 +44,11 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
       return stack ? `${head}\n${stack}` : head;
     }
     case 'job': {
+      // A service job without a unit name is a run of the service itself that ended.
+      if (e.kind === 'service' && !e.name.includes('/')) {
+        const outcome = e.status === 'ok' ? pc.yellow('returned') : pc.red('failed');
+        return `${pc.cyan('service')} ${e.name} run ${outcome} ${pc.dim(`after ${formatDuration(e.dur)}`)}${trace}`;
+      }
       const status = e.status === 'ok' ? pc.green('ok') : pc.red('error');
       return `${pc.cyan('job')} ${e.kind}:${e.name} ${status} ${pc.dim(`${Math.round(e.dur)}ms`)}${e.attempt && e.attempt > 1 ? pc.yellow(` attempt ${e.attempt}`) : ''}${trace}`;
     }
@@ -65,10 +70,11 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
     // Only refusals: a line per allowed check would drown the requests.
     case 'limit':
       return e.ok ? null : pc.yellow(`rate limit ${e.name}: over`);
-    case 'env':
-      return pc.dim(
-        `${e.runtime} environment ${e.event}${e.initMs !== undefined ? ` (${Math.round(e.initMs)}ms init)` : ''}`,
-      );
+    case 'env': {
+      const what = e.runtime === 'service' && e.name ? `service ${e.name}` : `${e.runtime} environment`;
+      const detail = e.reason ?? (e.initMs !== undefined ? `${Math.round(e.initMs)}ms init` : undefined);
+      return pc.dim(`${what} ${e.event}${detail ? ` (${detail})` : ''}`);
+    }
     case 'span':
       return opts.spans
         ? pc.dim(`  span ${e.op}${e.name ? ` ${e.name}` : ''} ${Math.round(e.dur)}ms ${e.status}`)
@@ -99,4 +105,13 @@ export function prefixer(label: string, write: (s: string) => void, opts: { span
       idx = buf.indexOf('\n');
     }
   };
+}
+
+/** `850ms`, `4.2s`, `3m 05s`, `2h 10m`: a service run can last days. */
+export function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ${String(Math.floor((ms % 60_000) / 1_000)).padStart(2, '0')}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
 }

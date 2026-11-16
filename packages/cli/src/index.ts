@@ -3,13 +3,24 @@
  * and tests import `buildApp`; everything else is for the `plat` binary.
  */
 export { ApiClient, ApiError, apiBaseUrl } from './api.ts';
-export { type BuildOptions, type BuildResult, buildApp, bundleWorker, validateForBuild } from './build.ts';
+export {
+  type BuildOptions,
+  type BuildPart,
+  type BuildResult,
+  buildApp,
+  bundleService,
+  bundleWorker,
+  validateForBuild,
+} from './build.ts';
 export { configDir, credentialsPath, loadCredentials, type StoredCredentials } from './credentials.ts';
 export {
   type DeployOptions,
   type DeployResult,
   deploy,
+  formatServiceCost,
   presignedPostForm,
+  type ServiceCost,
+  serviceCosts,
   waitForDeployment,
 } from './deploy.ts';
 export { type LocalStage, localEnv, startLocalStage } from './dev/local-stage.ts';
