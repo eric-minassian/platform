@@ -571,6 +571,14 @@ export function controlPlanePolicy(input: {
         Action: ['ses:CreateTenantResourceAssociation', 'ses:DeleteTenantResourceAssociation'],
         Resource: runtime.email.identityArn,
       },
+      {
+        // A tenant's ARN ends in an id SES assigns, so a lookup by name of a tenant that doesn't
+        // exist (every deploy and destroy of a stage without email) is authorized against `*`.
+        Sid: 'EmailTenantLookup',
+        Effect: 'Allow',
+        Action: ['ses:GetTenant', 'ses:ListTenantResources'],
+        Resource: '*',
+      },
     );
   }
   if (runtime.containers) {
