@@ -48,6 +48,7 @@ import {
 } from 'effect';
 import { HttpClient } from 'effect/http';
 import { type ArtifactRef, Artifacts } from './artifacts.ts';
+import { Aws, accountConcurrency } from './aws.ts';
 import { logRetentionDays, Settings, servicesLimitIssue } from './config.ts';
 import { EDGE_TIMEOUT_SECONDS, waitForEdge } from './edge.ts';
 import { stageCompute } from './records.ts';
@@ -203,10 +204,11 @@ export class Deployer extends Context.Service<
   static readonly layer: Layer.Layer<
     Deployer,
     never,
-    Artifacts | HttpClient.HttpClient | Settings | StageEngine | Store
+    Artifacts | Aws | HttpClient.HttpClient | Settings | StageEngine | Store
   > = Layer.effect(
     Deployer,
     Effect.gen(function* () {
+      const aws = yield* Aws;
       const artifacts = yield* Artifacts;
       const http = yield* HttpClient.HttpClient;
       const settings = yield* Settings;
@@ -325,9 +327,13 @@ export class Deployer extends Context.Service<
                 stage,
                 current: previousCompute,
                 sdk: dep.sdk,
+                accountConcurrency: yield* Effect.provideService(accountConcurrency, Aws, aws),
               });
         if ('error' in choice) return yield* new DeployFailed({ message: choice.error });
-        if (manifest.web?.server) push({ level: 'info', msg: `the server runs in ${choice.compute} mode` });
+        if (manifest.web?.server) {
+          push({ level: 'info', msg: `the server runs in ${choice.compute} mode` });
+          if ('note' in choice && choice.note) push({ level: 'warn', msg: choice.note });
+        }
 
         const result = yield* engine.deploy(
           {

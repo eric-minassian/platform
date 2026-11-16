@@ -330,6 +330,17 @@ daily chooser   prod servers: simulateWebCompute(last days of minute rollups) �
   Revisions log at system level WARN, which drops the runtime's per-minute
   `platform.invokeSummary` and its init, invoke and spin-down records; the
   SDK's `env` and `req` lines carry the same facts.
+- **The account's concurrency.** Request-mode servers share the account's
+  Lambda concurrency with every worker, and a throttled function URL answers
+  errors; Web Functions scale on their own vCPU quota. So `auto` runs request
+  mode only on an account whose "Concurrent executions" limit is at least
+  100 (`REQUEST_MODE_MIN_ACCOUNT_CONCURRENCY`; a new account has 10, which one
+  burst of browser tests on a preview exceeds): below it, deploys run
+  instance mode with a warning saying why, and the chooser estimates but
+  doesn't switch to request mode. `web.compute: 'request'` still runs, with
+  the warning. The control plane reads the limit (`GetAccountSettings`) on
+  each deploy and chooser run, so raising the quota needs no deploy of the
+  platform.
 - **Both modes stay.** A deploy builds only the active mode and leaves the
   other mode's server as it is (both cost nothing idle), so a switch back or a
   rollback across modes finds it. Dropping `web.server`, or destroying the
@@ -1346,3 +1357,4 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Request mode defaults to 1024 MB                                                      | Measured on the template app: INIT doesn't speed up with memory, requests do. Warm requests took 5–11 ms at 1024 MB against 12–148 at 512, so 1024 also costs less per request; 1769 MB was no faster.                                                                                                                                                                                                                                                                                                                                                   |
 | Web Function endpoints capped, runtime logs at WARN                                   | Spare environments are billed, and the cap bounds them (previews 2, prod 10 unless `web.maxEnvironments`). The runtime's own log records repeat the SDK's `env` and `req` lines and cost ingest.                                                                                                                                                                                                                                                                                                                                                         |
 | The control plane's server runs in instance mode                                      | It must keep answering when apps' request-mode servers and workers use up the account's shared Lambda concurrency; Web Functions scale on their own quota.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `auto` waits for the account to have Lambda concurrency to spare                      | A new account can run 10 Lambda invocations at once, shared by request-mode servers and every worker; past that, function URLs answer errors. Web Functions scale on their own quota, so on such an account `auto` keeps servers there, with a warning that names the fix (raise "Concurrent executions" to at least 100).                                                                                                                                                                                                                               |

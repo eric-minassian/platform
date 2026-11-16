@@ -5,6 +5,7 @@ import {
   originSecret,
   simulateWebCompute,
   supportsRequestMode,
+  requestModeBlocked,
   webComputeFor,
   webMaxEnvironments,
 } from '../src/index.ts';
@@ -141,6 +142,29 @@ describe('which mode a deploy runs', () => {
     expect(webComputeFor({ setting: 'request', stage: 'prod', current: 'instance', sdk })).toEqual({
       compute: 'request',
     });
+  });
+
+  it('keeps auto on Web Functions while the account lacks the Lambda concurrency request mode needs', () => {
+    const sdk = '0.4.0';
+    const blocked = webComputeFor({ setting: 'auto', stage: 'pr-3', sdk, accountConcurrency: 10 });
+    expect(blocked).toMatchObject({
+      compute: 'instance',
+      note: expect.stringContaining('limit is 10') as unknown,
+    });
+    expect(webComputeFor({ setting: 'auto', stage: 'pr-3', sdk, accountConcurrency: 1000 })).toEqual({
+      compute: 'request',
+    });
+    // A stage already on a Web Function stays there without a note.
+    expect(
+      webComputeFor({ setting: 'auto', stage: 'prod', current: 'instance', sdk, accountConcurrency: 10 }),
+    ).toEqual({ compute: 'instance' });
+    // Asked for by name, request mode runs, with the warning.
+    expect(webComputeFor({ setting: 'request', stage: 'prod', sdk, accountConcurrency: 10 })).toMatchObject({
+      compute: 'request',
+      note: expect.stringContaining('throttled') as unknown,
+    });
+    expect(requestModeBlocked(undefined)).toBeUndefined();
+    expect(requestModeBlocked(100)).toBeUndefined();
   });
 
   it('runs an older build as a Web Function, and refuses to run it per request', () => {

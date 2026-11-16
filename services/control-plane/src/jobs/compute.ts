@@ -23,10 +23,11 @@ import {
   simulateWebCompute,
   supportsRequestMode,
   type WebCompute,
+  requestModeBlocked,
 } from '@ericminassian/platform-core';
 import { Clock, Context, DateTime, Effect, Layer, Option } from 'effect';
 import { Artifacts } from '../artifacts.ts';
-import { Aws, tryAws } from '../aws.ts';
+import { Aws, accountConcurrency, tryAws } from '../aws.ts';
 import { type DeploymentItem, type StageItem, stageCompute } from '../records.ts';
 import { Store } from '../store.ts';
 import { TelemetryQuery } from '../telemetry/query.ts';
@@ -62,6 +63,8 @@ export function decideCompute(input: {
   readonly traffic: { readonly minutes: ReadonlyArray<MinuteTraffic>; readonly initMs?: number };
   /** Peak memory of the stage's Web Function environments, when CloudWatch has it. */
   readonly instanceMemoryMb?: number;
+  /** The account's Lambda concurrency limit, when known: too low, and nothing switches to request mode. */
+  readonly accountConcurrency?: number;
   readonly now: number;
 }): ComputeDecision {
   const skip = computeSkip(input.stage, input.live);
@@ -86,6 +89,9 @@ export function decideCompute(input: {
     streak: input.stage.computeStreak,
     day: estimate.at.slice(0, 10),
   });
+  // The estimate stays, so the console shows what request mode would save once the account can run it.
+  if (step.switchTo === 'request' && requestModeBlocked(input.accountConcurrency))
+    return { current, estimate, ...(step.streak ? { streak: step.streak } : {}) };
   return { current, estimate, ...step };
 }
 
@@ -213,11 +219,13 @@ export class ComputeChooser extends Context.Service<
             Effect.logWarning('could not read Web Function memory', e.message).pipe(Effect.as(undefined)),
           ),
         );
+        const concurrency = yield* Effect.provideService(accountConcurrency, Aws, aws);
         const decision = decideCompute({
           stage,
           live,
           traffic,
           ...(instanceMemoryMb !== undefined ? { instanceMemoryMb } : {}),
+          ...(concurrency !== undefined ? { accountConcurrency: concurrency } : {}),
           now,
         });
         if ('skip' in decision) return false;

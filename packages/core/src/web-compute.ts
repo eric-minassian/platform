@@ -60,10 +60,32 @@ export function supportsRequestMode(sdk: string | undefined): boolean {
 }
 
 /**
+ * The account Lambda concurrency `auto` needs before it runs request mode.
+ * Request-mode servers share the account's concurrency with every worker; a
+ * new account's limit is 10, which one burst of browser tests on a preview
+ * can exceed, and Lambda answers throttled requests with errors. Web
+ * Functions scale on their own quota. AWS keeps 100 unreserved at the usual
+ * 1,000.
+ */
+export const REQUEST_MODE_MIN_ACCOUNT_CONCURRENCY = 100;
+
+/** Why `auto` keeps a server off request mode on this account, or undefined when it needn't. */
+export function requestModeBlocked(accountConcurrency: number | undefined): string | undefined {
+  if (accountConcurrency === undefined || accountConcurrency >= REQUEST_MODE_MIN_ACCOUNT_CONCURRENCY)
+    return undefined;
+  return (
+    `the account's Lambda concurrency limit is ${accountConcurrency}, and request mode needs ` +
+    `${REQUEST_MODE_MIN_ACCOUNT_CONCURRENCY} (raise "Concurrent executions" in Service Quotas)`
+  );
+}
+
+/**
  * The mode a deploy runs the server in. `auto` runs request mode everywhere
  * but prod, where a stage keeps the mode it has (the chooser changes it) and
  * starts in request mode. A bundle built with an SDK older than
- * `REQUEST_MODE_MIN_SDK` only runs as a Web Function.
+ * `REQUEST_MODE_MIN_SDK` only runs as a Web Function, and so does `auto` on an
+ * account without the Lambda concurrency request mode needs
+ * (`requestModeBlocked`); `note` then says why.
  */
 export function webComputeFor(input: {
   setting: WebComputeSetting;
@@ -72,18 +94,26 @@ export function webComputeFor(input: {
   current?: WebCompute | undefined;
   /** The deployment's `@ericminassian/platform` version. */
   sdk?: string | undefined;
-}): { compute: WebCompute } | { error: string } {
+  /** The account's Lambda concurrency limit, when known. */
+  accountConcurrency?: number | undefined;
+}): { compute: WebCompute; note?: string } | { error: string } {
   const capable = supportsRequestMode(input.sdk);
   if (input.setting === 'instance') return { compute: 'instance' };
+  const blocked = requestModeBlocked(input.accountConcurrency);
   if (input.setting === 'request') {
-    return capable
-      ? { compute: 'request' }
-      : {
-          error: `web.compute is 'request', but this build's @ericminassian/platform is ${input.sdk ?? 'unknown'}: request mode needs ${REQUEST_MODE_MIN_SDK} or later`,
-        };
+    if (!capable)
+      return {
+        error: `web.compute is 'request', but this build's @ericminassian/platform is ${input.sdk ?? 'unknown'}: request mode needs ${REQUEST_MODE_MIN_SDK} or later`,
+      };
+    // Asked for by name: it runs, with the warning.
+    return blocked
+      ? { compute: 'request', note: `request mode can be throttled: ${blocked}` }
+      : { compute: 'request' };
   }
   if (!capable) return { compute: 'instance' };
-  return { compute: input.stage === PROD_STAGE ? (input.current ?? 'request') : 'request' };
+  const wanted = input.stage === PROD_STAGE ? (input.current ?? 'request') : 'request';
+  if (wanted === 'request' && blocked) return { compute: 'instance', note: `instance mode: ${blocked}` };
+  return { compute: wanted };
 }
 
 /** `maxEnvironments` of a stage's Web Function endpoints. */

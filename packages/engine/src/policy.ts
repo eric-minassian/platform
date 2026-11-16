@@ -460,6 +460,8 @@ export function controlPlanePolicy(input: {
         'lambda:CreateEventSourceMapping',
         'lambda:ListFunctions',
         'lambda:ListWebFunctions',
+        // Whether `auto` may run a server in request mode (core `requestModeBlocked`).
+        'lambda:GetAccountSettings',
       ],
       Resource: '*',
     },

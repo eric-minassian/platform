@@ -86,6 +86,21 @@ describe('decideCompute', () => {
     assert.deepStrictEqual('switchTo' in d && d.switchTo, 'instance');
   });
 
+  it('moves a quiet stage back to request mode only on an account with the concurrency for it', () => {
+    const due = (accountConcurrency: number) =>
+      decideCompute({
+        stage: prod({ compute: 'instance', computeStreak: { to: 'request', days: 2, day: '2026-11-15' } }),
+        live: live(),
+        traffic: { minutes: quiet },
+        accountConcurrency,
+        now,
+      });
+    const open = due(1000);
+    assert.isTrue(!('skip' in open) && open.switchTo === 'request');
+    const held = due(10);
+    assert.isTrue(!('skip' in held) && held.switchTo === undefined && held.estimate !== undefined);
+  });
+
   it('only estimates a stage that set its mode, and keeps a quiet stage where it is', () => {
     const fixed = decideCompute({
       stage: prod({ compute: 'instance', computeStreak: { to: 'request', days: 2, day: '2026-11-15' } }),
