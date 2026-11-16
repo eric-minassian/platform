@@ -41,7 +41,8 @@ export interface BuildResult {
 
 /**
  * Builds an app into deployable artifacts:
- *  - `server.zip`  → `index.mjs` (+ map): the app's fetch handler wrapped by the SDK server
+ *  - `server.zip`  → `index.mjs` (+ map): the app's fetch handler wrapped by the SDK server; it
+ *                    listens as a Web Function and exports `handler` for request mode
  *  - `worker.zip`  → `index.mjs` (+ map): `export const handler` for the worker Lambda
  *  - `services.zip` → `<service>/index.mjs` (+ map) per long-running service, run by its container
  *  - `static.zip`  → the built frontend
@@ -65,10 +66,12 @@ export async function buildApp(opts: BuildOptions): Promise<BuildResult> {
   if (manifest.web?.server && want('server')) {
     log('bundling server');
     const entry = resolve(root, manifest.web.server);
+    // One bundle for both compute modes: a Web Function runs the module (which listens), a
+    // request-mode function calls `index.handler`.
     const dir = await bundle({
       root,
       outDir: join(outDir, 'server'),
-      contents: `import handler from ${JSON.stringify(entry)};\nimport { startServer } from ${JSON.stringify(SDK_SERVER)};\nawait startServer(handler);\n`,
+      contents: `import app from ${JSON.stringify(entry)};\nimport { serve } from ${JSON.stringify(SDK_SERVER)};\nexport const handler = await serve(app);\n`,
       plugins,
       minify,
     });
