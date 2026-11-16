@@ -3,9 +3,12 @@ import { Link } from 'react-router';
 import { ApiClient, fresh, timeToLive } from '../client.ts';
 import { Bars, SERIES_COLORS } from '../components/charts.tsx';
 import { Badge, Card, Loaded, Mono, Stat, Table } from '../components/ui.tsx';
-import { fmtUsd } from '../format.ts';
+import { fmtDateTime, fmtNum, fmtPct, fmtUsd } from '../format.ts';
 
 const overviewAtom = fresh(ApiClient.query('admin', 'overview', { timeToLive }));
+const edgeAtom = fresh(ApiClient.query('admin', 'edge', { query: { range: '24h' }, timeToLive }), {
+  every: '60 seconds',
+});
 
 export function AdminPage() {
   const result = useAtomValue(overviewAtom);
@@ -41,6 +44,7 @@ export function AdminPage() {
                 />
               </Card>
             )}
+            <EdgeFloorCard />
             <Card title="Members">
               <Table head={['GitHub', 'Role']}>
                 {o.members.map((m) => (
@@ -60,7 +64,10 @@ export function AdminPage() {
                 Invite someone by adding their GitHub username to <Mono>members</Mono> in{' '}
                 <Mono>platform.config.ts</Mono> and deploying the platform. Limits: {o.limits.appsPerMember}{' '}
                 apps per member, {o.limits.stagesPerApp} stages per app, {o.limits.emailsPerDay} email
-                recipients a day per stage.
+                recipients a day per stage
+                {o.limits.edgeRequestsPerMinute === undefined
+                  ? '.'
+                  : `, ${o.limits.edgeRequestsPerMinute} requests per client per app per minute at the edge.`}
               </p>
             </Card>
             <p className="text-[12px] text-muted">
@@ -72,5 +79,71 @@ export function AdminPage() {
         )}
       </Loaded>
     </div>
+  );
+}
+
+/**
+ * The edge's per-client request floor over the last 24 hours, for every app:
+ * how many requests it blocked, when, and a sample of whom it blocked on
+ * which host (WAF samples a share of requests, from the last three hours).
+ */
+function EdgeFloorCard() {
+  const result = useAtomValue(edgeAtom);
+  return (
+    <Card title="Edge floor">
+      <Loaded result={result}>
+        {(e) =>
+          e.enabled ? (
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                <Stat
+                  label="Limit"
+                  value={e.limit?.toLocaleString('en') ?? '—'}
+                  hint="requests per client per app per minute"
+                />
+                <Stat
+                  label="Blocked (24h)"
+                  value={fmtNum(e.totals.blocked)}
+                  tone={e.totals.blocked ? 'warn' : 'muted'}
+                  hint={`${fmtPct(e.totals.blocked / (e.totals.blocked + e.totals.allowed || 1), 2)} of requests`}
+                />
+                <Stat label="Allowed (24h)" value={fmtNum(e.totals.allowed)} />
+              </div>
+              <Bars
+                data={[...e.points]}
+                range="24h"
+                format={fmtNum}
+                series={[{ key: 'blocked', label: 'blocked', color: SERIES_COLORS.s4xx }]}
+              />
+              <Table
+                head={['Blocked at', 'Host', 'Client', 'Request']}
+                empty="Nothing blocked in the last three hours."
+              >
+                {e.samples.slice(0, 20).map((s) => (
+                  <tr key={`${s.at}${s.client}${s.path}`}>
+                    <td className="whitespace-nowrap">{fmtDateTime(s.at)}</td>
+                    <td>
+                      <Mono>{s.host}</Mono>
+                    </td>
+                    <td>
+                      <Mono>{s.client}</Mono>
+                      {s.country && <span className="pl-1.5 text-muted">{s.country}</span>}
+                    </td>
+                    <td>
+                      <Mono>{`${s.method} ${s.path}`}</Mono>
+                    </td>
+                  </tr>
+                ))}
+              </Table>
+            </div>
+          ) : (
+            <p className="text-[12px] text-muted">
+              Off. Set <Mono>limits.edgeRequestsPerMinute</Mono> in <Mono>platform.config.ts</Mono> and deploy
+              the platform to block floods at the edge.
+            </p>
+          )
+        }
+      </Loaded>
+    </Card>
   );
 }

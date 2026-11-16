@@ -21,6 +21,7 @@ import { Aws } from '../src/aws.ts';
 import { type GithubAppSettings, Settings } from '../src/config.ts';
 import { DataBrowser } from '../src/data.ts';
 import { Dns } from '../src/dns.ts';
+import { EdgeFloor } from '../src/edge-floor.ts';
 import { AppEmail } from '../src/email.ts';
 import { GitHub } from '../src/github.ts';
 import { WorkerJobs } from '../src/jobs/call.ts';
@@ -236,6 +237,7 @@ export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => 
       cloudwatch: missing('cloudwatch'),
       sesv2: missing('sesv2'),
       ce: missing('ce'),
+      wafv2: missing('wafv2'),
       ...clients,
     }),
   );
@@ -252,6 +254,7 @@ export interface TestServices {
   readonly queues?: Partial<AppQueues['Service']>;
   readonly realtime?: Partial<AppRealtime['Service']>;
   readonly email?: Partial<AppEmail['Service']>;
+  readonly edge?: Partial<EdgeFloor['Service']>;
   readonly artifacts?: Partial<Artifacts['Service']>;
   /** What a synchronous worker job (`call`) answers. */
   readonly call?: WorkerJobs['Service']['call'];
@@ -285,6 +288,7 @@ export const testServices = (options: TestServices = {}) =>
     Layer.mock(AppQueues, options.queues ?? {}),
     Layer.mock(AppRealtime, options.realtime ?? {}),
     Layer.mock(AppEmail, options.email ?? {}),
+    Layer.mock(EdgeFloor, options.edge ?? {}),
     Layer.mock(Artifacts, options.artifacts ?? {}),
     Layer.mock(WorkerJobs, {
       invoke: (name, payload) =>

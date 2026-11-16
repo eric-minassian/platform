@@ -7,6 +7,9 @@ import {
   type AppSummary,
   bucketStart,
   type CostResponse,
+  type CustomMetricPoint,
+  type CustomMetricsResponse,
+  type CustomMetricStats,
   type ErrorGroup,
   type ErrorStatus,
   type JobStats,
@@ -177,30 +180,66 @@ export function toJobStats(
   }));
 }
 
+/** Items of a `<iso>#<name>` series family, by name and then bucket time. */
+function byName(items: readonly Item[]): Map<string, Map<string, Item>> {
+  const out = new Map<string, Map<string, Item>>();
+  for (const i of items) {
+    const sk = String(i.sk);
+    const at = sk.indexOf('#');
+    const name = str(i.name, sk.slice(at + 1));
+    const buckets = out.get(name) ?? new Map<string, Item>();
+    buckets.set(sk.slice(0, at), i);
+    out.set(name, buckets);
+  }
+  return out;
+}
+
+/** The bucket start times of `range`, as the telemetry table's ISO keys. */
+function bucketTimes(range: TimeRange): string[] {
+  const step = RESOLUTION_MS[range.res];
+  const end = bucketStart(range.to, range.res);
+  const times: string[] = [];
+  for (let t = bucketStart(range.from, range.res); t <= end && times.length < 2000; t += step)
+    times.push(telemetryKeys.time(t));
+  return times;
+}
+
+/**
+ * Per-metric totals and zero-filled series from custom metric items
+ * (sk = `<iso>#<metric>`), by name. The unit is the latest one recorded.
+ */
+export function toCustomMetricStats(items: readonly Item[], range: TimeRange): CustomMetricStats[] {
+  const times = bucketTimes(range);
+  return [...byName(items)]
+    .map(([name, buckets]) => {
+      const points: CustomMetricPoint[] = times.map((ts) => {
+        const i = buckets.get(ts);
+        return { ts, count: num(i?.count), sum: num(i?.sum) };
+      });
+      const unit = [...buckets.values()].map((i) => i.unit).findLast((u) => typeof u === 'string');
+      return {
+        name,
+        ...(typeof unit === 'string' ? { unit } : {}),
+        count: points.reduce((a, p) => a + p.count, 0),
+        sum: points.reduce((a, p) => a + p.sum, 0),
+        points,
+      };
+    })
+    .toSorted((x, y) => x.name.localeCompare(y.name));
+}
+
 /**
  * Per-limit totals and zero-filled series from rate limit items
  * (sk = `<iso>#<limit>`), most denied first.
  */
 export function toLimitStats(items: readonly Item[], range: TimeRange): LimitStats[] {
-  const byLimit = new Map<string, Map<string, Item>>();
-  for (const i of items) {
-    const sk = String(i.sk);
-    const at = sk.indexOf('#');
-    const name = str(i.name, sk.slice(at + 1));
-    const buckets = byLimit.get(name) ?? new Map<string, Item>();
-    buckets.set(sk.slice(0, at), i);
-    byLimit.set(name, buckets);
-  }
-  const step = RESOLUTION_MS[range.res];
-  const end = bucketStart(range.to, range.res);
-  return [...byLimit]
+  const times = bucketTimes(range);
+  return [...byName(items)]
     .map(([name, buckets]) => {
-      const points: LimitPoint[] = [];
-      for (let t = bucketStart(range.from, range.res); t <= end && points.length < 2000; t += step) {
-        const ts = telemetryKeys.time(t);
+      const points: LimitPoint[] = times.map((ts) => {
         const i = buckets.get(ts);
-        points.push({ ts, allowed: num(i?.allowed), denied: num(i?.denied) });
-      }
+        return { ts, allowed: num(i?.allowed), denied: num(i?.denied) };
+      });
       return {
         name,
         allowed: points.reduce((a, p) => a + p.allowed, 0),
@@ -271,6 +310,8 @@ export class TelemetryQuery extends Context.Service<
       range: TimeRange,
       declared: ReadonlyArray<{ kind: JobStats['kind']; name: string }>,
     ): Effect.Effect<ReadonlyArray<JobStats>>;
+    /** `Metrics.count`/`value` series per name, at 1h or 1d. */
+    customMetrics(app: string, stage: string, range: TimeRange): Effect.Effect<CustomMetricsResponse>;
     /** Rate limit checks per limit, at 1h or 1d. */
     limits(app: string, stage: string, range: TimeRange): Effect.Effect<LimitsResponse>;
     /** Most recently seen first. */
@@ -350,6 +391,22 @@ export class TelemetryQuery extends Context.Service<
         const r = seriesRange(range);
         const [a, b] = isoRange(r);
         return toJobStats(yield* queryRange(telemetryKeys.job(app, stage, r.res), a, b), declared);
+      }, Effect.orDie);
+
+      const customMetrics = Effect.fn('TelemetryQuery.customMetrics')(function* (
+        app: string,
+        stage: string,
+        range: TimeRange,
+      ) {
+        const r = seriesRange(range);
+        const [a, b] = isoRange(r);
+        const items = yield* queryRange(telemetryKeys.metric(app, stage, r.res), a, b);
+        return {
+          app,
+          stage,
+          res: r.res,
+          metrics: toCustomMetricStats(items, r),
+        } satisfies CustomMetricsResponse;
       }, Effect.orDie);
 
       const limits = Effect.fn('TelemetryQuery.limits')(function* (
@@ -446,6 +503,7 @@ export class TelemetryQuery extends Context.Service<
         metrics,
         routes,
         jobs,
+        customMetrics,
         limits,
         errors,
         setErrorStatus,

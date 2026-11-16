@@ -13,6 +13,7 @@ import {
   type CreateAppRequest,
   type CreateDeploymentRequest,
   type CreateDeploymentResponse,
+  type CustomMetricsResponse,
   type DataCollections,
   type DataPage,
   type DeploymentRecord,
@@ -256,6 +257,9 @@ export class ApiClient {
   }
   realtime(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
     return this.request<RealtimeStatsResponse>('GET', `/v1/apps/${enc(app)}/realtime`, { query: q });
+  }
+  customMetrics(app: string, q: { stage: string; from: number; to: number }) {
+    return this.request<CustomMetricsResponse>('GET', `/v1/apps/${enc(app)}/custom-metrics`, { query: q });
   }
   limits(app: string, q: { stage: string; from: number; to: number }) {
     return this.request<LimitsResponse>('GET', `/v1/apps/${enc(app)}/limits`, { query: q });

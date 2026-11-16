@@ -2,7 +2,12 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { formatCollections, formatLimits, parsePartition } from '../src/commands/observe.ts';
+import {
+  formatCollections,
+  formatCustomMetrics,
+  formatLimits,
+  parsePartition,
+} from '../src/commands/observe.ts';
 import { nextRun } from '../src/dev/crons.ts';
 import { readDotEnv } from '../src/dev/local-stage.ts';
 import { prettyLine } from '../src/dev/pretty.ts';
@@ -115,5 +120,41 @@ describe('plat metrics rate limits', () => {
     expect(rows[0]).toMatch(/^limit\s+allowed\s+denied\s+denied %\s+denied over time$/);
     expect(rows[1]).toMatch(/^signups\s+30\s+10\s+25\.0%\s+▁▆█$/);
     expect(rows[2]).toMatch(/^writes\s+500\s+0\s+0\.0%\s+▁▁▁$/);
+  });
+});
+
+describe('plat metrics custom metrics', () => {
+  it('shows counts by their total and values by their average too', () => {
+    const at = (h: number) => `2026-11-15T1${h}:00:00.000Z`;
+    const lines = formatCustomMetrics([
+      {
+        name: 'cart.total',
+        unit: 'usd',
+        count: 4,
+        sum: 130,
+        points: [
+          { ts: at(0), count: 1, sum: 10 },
+          { ts: at(1), count: 0, sum: 0 },
+          { ts: at(2), count: 3, sum: 120 },
+        ],
+      },
+      {
+        name: 'signups',
+        unit: 'count',
+        count: 3,
+        sum: 7,
+        points: [
+          { ts: at(0), count: 1, sum: 1 },
+          { ts: at(1), count: 1, sum: 2 },
+          { ts: at(2), count: 1, sum: 4 },
+        ],
+      },
+    ]).map((l) => stripVTControlCharacters(l));
+    expect(lines[0]).toBe('custom metrics');
+    const rows = lines[1]!.split('\n').map((r) => r.trimEnd());
+    expect(rows[0]).toMatch(/^metric\s+unit\s+total\s+average\s+recorded\s+over time$/);
+    // A bucket with nothing recorded has no average: a gap, not a zero.
+    expect(rows[1]).toMatch(/^cart\.total\s+usd\s+130\s+32\.50\s+4\s+▁ █$/);
+    expect(rows[2]).toMatch(/^signups\s+7\s+-\s+3\s+▁▃█$/);
   });
 });

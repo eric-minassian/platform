@@ -10,6 +10,7 @@ import { Artifacts } from './artifacts.ts';
 import { Tokens } from './auth.ts';
 import { DataBrowser } from './data.ts';
 import { Dns } from './dns.ts';
+import { EdgeFloor } from './edge-floor.ts';
 import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
@@ -31,6 +32,7 @@ export const ServerLive = HttpLive.pipe(
       Artifacts.layer,
       DataBrowser.layer,
       Dns.layer,
+      EdgeFloor.layer,
       GitHub.layer,
       Logs.layer,
       TelemetryQuery.layer,

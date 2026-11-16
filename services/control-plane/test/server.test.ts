@@ -838,6 +838,63 @@ describe('observability', () => {
     }),
   );
 
+  it.effect('reads custom metrics for a member’s stage', () =>
+    Effect.gen(function* () {
+      const { request, signIn } = yield* setup({
+        store: memoryStore({ apps: [shop], stages: [prodStage()] }),
+        telemetry: {
+          customMetrics: (app, stage, range) =>
+            Effect.succeed({
+              app,
+              stage,
+              res: range.res === '1m' ? ('1h' as const) : range.res,
+              metrics: [{ name: 'signups', unit: 'count', count: 2, sum: 5, points: [] }],
+            }),
+        },
+      });
+      const res = yield* request('/v1/apps/shop/custom-metrics?range=24h', { headers: yield* signIn('bob') });
+      assert.strictEqual(res.status, 200);
+      assert.deepStrictEqual(yield* json(res), {
+        app: 'shop',
+        stage: 'prod',
+        res: '1h',
+        metrics: [{ name: 'signups', unit: 'count', count: 2, sum: 5, points: [] }],
+      });
+    }),
+  );
+
+  it.effect('shows the edge floor to admins only', () =>
+    Effect.gen(function* () {
+      const ranges: string[] = [];
+      const { request, signIn } = yield* setup({
+        edge: {
+          stats: (range) =>
+            Effect.sync(() => {
+              ranges.push(range.res);
+              return {
+                enabled: true,
+                limit: 1000,
+                res: range.res,
+                totals: { blocked: 4, allowed: 100 },
+                points: [],
+                samples: [],
+              };
+            }),
+        },
+      });
+      const admin = yield* request('/v1/admin/edge', { headers: yield* signIn('ada') });
+      assert.strictEqual(admin.status, 200);
+      assert.deepStrictEqual(((yield* json(admin)) as { totals: unknown }).totals, {
+        blocked: 4,
+        allowed: 100,
+      });
+      // 24 hours by default.
+      assert.deepStrictEqual(ranges, ['1h']);
+      const member = yield* request('/v1/admin/edge', { headers: yield* signIn('bob') });
+      assert.strictEqual(member.status, 403);
+    }),
+  );
+
   it.effect('reads rate limit checks for a member’s stage', () =>
     Effect.gen(function* () {
       const seen: Array<{ app: string; stage: string; res: string }> = [];

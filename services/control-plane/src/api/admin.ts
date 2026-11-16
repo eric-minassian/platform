@@ -1,11 +1,12 @@
-/** Admin-only overview: members, app/stage counts, platform-wide cost. */
+/** Admin-only: members, app/stage counts, platform-wide cost, and the edge's request floor. */
 import { PlatformApi } from '@ericminassian/platform-core/platform-api';
-import { Effect, Option } from 'effect';
+import { Clock, Effect, Option } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { Settings } from '../config.ts';
+import { EdgeFloor } from '../edge-floor.ts';
 import { PLATFORM_COST_KEY, TOTAL_COST_KEY } from '../jobs/cost.ts';
 import { Store } from '../store.ts';
-import { TelemetryQuery } from '../telemetry/query.ts';
+import { parseRange, TelemetryQuery } from '../telemetry/query.ts';
 import { Access } from './access.ts';
 import { ifAvailable } from './apps.ts';
 
@@ -14,6 +15,7 @@ export const AdminLive = HttpApiBuilder.group(
   'admin',
   Effect.fn(function* (handlers) {
     const access = yield* Access;
+    const edge = yield* EdgeFloor;
     const settings = yield* Settings;
     const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
@@ -38,6 +40,13 @@ export const AdminLive = HttpApiBuilder.group(
             down: live.filter((s) => s.up === false).map((s) => s.app),
             cost: { total, shared },
           };
+        }),
+
+      edge: ({ query }) =>
+        Effect.gen(function* () {
+          yield* access.admin;
+          const now = yield* Clock.currentTimeMillis;
+          return yield* edge.stats(parseRange({ ...query, range: query.range ?? '24h' }, now));
         }),
     });
   }),
