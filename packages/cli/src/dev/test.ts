@@ -5,6 +5,7 @@ import { LOCAL_MAIL_URL_ENV } from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import { withLocalBin } from '../build.ts';
 import { loadProject } from '../project.ts';
+import { freePort } from '../util/net.ts';
 import { CliError, step, success } from '../util/output.ts';
 import { localEnv, startLocalStage } from './local-stage.ts';
 import { createInbox, startInboxServer } from './mail.ts';
@@ -37,10 +38,16 @@ export async function runTests(opts: { cwd: string; args: string[] }): Promise<n
     const inbox = await startInboxServer(createInbox({ app: manifest.name }));
     mail = inbox;
     if (manifest.worker) {
-      worker = await startLocalWorker(stage, manifest, root, { watch: false, mailUrl: inbox.url });
+      // The dispatcher's port first: the worker posts its own retries and sends there.
+      const jobsPort = await freePort();
+      worker = await startLocalWorker(stage, manifest, root, {
+        watch: false,
+        mailUrl: inbox.url,
+        jobsUrl: `http://127.0.0.1:${jobsPort}/`,
+      });
       worker.child.stdout?.pipe(process.stdout);
       worker.child.stderr?.pipe(process.stderr);
-      dispatcher = await startWorkerDispatch(stage, manifest, worker);
+      dispatcher = await startWorkerDispatch(stage, manifest, worker, () => {}, { port: jobsPort });
     }
     const args = ['run'];
     if (existsSync(join(root, INTEGRATION_CONFIG)) && !opts.args.includes('--config'))
@@ -56,7 +63,7 @@ export async function runTests(opts: { cwd: string; args: string[] }): Promise<n
           localEnv(stage, manifest, {
             PLATFORM_TEST: '1',
             [LOCAL_MAIL_URL_ENV]: inbox.url,
-            ...(worker ? { PLATFORM_LOCAL_WORKER_URL: `http://127.0.0.1:${worker.port}/` } : {}),
+            ...(dispatcher ? { PLATFORM_LOCAL_WORKER_URL: dispatcher.url } : {}),
           }),
         ),
       });
