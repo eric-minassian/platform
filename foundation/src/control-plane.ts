@@ -5,6 +5,7 @@ import {
   appItem,
   deploymentItem,
   type StageItem,
+  stageCompute,
   stageItem,
   stageKey,
 } from '@ericminassian/platform-control-plane/records';
@@ -16,6 +17,7 @@ import {
   type PlatformRuntimeConfig,
   PROD_STAGE,
   type ResolvedManifest,
+  webComputeFor,
 } from '@ericminassian/platform-core';
 import type { Engine, EngineContext } from '@ericminassian/platform-engine';
 
@@ -60,6 +62,18 @@ export async function deployControlPlane(opts: {
     upload('static.zip'),
   ]);
   await upload('manifest.json');
+  const prev = await getStage(opts.ctx, runtime, build.manifest.name);
+  // The control plane builds with the workspace's SDK.
+  const sdk = (
+    JSON.parse(readFileSync(join(opts.repoRoot, 'packages/sdk/package.json'), 'utf8')) as { version: string }
+  ).version;
+  const choice = webComputeFor({
+    setting: build.manifest.web?.compute ?? 'auto',
+    stage: PROD_STAGE,
+    current: prev ? stageCompute(prev) : undefined,
+    sdk,
+  });
+  if ('error' in choice) throw new Error(choice.error);
   const result = await engine.deployStage({
     manifest: build.manifest,
     stage: PROD_STAGE,
@@ -72,10 +86,24 @@ export async function deployControlPlane(opts: {
     },
     roleArn: opts.roleArn,
     webMode: 'function',
+    webCompute: choice.compute,
     logRetentionDays: 30,
   });
-  await registerControlPlane(opts.ctx, opts.config, runtime, build.manifest, deploymentId, result);
+  await registerControlPlane(opts.ctx, opts.config, runtime, build.manifest, deploymentId, result, {
+    sdk,
+    ...(prev ? { prev } : {}),
+  });
   return { ...result, deploymentId };
+}
+
+const documentClient = (ctx: EngineContext) =>
+  DynamoDBDocumentClient.from(ctx.clients.dynamodb, { marshallOptions: { removeUndefinedValues: true } });
+
+async function getStage(ctx: EngineContext, runtime: PlatformRuntimeConfig, app: string) {
+  const res = await documentClient(ctx).send(
+    new GetCommand({ TableName: runtime.stateTable, Key: stageKey(app, PROD_STAGE) }),
+  );
+  return res.Item as StageItem | undefined;
 }
 
 /**
@@ -90,10 +118,9 @@ async function registerControlPlane(
   manifest: ResolvedManifest,
   deploymentId: string,
   result: DeployResult,
+  build: { sdk: string; prev?: StageItem },
 ): Promise<void> {
-  const ddb = DynamoDBDocumentClient.from(ctx.clients.dynamodb, {
-    marshallOptions: { removeUndefinedValues: true },
-  });
+  const ddb = documentClient(ctx);
   const TableName = runtime.stateTable;
   const now = new Date().toISOString();
   const admins = config.members.filter((m) => m.role === 'admin').map((m) => m.github);
@@ -118,10 +145,11 @@ async function registerControlPlane(
       if (err.name !== 'ConditionalCheckFailedException') throw err;
     });
 
-  const prev = (await ddb.send(new GetCommand({ TableName, Key: stageKey(app, PROD_STAGE) }))).Item as
-    | StageItem
-    | undefined;
+  const { prev } = build;
   const revisionId = result.webFunction?.revisionId;
+  const version = result.requestFunction?.version;
+  // The chooser's estimate stays; its count toward a switch starts over in a new mode.
+  const sameMode = prev !== undefined && stageCompute(prev) === result.compute;
   await ddb.send(
     new PutCommand({
       TableName,
@@ -137,8 +165,11 @@ async function registerControlPlane(
         createdAt: now,
         startedAt: now,
         finishedAt: now,
+        sdk: build.sdk,
+        ...(result.compute ? { compute: result.compute } : {}),
         ...(result.route ? { route: result.route } : {}),
         ...(revisionId ? { revisionId } : {}),
+        ...(version ? { version } : {}),
       }),
     }),
   );
@@ -154,8 +185,11 @@ async function registerControlPlane(
         preview: false,
         currentDeployment: deploymentId,
         ...(prev?.currentDeployment ? { previousDeployment: prev.currentDeployment } : {}),
-        ...(revisionId ? { currentRevision: revisionId } : {}),
+        ...((revisionId ?? version) ? { currentRevision: revisionId ?? version } : {}),
         ...(prev?.currentRevision ? { previousRevision: prev.currentRevision } : {}),
+        ...(result.compute ? { compute: result.compute } : {}),
+        ...(prev?.computeEstimate ? { computeEstimate: prev.computeEstimate } : {}),
+        ...(sameMode && prev?.computeStreak ? { computeStreak: prev.computeStreak } : {}),
         ...(result.route ? { route: result.route } : {}),
         ...(prev?.route ? { previousRoute: prev.route } : {}),
         createdAt: prev?.createdAt ?? now,
