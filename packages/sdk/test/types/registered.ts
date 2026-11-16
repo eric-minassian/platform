@@ -5,6 +5,7 @@ import {
   type ConditionFailed,
   Db,
   type DocumentNotFound,
+  defineService,
   defineWorker,
   Email,
   type EmailNotSent,
@@ -18,6 +19,7 @@ import {
   Realtime,
   Secrets,
   Storage,
+  traced,
 } from '@ericminassian/platform';
 import { RealtimeClient, type RealtimeStatus, storageUrl } from '@ericminassian/platform/client';
 import { Context, Effect, Layer, Schema, Stream } from 'effect';
@@ -168,6 +170,29 @@ export const email = Effect.gen(function* () {
   );
   return [unchecked, handled];
 });
+
+export const ingest = defineService({
+  layer: Platform.layer,
+  run: Effect.forever(
+    Effect.gen(function* () {
+      const queues = yield* Queues;
+      yield* queues.send('emails', { to: 'a@example.com' });
+    }).pipe(traced('relay')),
+  ),
+});
+
+export const unprovidedService = defineService({
+  layer: Platform.layerMemory(),
+  // @ts-expect-error the layer doesn't provide `Unknown`
+  run: Effect.asVoid(Unknown),
+});
+
+class Dropped extends Schema.TaggedError<Dropped>()('Dropped', {}) {}
+
+// `traced` keeps the effect's success, error and requirement types.
+export const tracedTypes: Effect.Effect<string, Dropped, Queues> = Effect.flatMap(Queues, () =>
+  Effect.fail(new Dropped()),
+).pipe(Effect.as('done'), traced('typed'));
 
 const Note = Schema.Struct({ ownerId: Schema.String, noteId: Schema.String });
 

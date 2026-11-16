@@ -7,7 +7,7 @@ import {
   type TelemetryKind,
 } from '@ericminassian/platform-core';
 import { tryBindings } from './bindings.ts';
-import { currentContext } from './context.ts';
+import { currentContext, type RequestContext } from './context.ts';
 
 /**
  * Telemetry writer. Every line is one core `TelemetryEvent` as JSON on stdout
@@ -60,7 +60,6 @@ export function emit<K extends TelemetryKind>(t: K, fields: Fields<K>): void {
 export async function span<T>(op: string, name: string | undefined, fn: () => Promise<T>): Promise<T> {
   const t0 = performance.now();
   const ctx = currentContext();
-  const id = newSpanId();
   let status: 'ok' | 'error' = 'ok';
   try {
     return await fn();
@@ -69,17 +68,28 @@ export async function span<T>(op: string, name: string | undefined, fn: () => Pr
     throw e;
   } finally {
     // Spans only matter as part of a trace; skip them outside a request/job.
-    if (ctx)
-      emit('span', {
-        op,
-        ...(name ? { name } : {}),
-        dur: round(performance.now() - t0),
-        status,
-        span: id,
-        parent: ctx.span,
-        start: round(t0 - ctx.startedAt),
-      });
+    if (ctx) emitSpan(ctx, op, name, t0, status);
   }
+}
+
+/** Emit a finished span of `ctx`'s trace that started at `t0` (`performance.now()`). */
+export function emitSpan(
+  ctx: RequestContext,
+  op: string,
+  name: string | undefined,
+  t0: number,
+  status: 'ok' | 'error',
+): void {
+  emit('span', {
+    trace: ctx.trace,
+    op,
+    ...(name ? { name } : {}),
+    dur: round(performance.now() - t0),
+    status,
+    span: newSpanId(),
+    parent: ctx.span,
+    start: round(t0 - ctx.startedAt),
+  });
 }
 
 /** Emit an `err` event for a thrown value. */
@@ -228,7 +238,8 @@ const COLORS = {
   reset: '\x1b[0m',
 };
 
-function pretty(e: TelemetryEvent): string {
+/** One telemetry line for humans (`PLATFORM_LOG_PRETTY=1`). */
+export function pretty(e: TelemetryEvent): string {
   const time = new Date(e.ts).toISOString().slice(11, 23);
   const c = (color: keyof typeof COLORS, s: string) => `${COLORS[color]}${s}${COLORS.reset}`;
   switch (e.t) {
@@ -239,7 +250,10 @@ function pretty(e: TelemetryEvent): string {
     case 'err':
       return `${c('dim', time)} ${c('red', `✖ ${e.name}: ${e.message}`)}${e.stack ? `\n${c('dim', e.stack.split('\n').slice(1, 6).join('\n'))}` : ''}`;
     case 'job':
-      return `${c('dim', time)} ${c(e.status === 'ok' ? 'cyan' : 'red', `${e.kind}:${e.name}`)} ${e.status} ${c('dim', `${e.dur}ms`)}`;
+      // A service job without a unit name is a run of the service itself that ended.
+      if (e.kind === 'service' && !e.name.includes('/'))
+        return `${c('dim', time)} ${c(e.status === 'ok' ? 'yellow' : 'red', `service ${e.name} run ${e.status === 'ok' ? 'returned' : 'failed'}`)} ${c('dim', `after ${duration(e.dur)}`)}`;
+      return `${c('dim', time)} ${c(e.status === 'ok' ? 'cyan' : 'red', `${e.kind}:${e.name}`)} ${e.status} ${c('dim', duration(e.dur))}`;
     case 'span':
       return c(
         'dim',
@@ -255,11 +269,23 @@ function pretty(e: TelemetryEvent): string {
       return c('dim', `${time} metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`);
     case 'limit':
       return e.ok ? c('dim', `${time} limit ${e.name} ok`) : c('yellow', `${time} limit ${e.name} over`);
-    case 'env':
-      return c('dim', `${time} ${e.runtime} ${e.event}${e.initMs !== undefined ? ` (${e.initMs}ms)` : ''}`);
+    case 'env': {
+      const what = e.runtime === 'service' && e.name ? `service ${e.name}` : e.runtime;
+      const detail = e.reason ?? (e.initMs !== undefined ? `${e.initMs}ms` : undefined);
+      return c('dim', `${time} ${what} ${e.event}${detail ? ` (${detail})` : ''}`);
+    }
     default:
       return e satisfies never;
   }
+}
+
+/** `12.3ms`, `4.2s`, `3m 05s`: a service run can last days. */
+function duration(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 60) return `${minutes}m ${String(Math.floor((ms % 60_000) / 1_000)).padStart(2, '0')}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
 }
 
 function round(ms: number): number {

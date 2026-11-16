@@ -20,6 +20,7 @@
     "./config": "./src/config.ts",
     "./server": "./src/runtime/server.ts",
     "./worker": "./src/runtime/worker.ts",
+    "./service": "./src/runtime/service.ts",
     "./testing": "./src/testing.ts"
   },
   "publishConfig": {
@@ -47,6 +48,10 @@
       "./worker": {
         "types": "./dist/runtime/worker.d.ts",
         "default": "./dist/runtime/worker.js"
+      },
+      "./service": {
+        "types": "./dist/runtime/service.d.ts",
+        "default": "./dist/runtime/service.js"
       },
       "./testing": {
         "types": "./dist/testing.d.ts",
