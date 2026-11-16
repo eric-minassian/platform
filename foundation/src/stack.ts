@@ -1,5 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import {
+  EDGE_RATE_LIMITED_BODY,
+  EDGE_RETRY_AFTER_SECONDS,
   EMAIL_LOGIN_LOCAL_PART,
   emailDomain,
   emailMailFromDomain,
@@ -38,6 +40,7 @@ import {
   aws_sns as sns,
   aws_ssm as ssm,
   Tags,
+  aws_wafv2 as wafv2,
 } from 'aws-cdk-lib';
 import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -262,9 +265,72 @@ export class FoundationStack extends Stack {
       },
     });
 
+    // The floor under every app's own limits: a client sending one host more
+    // than `edgeRequestsPerMinute` is answered 429 at the edge, static files
+    // included, until its rate drops. Counted per client and host, so a busy
+    // client of one app (or a CI runner testing several) isn't blocked from
+    // the others. WAF evaluates before the router function, so `host` is the
+    // app's own host; lowercased, so spelling it differently doesn't buy a
+    // second budget.
+    const floor = config.limits.edgeRequestsPerMinute;
+    const edgeWebAcl =
+      floor === undefined
+        ? undefined
+        : new wafv2.CfnWebACL(this, 'EdgeFloor', {
+            name: platformNames.edgeWebAcl,
+            scope: 'CLOUDFRONT',
+            description: `At most ${floor} requests per client per app host per minute`,
+            defaultAction: { allow: {} },
+            customResponseBodies: {
+              'rate-limited': {
+                contentType: 'APPLICATION_JSON',
+                content: JSON.stringify(EDGE_RATE_LIMITED_BODY),
+              },
+            },
+            rules: [
+              {
+                name: platformNames.edgeFloorRule,
+                priority: 0,
+                statement: {
+                  rateBasedStatement: {
+                    limit: floor,
+                    evaluationWindowSec: 60,
+                    aggregateKeyType: 'CUSTOM_KEYS',
+                    customKeys: [
+                      { ip: {} },
+                      { header: { name: 'host', textTransformations: [{ priority: 0, type: 'LOWERCASE' }] } },
+                    ],
+                  },
+                },
+                action: {
+                  block: {
+                    customResponse: {
+                      responseCode: 429,
+                      customResponseBodyKey: 'rate-limited',
+                      responseHeaders: [{ name: 'retry-after', value: String(EDGE_RETRY_AFTER_SECONDS) }],
+                    },
+                  },
+                },
+                visibilityConfig: {
+                  cloudWatchMetricsEnabled: true,
+                  metricName: platformNames.edgeFloorRule,
+                  // The console lists recently blocked requests from WAF's free sample.
+                  sampledRequestsEnabled: true,
+                },
+              },
+            ],
+            visibilityConfig: {
+              cloudWatchMetricsEnabled: true,
+              metricName: platformNames.edgeWebAcl,
+              sampledRequestsEnabled: true,
+            },
+          });
+    if (edgeWebAcl) tag(edgeWebAcl, 'edge');
+
     // One distribution for every app. The router function serves static files
     // from the sites bucket or switches the origin to the stage's Web Function.
     const distribution = new cloudfront.Distribution(this, 'Edge', {
+      ...(edgeWebAcl ? { webAclId: edgeWebAcl.attrArn } : {}),
       comment: 'platform-edge',
       domainNames: [`*.${config.domain}`],
       certificate: edgeCertificate,
@@ -582,6 +648,7 @@ export class FoundationStack extends Stack {
               alertsTopicArn: alerts.topicArn,
               realtime: { apiId: realtimeApi.attrApiId },
               email: { identityArn: mail.emailIdentityArn },
+              ...(edgeWebAcl ? { edgeWebAclArn: edgeWebAcl.attrArn } : {}),
             },
           }),
         ),
@@ -635,6 +702,7 @@ export class FoundationStack extends Stack {
       boundaryPolicyArn: boundary.managedPolicyArn,
       kvsArn: routes.keyValueStoreArn,
       distributionArn: distribution.distributionArn,
+      ...(edgeWebAcl ? { edgeWebAclArn: edgeWebAcl.attrArn } : {}),
       userPoolId: users.userPoolId,
       loginUrl: `https://${config.loginHost}`,
       alertsTopicArn: alerts.topicArn,

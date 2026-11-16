@@ -28,6 +28,7 @@ export default definePlatformConfig({
     'simply-personalized-beta',
   ],
   previewTtlDays: 7,
-  limits: { appsPerMember: 50, stagesPerApp: 20, emailsPerDay: 2000 },
+  // edgeRequestsPerMinute: the WAF floor for every app (per client and host); remove it to drop the web ACL.
+  limits: { appsPerMember: 50, stagesPerApp: 20, emailsPerDay: 2000, edgeRequestsPerMinute: 1000 },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });

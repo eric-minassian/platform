@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import {
+  EDGE_RATE_LIMITED_BODY,
   emailDomain,
   emailMailFromDomain,
+  type PlatformConfig,
   platformNames,
   REALTIME_TOKEN_PATTERN,
 } from '@ericminassian/platform-core';
@@ -19,11 +21,15 @@ const { context } = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.u
 };
 
 function synth(
-  opts: { alertEmail?: string; userPoolEmail?: FoundationStackProps['userPoolEmail'] } = {},
+  opts: {
+    alertEmail?: string;
+    userPoolEmail?: FoundationStackProps['userPoolEmail'];
+    config?: PlatformConfig;
+  } = {},
 ): Template {
   const stack = new FoundationStack(new App({ context }), FOUNDATION_STACK, {
     env: { account, region: config.region },
-    config,
+    config: opts.config ?? config,
     dnsDelegationRoleArn: delegationRole,
     ...(opts.alertEmail ? { alertEmail: opts.alertEmail } : {}),
     userPoolEmail: opts.userPoolEmail ?? 'cognito',
@@ -365,6 +371,96 @@ describe('foundation stack', () => {
     for (const st of edge)
       expect(Object.keys((st.Condition as { StringEquals: object }).StringEquals)).toEqual(['AWS:SourceArn']);
     expect(edge[1]?.Condition).toMatchObject({ StringLike: { 's3:prefix': ['_public/*'] } });
+  });
+
+  describe('edge floor', () => {
+    const acl = () => logicalId('AWS::WAFv2::WebACL', { Name: platformNames.edgeWebAcl });
+
+    it('answers a client over the limit for one host with a RateLimited 429', () => {
+      expect(config.limits.edgeRequestsPerMinute).toBe(1000);
+      template.hasResourceProperties('AWS::WAFv2::WebACL', {
+        Name: platformNames.edgeWebAcl,
+        Scope: 'CLOUDFRONT',
+        DefaultAction: { Allow: {} },
+        CustomResponseBodies: {
+          'rate-limited': {
+            ContentType: 'APPLICATION_JSON',
+            Content: JSON.stringify(EDGE_RATE_LIMITED_BODY),
+          },
+        },
+        Rules: [
+          {
+            Name: platformNames.edgeFloorRule,
+            Priority: 0,
+            Statement: {
+              RateBasedStatement: {
+                Limit: 1000,
+                EvaluationWindowSec: 60,
+                AggregateKeyType: 'CUSTOM_KEYS',
+                CustomKeys: [
+                  { IP: {} },
+                  { Header: { Name: 'host', TextTransformations: [{ Priority: 0, Type: 'LOWERCASE' }] } },
+                ],
+              },
+            },
+            Action: {
+              Block: {
+                CustomResponse: {
+                  ResponseCode: 429,
+                  CustomResponseBodyKey: 'rate-limited',
+                  ResponseHeaders: [{ Name: 'retry-after', Value: '60' }],
+                },
+              },
+            },
+            VisibilityConfig: {
+              CloudWatchMetricsEnabled: true,
+              MetricName: platformNames.edgeFloorRule,
+              SampledRequestsEnabled: true,
+            },
+          },
+        ],
+      });
+      template.hasResourceProperties('AWS::CloudFront::Distribution', {
+        DistributionConfig: Match.objectLike({ WebACLId: { 'Fn::GetAtt': [acl(), 'Arn'] } }),
+      });
+    });
+
+    it('lets the control plane read its samples, and names it in the runtime config', () => {
+      template.hasResourceProperties('AWS::IAM::Role', {
+        RoleName: platformNames.controlPlaneRole,
+        Policies: [
+          Match.objectLike({
+            PolicyDocument: Match.objectLike({
+              Statement: Match.arrayWith([
+                {
+                  Sid: 'EdgeFloor',
+                  Effect: 'Allow',
+                  Action: 'wafv2:GetSampledRequests',
+                  Resource: { 'Fn::GetAtt': [acl(), 'Arn'] },
+                },
+              ]),
+            }),
+          }),
+        ],
+      });
+      const runtime = JSON.stringify(
+        template.findResources('AWS::SSM::Parameter', {
+          Properties: { Name: platformNames.runtimeConfigParameter },
+        }),
+      );
+      expect(runtime).toContain('"edgeWebAclArn\\":\\"');
+      expect(runtime).toContain(`{"Fn::GetAtt":["${acl()}","Arn"]}`);
+    });
+
+    it('has no web ACL without edgeRequestsPerMinute', () => {
+      const { edgeRequestsPerMinute: _, ...limits } = config.limits;
+      const bare = synth({ config: { ...config, limits } });
+      bare.resourceCountIs('AWS::WAFv2::WebACL', 0);
+      bare.hasResourceProperties('AWS::CloudFront::Distribution', {
+        DistributionConfig: Match.objectLike({ WebACLId: Match.absent() }),
+      });
+      expect(JSON.stringify(bare.toJSON())).not.toContain('edgeWebAclArn');
+    });
   });
 
   it('keys the router cache on the platform host header', () => {

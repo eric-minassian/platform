@@ -1,4 +1,8 @@
-import { RATE_LIMIT_PK_PREFIX } from '@ericminassian/platform-core';
+import {
+  EDGE_RATE_LIMITED_BODY,
+  EDGE_RETRY_AFTER_SECONDS,
+  RATE_LIMIT_PK_PREFIX,
+} from '@ericminassian/platform-core';
 import { Cause, Duration, Effect, Exit, Layer, Schema } from 'effect';
 import { FetchHttpClient, HttpServerRequest } from 'effect/http';
 import {
@@ -468,6 +472,12 @@ describe('RateLimits.middleware', () => {
     expect(over.status).toBe(429);
     expect(Number(over.headers.get('retry-after'))).toBeGreaterThan(0);
     expect(await (await upload(400)).json()).toBe(0);
+  });
+
+  it("decodes the edge floor's 429 as the same RateLimited", () => {
+    const edge = Schema.decodeUnknownSync(RateLimited)(EDGE_RATE_LIMITED_BODY);
+    expect(edge).toBeInstanceOf(RateLimited);
+    expect(edge).toEqual(RateLimited.after(`${EDGE_RETRY_AFTER_SECONDS} seconds`));
   });
 
   it('refuses a bad policy when the server starts', async () => {
