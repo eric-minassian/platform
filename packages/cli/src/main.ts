@@ -3,6 +3,7 @@ import { registerAccount } from './commands/account.ts';
 import { registerAlerts } from './commands/alerts.ts';
 import { registerApps } from './commands/apps.ts';
 import { registerEmail } from './commands/email.ts';
+import { registerExplore } from './commands/explore.ts';
 import { registerLifecycle } from './commands/lifecycle.ts';
 import { registerManage } from './commands/manage.ts';
 import { registerObserve } from './commands/observe.ts';
@@ -23,6 +24,7 @@ export function createProgram(): Command {
   registerAccount(program);
   registerObserve(program);
   registerAlerts(program);
+  registerExplore(program);
   registerServices(program);
   registerManage(program);
   registerEmail(program);

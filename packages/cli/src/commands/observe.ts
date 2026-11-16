@@ -4,7 +4,13 @@ import {
   type CustomMetricsResponse,
   type DataCollections,
   describeQuery,
+  type ErrorGroup,
+  type ErrorOccurrencesResponse,
+  type InsightsResponse,
   type LimitsResponse,
+  type LogContextResponse,
+  type LogFilters,
+  type LogLevelName,
   type LogLine,
   METRIC_STATS,
   QueryResolution,
@@ -20,6 +26,8 @@ import {
   SLOW_TRACE_MS,
   type StatusClass,
   type TelemetryEvent,
+  type TraceFilters,
+  type TracesResponse,
   TRACE_SAMPLE_RATE,
 } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
@@ -201,26 +209,65 @@ export function registerObserve(program: Command): void {
       .option('--since <duration>', 'how far back', '1h')
       .option('--filter <text>', 'only lines containing this text / CloudWatch filter pattern')
       .option('--stream <name>', 'only web, worker or one service (by name)')
+      .option('--level <level>', 'only error, warn, info, debug or system lines (repeatable)', collectList)
+      .option('--route <pattern>', 'only lines of this route, e.g. /api/items/:id (repeatable)', collect)
+      .option('--status <class>', 'only lines with a 2xx, 3xx, 4xx or 5xx status (repeatable)', collectList)
+      .option('--rev <deployment>', 'only lines from this deployment (repeatable)', collect)
+      .option('--trace <id>', 'only lines of this trace')
       .option('--limit <n>', 'max lines', '200')
       .option('-f, --follow', 'stream new lines (live tail)')
+      .option('--around <time>', 'the lines around the one at this time (ISO or epoch ms; needs --stream)')
+      .option('--context <n>', 'lines on each side with --around (default 50, up to 200)')
+      .option('--insights <query>', 'run a Logs Insights query on the stage over --since and print its table')
       .option('--runtime', "include the Lambda runtime's own records (hidden by default)"),
   ).action(
     action(
       async (
-        opts: TargetOpts & {
-          since: string;
-          filter?: string;
-          stream?: string;
-          limit: string;
-          follow?: boolean;
-          runtime?: boolean;
-        },
+        opts: TargetOpts &
+          LogFilterOpts & {
+            since: string;
+            filter?: string;
+            stream?: string;
+            limit: string;
+            follow?: boolean;
+            around?: string;
+            context?: string;
+            insights?: string;
+            runtime?: boolean;
+          },
       ) => {
         const stream = opts.stream === undefined ? undefined : logStream(opts.stream);
-        const keep = (l: LogLine) =>
-          (opts.runtime || l.level !== 'system') && (!stream || l.stream === stream);
+        const filters = logFilters(opts);
+        const runtime = opts.runtime || filters.levels?.includes('system');
+        const keep = (l: LogLine) => (runtime || l.level !== 'system') && (!stream || l.stream === stream);
         const api = apiFor(opts);
         const app = await appFor(opts);
+        if (opts.insights !== undefined) {
+          const { from, to } = sinceRange(opts.since);
+          const res = await api.insights(app, {
+            stage: opts.stage,
+            query: opts.insights,
+            from: String(from),
+            to: String(to),
+          });
+          result(res, formatInsights);
+          return;
+        }
+        if (opts.around !== undefined) {
+          if (!stream)
+            throw new CliError('--around needs --stream (web, worker or a service name)', {
+              exitCode: EXIT.usage,
+            });
+          const lines = opts.context === undefined ? undefined : wholeNumber(opts.context, '--context', 200);
+          const res = await api.logContext(app, {
+            stage: opts.stage,
+            stream,
+            ts: lineTime(opts.around),
+            ...(lines === undefined ? {} : { before: lines, after: lines }),
+          });
+          result(res, (r) => formatContext(r, { runtime: Boolean(opts.runtime) }));
+          return;
+        }
         if (opts.follow) {
           const ac = new AbortController();
           process.once('SIGINT', () => ac.abort());
@@ -231,6 +278,7 @@ export function registerObserve(program: Command): void {
                 stage: opts.stage,
                 ...(opts.filter ? { filter: opts.filter } : {}),
                 ...(stream ? { stream } : {}),
+                filters,
               },
               ac.signal,
             )) {
@@ -250,6 +298,7 @@ export function registerObserve(program: Command): void {
           limit: Number(opts.limit),
           ...(opts.filter ? { filter: opts.filter } : {}),
           ...(stream ? { stream } : {}),
+          filters,
         });
         const shown = { ...res, lines: res.lines.filter(keep) };
         result(shown, (r) =>
@@ -389,34 +438,110 @@ export function registerObserve(program: Command): void {
     }),
   );
 
-  withTarget(program.command('errors').description('grouped errors for a stage')).action(
-    action(async (opts: TargetOpts) => {
-      const groups = await apiFor(opts).errors(await appFor(opts), { stage: opts.stage });
-      result(groups, (g) =>
-        table(
-          g.map((e) => ({
-            id: e.fingerprint,
-            status: e.status === 'open' ? pc.red('open') : e.status,
-            count: e.count,
-            error: `${e.name}: ${e.message}`.slice(0, 80),
-            where: e.sample.route ?? e.sample.job ?? '',
-            last: shortTime(e.lastSeen),
-            trace: e.sample.trace ?? '',
-          })),
-        ),
-      );
-    }),
+  withTarget(
+    program
+      .command('errors [fingerprint]')
+      .description('grouped errors for a stage; with a fingerprint (the id column), that group')
+      .option('--occurrences', 'how often the group happened over --since, and on which deployments')
+      .option('--since <duration>', 'range for --occurrences', '7d'),
+  ).action(
+    action(
+      async (
+        fingerprint: string | undefined,
+        opts: TargetOpts & { occurrences?: boolean; since: string },
+      ) => {
+        const api = apiFor(opts);
+        const app = await appFor(opts);
+        if (opts.occurrences) {
+          if (!fingerprint)
+            throw new CliError('--occurrences needs a fingerprint (the id `plat errors` lists)', {
+              exitCode: EXIT.usage,
+            });
+          const { from, to } = sinceRange(opts.since);
+          const res = await api.errorOccurrences(app, fingerprint, { stage: opts.stage, from, to });
+          result(res, (r) => formatOccurrences(r, opts.since));
+          return;
+        }
+        const groups = await api.errors(app, { stage: opts.stage });
+        if (fingerprint) {
+          const group = groups.find((g) => g.fingerprint === fingerprint);
+          if (!group)
+            throw new CliError(`no error group ${fingerprint} on ${opts.stage}`, {
+              hint: 'see `plat errors` for the stage’s groups',
+              exitCode: EXIT.notFound,
+            });
+          result(group, formatErrorGroup);
+          return;
+        }
+        result(groups, (g) =>
+          table(
+            g.map((e) => ({
+              id: e.fingerprint,
+              status: e.status === 'open' ? pc.red('open') : e.status,
+              count: e.count,
+              error: `${e.name}: ${e.message}`.slice(0, 80),
+              where: e.sample.route ?? e.sample.job ?? '',
+              last: shortTime(e.lastSeen),
+              trace: e.sample.trace ?? '',
+            })),
+          ),
+        );
+      },
+    ),
   );
 
   withTarget(
     program
-      .command('traces <traceId>')
-      .description('every event of one request/job across web, queues and worker'),
+      .command('traces [traceId]')
+      .description(
+        'requests and jobs that started traces, newest first; with an id, every event of that trace',
+      )
+      .option('--since <duration>', 'how far back to list', '1h')
+      .option('--route <route>', 'only requests of this route, as "METHOD /pattern" (repeatable)', collect)
+      .option('--job <job>', 'only runs of this job, as kind:name (repeatable)', collect)
+      .option('--failed', 'only 5xx requests and failed jobs')
+      .option('--min-ms <ms>', 'only those that took at least this long')
+      .option('--recorded', 'only those whose calls were recorded (failed, slow or sampled)')
+      .option('--limit <n>', 'max traces (up to 1000)', '100'),
   ).action(
-    action(async (traceId: string, opts: TargetOpts) => {
-      const t = await apiFor(opts).trace(await appFor(opts), traceId, { stage: opts.stage });
-      result(t, (v) => formatTrace(v.events));
-    }),
+    action(
+      async (
+        traceId: string | undefined,
+        opts: TargetOpts & {
+          since: string;
+          route?: string[];
+          job?: string[];
+          failed?: boolean;
+          minMs?: string;
+          recorded?: boolean;
+          limit: string;
+        },
+      ) => {
+        const api = apiFor(opts);
+        const app = await appFor(opts);
+        if (traceId) {
+          const t = await api.trace(app, traceId, { stage: opts.stage });
+          result(t, (v) => formatTrace(v.events));
+          return;
+        }
+        const filters: TraceFilters = {
+          ...(opts.route?.length ? { routes: opts.route } : {}),
+          ...(opts.job?.length ? { jobs: opts.job } : {}),
+          ...(opts.failed ? { outcome: 'error' as const } : {}),
+          ...(opts.minMs === undefined ? {} : { minMs: wholeNumber(opts.minMs, '--min-ms') }),
+          ...(opts.recorded ? { recorded: true } : {}),
+        };
+        const { from, to } = sinceRange(opts.since);
+        const res = await api.traces(app, {
+          stage: opts.stage,
+          from,
+          to,
+          filters,
+          limit: wholeNumber(opts.limit, '--limit', 1000),
+        });
+        result(res, formatTraceList);
+      },
+    ),
   );
 
   withTarget(
@@ -555,4 +680,162 @@ export function readStdin(): string {
   } catch {
     return '';
   }
+}
+
+// ---------------------------------------------------------------- log filters, Logs Insights, traces
+
+/** A repeatable option's values. */
+export function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
+/** A repeatable option that also takes comma-separated values. */
+export function collectList(value: string, previous: string[] = []): string[] {
+  return [
+    ...previous,
+    ...value
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean),
+  ];
+}
+
+const LEVELS: readonly LogLevelName[] = ['error', 'warn', 'info', 'debug', 'system'];
+
+interface LogFilterOpts {
+  level?: string[];
+  route?: string[];
+  status?: string[];
+  rev?: string[];
+  trace?: string;
+}
+
+/** `--level`, `--route`, `--status`, `--rev` and `--trace` as the API's structured filters. */
+export function logFilters(opts: LogFilterOpts): LogFilters {
+  const { level = [], route = [], status = [], rev = [] } = opts;
+  for (const l of level)
+    if (!LEVELS.some((known) => known === l))
+      throw new CliError(`--level takes ${LEVELS.join(', ')}, got "${l}"`, { exitCode: EXIT.usage });
+  for (const c of status)
+    if (!STATUS_CLASSES.some((s) => s === c))
+      throw new CliError(`--status takes ${STATUS_CLASSES.join(', ')}, got "${c}"`, { exitCode: EXIT.usage });
+  return {
+    ...(level.length ? { levels: level as LogLevelName[] } : {}),
+    ...(route.length ? { routes: route } : {}),
+    ...(status.length ? { status: status as StatusClass[] } : {}),
+    ...(rev.length ? { revs: rev } : {}),
+    ...(opts.trace ? { trace: opts.trace } : {}),
+  };
+}
+
+/** A whole number option, at least 0 (and at most `max`). */
+function wholeNumber(value: string, option: string, max = Number.MAX_SAFE_INTEGER): number {
+  const n = Number(value);
+  if (!/^\d+$/.test(value.trim()) || n > max)
+    throw new CliError(
+      `${option} takes a whole number${max < Number.MAX_SAFE_INTEGER ? ` up to ${max}` : ''}`,
+      {
+        exitCode: EXIT.usage,
+      },
+    );
+  return n;
+}
+
+/** `--around`: epoch milliseconds, or an ISO time. */
+export function lineTime(value: string): number {
+  const t = /^\d+$/.test(value) ? Number(value) : Date.parse(value);
+  if (!Number.isFinite(t))
+    throw new CliError(`--around takes an ISO time or epoch milliseconds, got "${value}"`, {
+      exitCode: EXIT.usage,
+    });
+  return t;
+}
+
+/** The lines around one line, that one marked; runtime records hidden unless asked for (or the anchor). */
+export function formatContext(r: LogContextResponse, opts: { runtime: boolean }): string {
+  if (r.lines.length === 0) return pc.dim('(no log lines)');
+  return r.lines
+    .flatMap((l, i) =>
+      i === r.anchor
+        ? [`${pc.cyan('>')} ${formatLogLine(l)}`]
+        : opts.runtime || l.level !== 'system'
+          ? [`  ${formatLogLine(l)}`]
+          : [],
+    )
+    .join('\n');
+}
+
+/** A Logs Insights result as a table, with what the query read. */
+export function formatInsights(r: InsightsResponse): string {
+  const stats = pc.dim(
+    `${r.recordsMatched} matched, ${r.recordsScanned} scanned (${formatBytes(r.bytesScanned)})`,
+  );
+  if (r.rows.length === 0) return `${pc.dim('(no results)')}\n${stats}`;
+  const rows = r.rows.map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i] ?? ''])));
+  return `${table(rows, [...r.columns])}\n${stats}`;
+}
+
+export function formatBytes(n: number): string {
+  if (n < 1_000) return `${n} B`;
+  if (n < 1_000_000) return `${(n / 1_000).toFixed(1)} kB`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+  return `${(n / 1_000_000_000).toFixed(2)} GB`;
+}
+
+/** The trace list: when each started, what it was, how it ended and whether its calls were recorded. */
+export function formatTraceList(r: TracesResponse): string {
+  if (r.traces.length === 0) return pc.dim('(no traces)');
+  const lines = [
+    table(
+      r.traces.map((t) => ({
+        started: shortTime(t.ts),
+        what: t.name,
+        status:
+          t.kind === 'req'
+            ? (t.failed ? pc.red : (t.status ?? 0) >= 400 ? pc.yellow : pc.green)(String(t.status ?? ''))
+            : t.failed
+              ? pc.red('error')
+              : 'ok',
+        took: formatDuration(t.dur),
+        calls: t.recorded
+          ? `recorded${t.calls ? ` (+${t.calls} not)` : ''}`
+          : t.calls
+            ? pc.dim(`${t.calls} not recorded`)
+            : '',
+        trace: t.trace,
+      })),
+    ),
+  ];
+  if (r.truncated) lines.push(pc.dim('more traces matched; narrow --since or the filters to see them'));
+  return lines.join('\n');
+}
+
+/** One error group: what, where, how often, and its sample. */
+export function formatErrorGroup(g: ErrorGroup): string {
+  const rows: Array<[string, string]> = [
+    ['status', g.status === 'open' ? pc.red('open') : g.status],
+    ['count', String(g.count)],
+    ['first', shortTime(g.firstSeen)],
+    ['last', shortTime(g.lastSeen)],
+    ['source', g.source],
+  ];
+  if (g.sample.route) rows.push(['route', g.sample.route]);
+  if (g.sample.job) rows.push(['job', g.sample.job]);
+  if (g.sample.rev) rows.push(['rev', g.sample.rev]);
+  if (g.sample.trace) rows.push(['trace', g.sample.trace]);
+  return [
+    pc.bold(`${g.name}: ${g.message}`),
+    ...rows.map(([k, v]) => `  ${k.padEnd(7)}${v}`),
+    ...(g.sample.stack ? ['', pc.dim(g.sample.stack)] : []),
+  ].join('\n');
+}
+
+/** An error group's occurrences over time and by deployment. */
+export function formatOccurrences(r: ErrorOccurrencesResponse, since: string): string {
+  const total = r.counts.reduce((a, n) => a + n, 0);
+  const lines = [
+    `${total} in the last ${since} ${pc.dim(`(${r.res} buckets)`)}  ${pc.red(sparkline([...r.counts]))}`,
+  ];
+  if (r.revs.length) lines.push('', table(r.revs.map((v) => ({ deployment: v.value, count: v.count }))));
+  return lines.join('\n');
 }
