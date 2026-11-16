@@ -437,9 +437,17 @@ export function controlPlanePolicy(input: {
       ]),
     },
     {
+      // PutParameter with Tags (secrets are created tagged) is also authorized
+      // as ssm:AddTagsToResource, which `*Parameter*` doesn't match.
       Sid: 'Parameters',
       Effect: 'Allow',
-      Action: ['ssm:*Parameter*', 'kms:Decrypt', 'kms:Encrypt', 'kms:GenerateDataKey'],
+      Action: [
+        'ssm:*Parameter*',
+        'ssm:AddTagsToResource',
+        'kms:Decrypt',
+        'kms:Encrypt',
+        'kms:GenerateDataKey',
+      ],
       Resource: [`arn:aws:ssm:${region}:${acct}:parameter/platform/*`, `arn:aws:kms:${region}:${acct}:key/*`],
     },
     {

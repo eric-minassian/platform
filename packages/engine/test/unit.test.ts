@@ -31,7 +31,7 @@ import {
   rollbackStage,
   staleStaticPrefixes,
 } from '../src/stage.ts';
-import type { EngineContext, EngineLog } from '../src/util.ts';
+import type { EngineContext, EngineLog, PolicyDocument } from '../src/util.ts';
 
 const platform = (over: Partial<PlatformRuntimeConfig> = {}): PlatformRuntimeConfig => ({
   v: 1,
@@ -47,6 +47,22 @@ const platform = (over: Partial<PlatformRuntimeConfig> = {}): PlatformRuntimeCon
   telemetryTable: 'platform-telemetry',
   ...over,
 });
+
+/** IAM wildcard match: `*` is any run, `?` one character. Actions match case-insensitively. */
+const iamMatch = (pattern: string, value: string, flags = '') => {
+  const literal = pattern.replaceAll(/[.+^${}()|[\]\\]/g, String.raw`\$&`);
+  return new RegExp('^' + literal.replaceAll('*', '.*').replaceAll('?', '.') + '$', flags).test(value);
+};
+
+/** Whether an unconditional Allow in `doc` grants `action` on `resource`. */
+const allows = (doc: PolicyDocument, action: string, resource: string) =>
+  doc.Statement.some(
+    (s) =>
+      s.Effect === 'Allow' &&
+      !s.Condition &&
+      [s.Action].flat().some((a) => iamMatch(a, action, 'i')) &&
+      [s.Resource ?? []].flat().some((r) => iamMatch(r, resource)),
+  );
 
 describe('stage role policy', () => {
   const manifest = parseManifest({
@@ -122,6 +138,25 @@ describe('stage role policy', () => {
     const create = cp.Statement.find((s) => s.Sid === 'StageRoles');
     expect(create?.Condition).toEqual({ StringEquals: { 'iam:PermissionsBoundary': 'arn:b' } });
     expect(create?.Resource).toBe('arn:aws:iam::1:role/platform/apps/*');
+  });
+
+  it('lets the control plane create tagged secrets, list and delete them', () => {
+    const cp = policies.controlPlanePolicy({
+      region: 'us-east-1',
+      accountId: '1',
+      runtime: { artifactsBucket: 'a', sitesBucket: 's', storageBucket: 'st' },
+    });
+    const secret = 'arn:aws:ssm:us-east-1:1:parameter/platform/apps/atlas/_shared/secrets/API_KEY';
+    // PutParameter with Tags is authorized as both actions.
+    for (const action of [
+      'ssm:PutParameter',
+      'ssm:AddTagsToResource',
+      'ssm:GetParametersByPath',
+      'ssm:DeleteParameter',
+    ]) {
+      expect(allows(cp, action, secret), action).toBe(true);
+    }
+    expect(allows(cp, 'ssm:AddTagsToResource', 'arn:aws:ssm:us-east-1:1:parameter/other/KEY')).toBe(false);
   });
 });
 
