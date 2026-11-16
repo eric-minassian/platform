@@ -97,20 +97,39 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
     });
   }
 
-  if (Object.keys(manifest.queues).length > 0) {
-    statements.push({
-      Sid: 'Queues',
-      Effect: 'Allow',
-      Action: [
-        'sqs:SendMessage',
-        'sqs:ReceiveMessage',
-        'sqs:DeleteMessage',
-        'sqs:GetQueueAttributes',
-        'sqs:GetQueueUrl',
-        'sqs:ChangeMessageVisibility',
-      ],
-      Resource: `arn:aws:sqs:${region}:${acct}:${base}--*`,
-    });
+  if (manifest.worker) {
+    // Jobs (core jobs.ts): the dead-letter queue takes failed jobs from the SDK, Lambda's on-failure
+    // destination and Scheduler, all as this role. Receiving is for queues from before 0.4.0,
+    // which drain through their event source mappings (also this role) before they go.
+    statements.push(
+      {
+        Sid: 'Jobs',
+        Effect: 'Allow',
+        Action: [
+          'sqs:SendMessage',
+          'sqs:ReceiveMessage',
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:ChangeMessageVisibility',
+        ],
+        Resource: `arn:aws:sqs:${region}:${acct}:${base}--*`,
+      },
+      {
+        // Retries and delayed sends are one-shot schedules in the stage's group, invoking the
+        // stage's functions as this role.
+        Sid: 'JobSchedules',
+        Effect: 'Allow',
+        Action: 'scheduler:CreateSchedule',
+        Resource: `arn:aws:scheduler:${region}:${acct}:schedule/${names.scheduleGroup(app, stage)}/_*`,
+      },
+      {
+        Sid: 'JobSchedulesRole',
+        Effect: 'Allow',
+        Action: 'iam:PassRole',
+        Resource: `arn:aws:iam::${acct}:role${IAM_APP_PATH}${names.role(app, stage)}`,
+        Condition: { StringEquals: { 'iam:PassedToService': 'scheduler.amazonaws.com' } },
+      },
+    );
   }
 
   statements.push({
@@ -208,14 +227,12 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
     );
   }
 
-  // The SDK's `invokeJob` calls the worker's function, and Scheduler calls each cron's function as
-  // this role.
+  // The SDK sends queue messages and `invokeJob` to the worker's function and handlers' own, and
+  // Scheduler (crons, retries, delayed sends) calls them as this role.
   if (manifest.worker) {
     const functions = [
       names.workerFunction(app, stage),
-      ...ownFunctionHandlers(manifest)
-        .filter((h) => h.kind === 'cron')
-        .map((h) => names.handlerFunction(app, stage, h.kind, h.name)),
+      ...ownFunctionHandlers(manifest).map((h) => names.handlerFunction(app, stage, h.kind, h.name)),
     ].map((fn) => `arn:aws:lambda:${region}:${acct}:function:${fn}`);
     statements.push({
       Sid: 'InvokeWorker',
@@ -314,6 +331,21 @@ export function boundaryPolicy(input: {
       Effect: 'Allow',
       Action: 'events:PutEvents',
       Resource: `arn:aws:events:${region}:${acct}:event-bus/*--*`,
+    },
+    {
+      // Jobs' retries and delayed sends (`_`-prefixed one-shot schedules in a stage's group), run as
+      // a stage role.
+      Sid: 'StageJobSchedules',
+      Effect: 'Allow',
+      Action: 'scheduler:CreateSchedule',
+      Resource: `arn:aws:scheduler:${region}:${acct}:schedule/*--*/_*`,
+    },
+    {
+      Sid: 'StageJobSchedulesRole',
+      Effect: 'Allow',
+      Action: 'iam:PassRole',
+      Resource: `arn:aws:iam::${acct}:role${IAM_APP_PATH}*`,
+      Condition: { StringEquals: { 'iam:PassedToService': 'scheduler.amazonaws.com' } },
     },
     {
       Sid: 'StageStorage',

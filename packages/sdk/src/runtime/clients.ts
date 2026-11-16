@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import type { EventBridgeClient } from '@aws-sdk/client-eventbridge';
 import type { LambdaClient } from '@aws-sdk/client-lambda';
 import type { S3Client } from '@aws-sdk/client-s3';
+import type { SchedulerClient } from '@aws-sdk/client-scheduler';
 import type { SESv2Client } from '@aws-sdk/client-sesv2';
 import type { SQSClient } from '@aws-sdk/client-sqs';
 import type { SSMClient } from '@aws-sdk/client-ssm';
@@ -26,6 +27,7 @@ export interface Clients {
   s3: S3Client;
   ssm: SSMClient;
   lambda: LambdaClient;
+  scheduler: SchedulerClient;
   cognito: CognitoIdentityProviderClient;
   sesv2: SESv2Client;
 }
@@ -56,6 +58,7 @@ const lazyFactories: { [K in LazyClientName]: () => Promise<Clients[K]> } = {
     }),
   ssm: async () => new (await import('@aws-sdk/client-ssm')).SSMClient(config()),
   lambda: async () => new (await import('@aws-sdk/client-lambda')).LambdaClient(config()),
+  scheduler: async () => new (await import('@aws-sdk/client-scheduler')).SchedulerClient(config()),
   cognito: async () =>
     new (await import('@aws-sdk/client-cognito-identity-provider')).CognitoIdentityProviderClient(config()),
   sesv2: async () => new (await import('@aws-sdk/client-sesv2')).SESv2Client(config()),

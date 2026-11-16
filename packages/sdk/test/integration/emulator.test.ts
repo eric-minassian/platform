@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import {
   CognitoIdentityProviderClient,
   CreateUserPoolClientCommand,
@@ -26,7 +28,7 @@ import {
   SQSClient,
 } from '@aws-sdk/client-sqs';
 import { PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { BINDINGS_ENV, type Bindings, encodeBindings } from '@ericminassian/platform-core';
+import { BINDINGS_ENV, type Bindings, encodeBindings, readDeadLetter } from '@ericminassian/platform-core';
 import { Effect, Layer, Option, Redacted } from 'effect';
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from 'effect/http-api';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -44,6 +46,7 @@ import {
   User,
 } from '../../src/index.ts';
 import { setBindings } from '../../src/runtime/bindings.ts';
+import { afterFailure } from '../../src/runtime/jobs.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
 import { batchContract, countersContract, dbContract, transactContract } from '../effect-db-contract.ts';
 import { rateLimitContract } from '../rate-limit-contract.ts';
@@ -58,6 +61,8 @@ const base = `${APP}--${STAGE}`;
 
 let bindings: Bindings;
 let eventsTargetUrl = '';
+let localWorker: Server;
+const delivered: Array<{ body: unknown; at: string | string[] | undefined }> = [];
 let headObject: (key: string) => Promise<{ contentType?: string; cacheControl?: string }>;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -111,8 +116,18 @@ beforeAll(async () => {
 
   await createTable(ddb, base);
 
-  const emails = await sqs.send(new CreateQueueCommand({ QueueName: `${base}--emails` }));
-  const emailsArn = await queueArn(sqs, emails.QueueUrl!);
+  const dead = await sqs.send(new CreateQueueCommand({ QueueName: `${base}--jobs--dead` }));
+  // Under `plat dev` / `plat test` jobs go to the CLI's local worker; this stands in for it.
+  localWorker = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      delivered.push({ body: JSON.parse(body), at: req.headers['x-platform-deliver-at'] });
+      res.writeHead(202).end();
+    });
+  });
+  await new Promise<void>((resolve) => localWorker.listen(0, '127.0.0.1', resolve));
+  process.env.PLATFORM_LOCAL_WORKER_URL = `http://127.0.0.1:${(localWorker.address() as AddressInfo).port}/`;
   const target = await sqs.send(new CreateQueueCommand({ QueueName: `${base}--evt-target` }));
   eventsTargetUrl = target.QueueUrl!;
   const targetArn = await queueArn(sqs, eventsTargetUrl);
@@ -193,15 +208,24 @@ beforeAll(async () => {
   );
 
   bindings = {
-    v: 1,
+    v: 2,
     app: APP,
     stage: STAGE,
     host: `${APP}--${STAGE}.localhost`,
     url: `http://${APP}--${STAGE}.localhost:3000`,
     revision: 'dlocal',
     region,
+    account: '000000000000',
     table: base,
-    queues: { emails: { url: emails.QueueUrl!, arn: emailsArn } },
+    worker: `${base}--worker`,
+    jobs: {
+      queues: ['emails'],
+      fns: {},
+      attempts: {},
+      dead: dead.QueueUrl!,
+      group: base,
+      role: `arn:aws:iam::000000000000:role/platform/apps/${base}`,
+    },
     bus: { name: base, arn: bus.EventBusArn! },
     storage: {
       bucket,
@@ -227,7 +251,11 @@ beforeAll(async () => {
   setBindings(undefined);
 });
 
-afterAll(() => resetPlatform());
+afterAll(() => {
+  resetPlatform();
+  delete process.env.PLATFORM_LOCAL_WORKER_URL;
+  localWorker?.close();
+});
 
 /** Runs `effect` on the real platform services, through this stage's bindings. */
 const run = <A, E>(effect: Effect.Effect<A, E, Platform.Services>) =>
@@ -272,19 +300,43 @@ describe('against the AWS Emulator', () => {
     });
   });
 
-  it('queue: send carries the body and trace', async () => {
+  it('queue: send hands the local worker a job with the body and trace, delayed ones with their time', async () => {
     await run(Effect.flatMap(Queues, (queues) => queues.send('emails', { to: 'eric@example.com' })));
-    const sqs = new SQSClient(cfg);
-    const out = await sqs.send(
-      new ReceiveMessageCommand({
-        QueueUrl: bindings.queues.emails!.url,
-        MessageAttributeNames: ['All'],
-        WaitTimeSeconds: 2,
-      }),
+    await run(
+      Effect.flatMap(Queues, (queues) => queues.send('emails', { to: 'later' }, { delay: '2 hours' })),
     );
-    const m = out.Messages?.[0];
-    expect(JSON.parse(m!.Body!)).toEqual({ to: 'eric@example.com' });
-    expect(m!.MessageAttributes?.trace?.StringValue).toMatch(/^[0-9a-f]{32}$/);
+    expect(delivered[0]!.body).toMatchObject({
+      kind: 'queue',
+      name: 'emails',
+      attempt: 1,
+      body: { to: 'eric@example.com' },
+    });
+    expect((delivered[0]!.body as { trace: string }).trace).toMatch(/^[0-9a-f]{32}$/);
+    expect(delivered[0]!.at).toBeUndefined();
+    expect(Number(delivered[1]!.at)).toBeGreaterThan(Date.now() + 7_000_000);
+  });
+
+  it('jobs: a job past its last attempt lands in the dead-letter queue', async () => {
+    const job = {
+      __platform: 'job' as const,
+      kind: 'queue' as const,
+      name: 'emails',
+      id: 'm1',
+      attempt: 5,
+      sentAt: Date.now(),
+      body: { to: 'x' },
+    };
+    expect(await afterFailure(job, new Error('bounced'))).toBe('dead');
+    const out = await new SQSClient(cfg).send(
+      new ReceiveMessageCommand({ QueueUrl: bindings.jobs!.dead, WaitTimeSeconds: 2 }),
+    );
+    expect(readDeadLetter(out.Messages![0]!.Body!)).toMatchObject({
+      kind: 'queue',
+      name: 'emails',
+      attempts: 5,
+      error: { message: 'bounced' },
+      redrive: { attempt: 1, body: { to: 'x' } },
+    });
   });
 
   it('events: publish reaches a subscribed rule target', async () => {

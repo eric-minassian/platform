@@ -9,8 +9,11 @@
 import {
   type Bindings,
   type CapturedEmail,
+  type DeadLetter,
   EMAIL_INBOX_PATH,
+  type JobPayload,
   LOCAL_MAIL_URL_ENV,
+  newId,
   type TelemetryEvent,
   VIEWER_ADDRESS_HEADER,
   VIEWER_COUNTRY_HEADER,
@@ -31,22 +34,76 @@ export { createWorkerHandler } from './runtime/worker.ts';
 /** Complete bindings with sensible test defaults. */
 export function testBindings(overrides: Partial<Bindings> = {}): Bindings {
   return {
-    v: 1,
+    v: 2,
     app: 'test-app',
     stage: 'test',
     host: 'test-app.localhost',
     url: 'http://test-app.localhost:3000',
     revision: 'dtest',
     region: 'us-east-1',
-    queues: {},
+    account: '000000000000',
     secrets: {
       path: '/platform/apps/test-app/test/secrets/',
       sharedPath: '/platform/apps/test-app/_shared/secrets/',
       names: [],
     },
     stageKey: 'dGVzdC1vbmx5LXN0YWdlLWtleS1ub3QtYS1zZWNyZXQ',
+    worker: 'test-app--test--worker',
+    jobs: {
+      queues: [],
+      fns: {},
+      attempts: {},
+      dead: 'https://sqs.us-east-1.amazonaws.com/000000000000/test-app--test--jobs--dead',
+      group: 'test-app--test',
+      role: 'arn:aws:iam::000000000000:role/platform/apps/test-app--test',
+    },
     ...overrides,
   };
+}
+
+/**
+ * A queue message as the worker receives it, for feeding `createWorkerHandler`
+ * in tests: `await handler(queueJob('emails', body), {})`. `attempt` is which
+ * delivery it is (default 1).
+ */
+export function queueJob(queue: string, body: unknown, attempt = 1): JobPayload {
+  return { __platform: 'job', kind: 'queue', name: queue, id: newId('m'), attempt, sentAt: Date.now(), body };
+}
+
+/** What jobs code started instead of reaching AWS: see `captureJobs`. */
+export interface CapturedJobs {
+  /** Jobs run now (queue sends, `Jobs.invoke`), with the function they went to. */
+  sent: Array<{ function: string; job: unknown }>;
+  /** Retries and delayed sends, with when they run. */
+  scheduled: Array<{ job: JobPayload; at: Date }>;
+  /** Jobs that failed their last attempt. */
+  dead: DeadLetter[];
+}
+
+/**
+ * Records queue sends, retries, delayed sends and dead letters in memory
+ * instead of invoking Lambda, creating schedules or writing to SQS. A worker
+ * handler's failed run shows up in `scheduled` (attempts left) or `dead`.
+ */
+export function captureJobs(): CapturedJobs {
+  const captured: CapturedJobs = { sent: [], scheduled: [], dead: [] };
+  const decode = (bytes: unknown) => JSON.parse(new TextDecoder().decode(bytes as Uint8Array)) as unknown;
+  mockClient('lambda', (cmd) => {
+    captured.sent.push({ function: String(cmd.input.FunctionName), job: decode(cmd.input.Payload) });
+    return { StatusCode: 202 };
+  });
+  mockClient('scheduler', (cmd) => {
+    const target = cmd.input.Target as { Input: string };
+    const at = /^at\((.+)\)$/.exec(String(cmd.input.ScheduleExpression))?.[1];
+    captured.scheduled.push({ job: JSON.parse(target.Input) as JobPayload, at: new Date(`${at}Z`) });
+    return {};
+  });
+  mockClient('sqs', (cmd) => {
+    if (cmd.constructor.name === 'SendMessageCommand')
+      captured.dead.push(JSON.parse(String(cmd.input.MessageBody)) as DeadLetter);
+    return {};
+  });
+  return captured;
 }
 
 /** Install bindings for the current test process (returns them). */
@@ -71,7 +128,7 @@ export function clientHeaders(ip: string, options: { country?: string } = {}): R
 
 /** Replace an AWS client with a fake `{ send(command) }`. */
 export function mockClient(
-  name: 'ddb' | 'sqs' | 'events' | 's3' | 'ssm' | 'lambda' | 'cognito' | 'sesv2',
+  name: 'ddb' | 'sqs' | 'events' | 's3' | 'ssm' | 'lambda' | 'scheduler' | 'cognito' | 'sesv2',
   send: (command: { constructor: { name: string }; input: Record<string, unknown> }) => unknown,
 ): SendClient {
   const fake: SendClient = {

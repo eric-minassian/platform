@@ -29,7 +29,17 @@ export interface RuleSpec {
   bus: string;
   name: string;
   pattern: unknown;
-  targets: Array<{ id: string; arn: string; input?: string; roleArn?: string }>;
+  targets: Array<{
+    id: string;
+    arn: string;
+    input?: string;
+    roleArn?: string;
+    /**
+     * Where an event EventBridge couldn't deliver goes, after it retried for up to a day (the
+     * queue's policy must let this rule send to it).
+     */
+    deadLetterArn?: string;
+  }>;
   tags?: Record<string, string>;
   /**
    * Runs once the rule exists, before it targets anything new: where the
@@ -54,7 +64,18 @@ export async function ensureRule(ctx: EngineContext, spec: RuleSpec): Promise<st
     new PutTargetsCommand({
       Rule: spec.name,
       EventBusName: spec.bus,
-      Targets: spec.targets.map((t) => ({ Id: t.id, Arn: t.arn, Input: t.input, RoleArn: t.roleArn })),
+      Targets: spec.targets.map((t) => ({
+        Id: t.id,
+        Arn: t.arn,
+        Input: t.input,
+        RoleArn: t.roleArn,
+        ...(t.deadLetterArn
+          ? {
+              DeadLetterConfig: { Arn: t.deadLetterArn },
+              RetryPolicy: { MaximumRetryAttempts: 185, MaximumEventAgeInSeconds: 86_400 },
+            }
+          : {}),
+      })),
     }),
   );
   const existing = await ev.send(new ListTargetsByRuleCommand({ Rule: spec.name, EventBusName: spec.bus }));

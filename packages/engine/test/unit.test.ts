@@ -88,7 +88,15 @@ describe('stage role policy', () => {
       'arn:aws:dynamodb:us-east-1:111122223333:table/todo--prod',
       'arn:aws:dynamodb:us-east-1:111122223333:table/todo--prod/index/*',
     ]);
-    expect(bySid.Queues?.Resource).toBe('arn:aws:sqs:us-east-1:111122223333:todo--prod--*');
+    expect(bySid.Jobs?.Resource).toBe('arn:aws:sqs:us-east-1:111122223333:todo--prod--*');
+    expect(bySid.JobSchedules?.Resource).toBe(
+      'arn:aws:scheduler:us-east-1:111122223333:schedule/todo--prod/_*',
+    );
+    expect(bySid.JobSchedulesRole).toMatchObject({
+      Action: 'iam:PassRole',
+      Resource: 'arn:aws:iam::111122223333:role/platform/apps/todo--prod',
+      Condition: { StringEquals: { 'iam:PassedToService': 'scheduler.amazonaws.com' } },
+    });
     expect(bySid.Events?.Resource).toBe('arn:aws:events:us-east-1:111122223333:event-bus/todo--prod');
     expect(bySid.StorageObjects?.Resource).toEqual(['arn:aws:s3:::store/todo/prod/*']);
     expect(bySid.StorageList?.Condition).toEqual({ StringLike: { 's3:prefix': ['todo/prod/*'] } });
@@ -127,7 +135,7 @@ describe('stage role policy', () => {
     expect(bySid.Logs?.Action).toEqual(['logs:CreateLogStream', 'logs:PutLogEvents']);
   });
 
-  it('lets Scheduler invoke a cron’s own function, and nothing else of a handler’s', () => {
+  it('lets the SDK and Scheduler invoke the worker and each handler’s own function', () => {
     const own = policies.stageRolePolicy({
       app: 'atlas',
       stage: 'prod',
@@ -141,8 +149,11 @@ describe('stage role policy', () => {
       }),
       platform: platform(),
     });
+    // Queue sends, events' and crons' retries all invoke the function the handler runs in.
     expect(own.Statement.find((x) => x.Sid === 'InvokeWorker')?.Resource).toEqual([
       'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker',
+      'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker--queue-ais',
+      'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker--event-ship_seen',
       'arn:aws:lambda:us-east-1:1:function:atlas--prod--worker--cron-listen',
     ]);
   });

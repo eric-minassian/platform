@@ -29,15 +29,16 @@ describe('jobs', () => {
 
   it('names schedules within Scheduler’s 64 chars, by queue and cron', () => {
     const id = '01k0000000000000000000000z';
-    expect(jobScheduleName('queue', 'emails', id)).toBe(`q-emails-${id}`);
-    expect(jobScheduleName('cron', 'nightly', id)).toBe(`c-nightly-${id}`);
+    expect(jobScheduleName('queue', 'emails', id)).toBe(`_q-emails-${id}`);
+    expect(jobScheduleName('cron', 'nightly', id)).toBe(`_c-nightly-${id}`);
     expect(jobScheduleName('queue', 'q'.repeat(20), id).length).toBeLessThanOrEqual(64);
     const event = jobScheduleName('event', `order:${'x'.repeat(60)}`, id);
-    expect(event).toMatch(/^e-[0-9a-f]{8}-/);
+    expect(event).toMatch(/^_e-[0-9a-f]{8}-/);
     expect(event.length).toBeLessThanOrEqual(64);
     expect(event.startsWith(jobSchedulePrefix('event', `order:${'x'.repeat(60)}`))).toBe(true);
     // Crons' own schedules are the cron key; services' stop schedules contain `--`.
-    expect(isJobSchedule(`q-emails-${id}`)).toBe(true);
+    expect(isJobSchedule(`_q-emails-${id}`)).toBe(true);
+    expect(isJobSchedule('c-cleanup')).toBe(false);
     expect(isJobSchedule('nightly')).toBe(false);
     expect(isJobSchedule('firehose--stop')).toBe(false);
   });
@@ -114,7 +115,10 @@ describe('jobs', () => {
       redrive: { ...job, attempt: 1 },
     });
 
-    const old = JSON.parse(record({ __platform: 'invoke', name: 'deploy', payload: { id: 'd1' } }, {}));
+    const old = JSON.parse(record({ __platform: 'invoke', name: 'deploy', payload: { id: 'd1' } }, {})) as {
+      responsePayload?: unknown;
+      requestContext: { condition?: string };
+    };
     delete old.responsePayload;
     old.requestContext.condition = 'EventAgeExceeded';
     expect(readDeadLetter(JSON.stringify(old))).toMatchObject({

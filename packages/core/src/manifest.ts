@@ -653,12 +653,17 @@ export function handlerSettings(m: WorkerManifest, kind: HandlerKind, name: stri
   };
 }
 
-/** The handlers that run in functions of their own. The worker's function runs the rest. */
-export function ownFunctionHandlers(m: WorkerManifest): HandlerSettings[] {
+/** Every queue, event and cron handler with its settings. */
+export function workerHandlers(m: WorkerManifest): HandlerSettings[] {
   const declared = declaredHandlers(m);
   return HANDLER_KINDS.flatMap((kind) =>
     Object.keys(declared[kind]).map((name) => handlerSettings(m, kind, name)),
-  ).filter((h) => h.own);
+  );
+}
+
+/** The handlers that run in functions of their own. The worker's function runs the rest. */
+export function ownFunctionHandlers(m: WorkerManifest): HandlerSettings[] {
+  return workerHandlers(m).filter((h) => h.own);
 }
 
 /** The Lambda function a handler runs in: its own, or the worker's. */

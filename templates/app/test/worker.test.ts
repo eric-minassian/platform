@@ -1,32 +1,25 @@
 import {
   captureEmails,
+  captureJobs,
   captureTelemetry,
   createWorkerHandler,
+  queueJob,
   resetPlatform,
   useTestBindings,
 } from '@ericminassian/platform/testing';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/worker.ts';
 
-// The worker as Lambda runs it, fed an SQS batch the way the queue delivers one.
-// `captureEmails` records what `Email.send` sends instead of delivering it.
-const EMAILS_ARN = 'arn:aws:sqs:us-east-1:000000000000:template-app--test--emails';
-
-const record = (messageId: string, body: unknown) => ({
-  messageId,
-  body: JSON.stringify(body),
-  eventSource: 'aws:sqs',
-  eventSourceARN: EMAILS_ARN,
-  attributes: { ApproximateReceiveCount: '1', SentTimestamp: String(Date.now()) },
-});
-
+// The worker as Lambda runs it, fed queue messages the way the platform delivers them.
+// `captureEmails` records what `Email.send` sends instead of delivering it, and `captureJobs`
+// what a failed run schedules (a retry) or dead-letters instead of reaching AWS.
 describe('worker', () => {
   let telemetry: ReturnType<typeof captureTelemetry>;
   let emails: ReturnType<typeof captureEmails>;
+  let jobs: ReturnType<typeof captureJobs>;
   beforeEach(() => {
     useTestBindings({
       app: 'template-app',
-      queues: { emails: { url: 'https://sqs/emails', arn: EMAILS_ARN } },
       email: {
         mode: 'local',
         from: 'template-app--test@mail.localhost',
@@ -38,6 +31,7 @@ describe('worker', () => {
     });
     telemetry = captureTelemetry();
     emails = captureEmails();
+    jobs = captureJobs();
   });
   afterEach(() => {
     emails.stop();
@@ -45,19 +39,11 @@ describe('worker', () => {
     resetPlatform();
   });
 
-  it('sends emails and retries a message that no longer matches EmailJob', async () => {
+  it('sends emails, and retries a message that no longer matches EmailJob', async () => {
     const handler = createWorkerHandler(worker);
-    const result = await handler(
-      {
-        Records: [
-          record('ok', { to: 'alice@example.com', subject: 'New todo', body: 'Buy milk' }),
-          record('stale', { recipient: 'alice@example.com' }),
-        ],
-      },
-      {},
-    );
+    await handler(queueJob('emails', { to: 'alice@example.com', subject: 'New todo', body: 'Buy milk' }), {});
+    await handler(queueJob('emails', { recipient: 'alice@example.com' }), {});
 
-    expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: 'stale' }] });
     expect(emails.sent).toEqual([
       expect.objectContaining({
         from: '"Todo" <template-app--test@mail.localhost>',
@@ -68,18 +54,19 @@ describe('worker', () => {
     ]);
     const metric = telemetry.events.find((e) => e.t === 'metric');
     expect(metric).toMatchObject({ name: 'emails.sent', value: 1 });
-    const jobs = telemetry.events.flatMap((e) => (e.t === 'job' ? [e.status] : []));
-    expect(jobs).toEqual(['ok', 'error']);
+    const runs = telemetry.events.flatMap((e) => (e.t === 'job' ? [e.status] : []));
+    expect(runs).toEqual(['ok', 'error']);
+    // The failed run's next attempt is scheduled about a minute out.
+    expect(jobs.scheduled.map((s) => s.job)).toMatchObject([{ name: 'emails', attempt: 2 }]);
   });
 
-  it('retries a message whose email was refused', async () => {
+  it('dead-letters a message whose email was refused on every attempt', async () => {
     const handler = createWorkerHandler(worker);
-    const result = await handler(
-      { Records: [record('bad', { to: 'not-an-address', subject: 'x', body: 'y' })] },
-      {},
-    );
-    expect(result).toEqual({ batchItemFailures: [{ itemIdentifier: 'bad' }] });
+    await handler(queueJob('emails', { to: 'not-an-address', subject: 'x', body: 'y' }, 5), {});
     expect(emails.sent).toEqual([]);
+    expect(jobs.dead).toMatchObject([
+      { job: { name: 'emails', attempt: 5 }, error: { name: 'EmailNotSent' } },
+    ]);
     const error = telemetry.events.find((e) => e.t === 'err');
     expect(error).toMatchObject({
       name: 'EmailNotSent',
