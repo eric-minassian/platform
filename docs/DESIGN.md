@@ -226,6 +226,10 @@ used by `plat dev`):
   the deployer, `plat deploy`/`plat rollback` and the uptime pinger.
 - Unknown hosts get a 404.
 
+An AWS WAF web ACL runs before the function: the edge floor, which answers a
+client sending one host more than `limits.edgeRequestsPerMinute` requests a
+minute with a 429. See [Rate limits](#rate-limits).
+
 The cache key includes the rewritten URI (static keys contain the deployment
 id) plus `x-platform-host`, so apps never share cache entries. The origin
 request policy is `AllViewerExceptHostHeader` (Web Functions 404 on a foreign
@@ -478,11 +482,25 @@ telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> ro
   rides on the error class itself, as `HttpApiSchema.encodeToWithHeaders`
   would attach it, so apps declare and fail with one class. A `cost` above
   `max`, a bad name or `per`, and a missing `db` are defects naming the fix.
-- **No platform-wide floor yet.** An AWS WAF web ACL with a rate-based rule
-  on the router would cover every app, static and public files included, but costs about
-  $6 a month fixed (roughly three times the platform's baseline) plus $0.60
-  per million requests, and counts per IP over 1–10 minute windows: too coarse
-  to replace per-app limits. Revisit if a flood hits static or public files.
+- **The edge floor** sits under every app's own limits: one AWS WAF web ACL
+  (`platform-edge`, foundation stack) on the router distribution with one
+  rate-based rule. A client (IP address) sending one host more than
+  `limits.edgeRequestsPerMinute` requests a minute (1,000) is answered at the
+  edge, static files and public stores' files included, before any function
+  runs:
+  - a 429 with `Retry-After: 60` and the `RateLimited` body, so a generated web
+    client decodes it like an app's own;
+  - counted per client and host (lowercased, so spelling it differently
+    doesn't buy a second budget): a busy client of one app, or a CI runner
+    testing several, isn't blocked from the others;
+  - WAF checks the last minute's rate every few seconds and stops blocking
+    once it falls back under the limit, usually within 30 seconds.
+
+  The Admin page shows blocked and allowed requests (WAF's CloudWatch
+  metrics) and a sample of recently blocked requests with their host and
+  client (WAF's free three-hour sample), so a flood can be traced to an app.
+  It costs about $6 a month plus $0.60 per million requests; without the
+  setting the stack has no web ACL.
 
 ## Deploy flow
 
@@ -606,8 +624,9 @@ writing any instrumentation:
 - **Console** (`platform.ericminassian.com`):
   - **Home:** every app with status, traffic, error rate, p95, cost and last deploy.
   - **Per app:**
-    - Overview graphs and per-route stats, and rate limits (allowed and
-      denied checks per limit) for stages that checked any.
+    - Overview graphs and per-route stats; custom metrics (`Metrics.count` by
+      total, `Metrics.value` by average) and rate limits (allowed and denied
+      checks per limit) for stages that recorded any.
     - Logs search plus live tail (CloudWatch Live Tail over SSE).
     - Trace waterfalls; grouped errors.
     - Jobs: queue depth, DLQ redrive, cron run-now.
@@ -620,6 +639,7 @@ writing any instrumentation:
       complaints, and the suppression list.
     - Data browser for collections and files.
     - Deployments with rollback; secrets; settings; cost.
+  - **Admin:** members, platform cost, and the edge floor's blocked requests.
 - **Uptime.** One pinger checks every prod app every 5 minutes.
 - **Cost.** A daily Cost Explorer pull grouped by the `platform:app` tag.
 - **CLI.** `plat logs|metrics|errors|traces|data --json` gives agents the same views.
@@ -693,9 +713,10 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
 | Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
 | Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
+| Edge floor (AWS WAF)                                | $5 web ACL + $1 rule, plus $0.60 per million requests; none without `limits.edgeRequestsPerMinute`                           |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
-Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
+Baseline is about $1–3 a month, plus about $6 for the edge floor. `eric-minassian/aws` already puts a budget on
 the account.
 
 ## Graduation
@@ -791,9 +812,9 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     gets with the foundation deploy. Until AWS grants it, apps can only mail
     verified addresses and the user pool keeps Cognito's sender. See
     `docs/SETUP.md` step 11.
-- **Rate limits have no platform-wide floor.** Per-app limits run in the
-  Web Function, so a flood still reaches it (and static files and public
-  stores' files aren't covered). The WAF option is in [Rate limits](#rate-limits).
+- **The edge floor counts IPv6 clients per address.** WAF can't group by
+  prefix, so a client rotating through its /64 gets a budget per address;
+  apps' own limits group by /64 (`clientInfo().network`).
 - **Public stores, verified 2026-11-16 on a throwaway bucket and
   distribution.**
   - A public file is served with its own `Content-Type` and `Cache-Control`
@@ -842,7 +863,8 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                    |
 | One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                   |
 | The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                     |
-| Rate limits: a sliding window in the stage's table, no WAF                            | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically. WAF would triple the fixed cost for coarse per-IP counts.       |
+| Rate limits: a sliding window in the stage's table                                    | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically.                                                                 |
+| An edge floor on AWS WAF, per client and host                                         | Eric's call (2026-11-16), after rate limits shipped without it. Floods of static files never reach a function, so only the edge can stop them. Keyed per host so one app's busy client or a shared CI runner doesn't lose the others.                                                                                                                                                                                         |
 | Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                   |
 | Store expiry is a daily control-plane sweep, not S3 lifecycle rules                   | One lifecycle document per bucket, shared by every app, can't be updated safely by concurrent deploys, and the foundation stack owns that bucket's configuration. The sweep touches only the stores that ask for it, for a LIST per 1,000 files a day.                                                                                                                                                                        |
 | A store with files can't switch between public and private                            | Its files would have to move while the live deployment keeps writing to the old place until every edge switches, so some writes could be lost. A new store name is a one-line change.                                                                                                                                                                                                                                         |

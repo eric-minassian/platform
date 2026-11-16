@@ -218,6 +218,8 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
     that waits `retryAfter` gets back in. Use one `max` per name.
   - The web client gets `RateLimited` with `retryAfter` (whole seconds) as a typed error.
   - The console's Overview and `plat metrics` show allowed and denied checks per limit.
+  - Under every app, the edge answers a client sending one host more than 1,000 requests a minute with the
+    same `RateLimited` 429 (`Retry-After: 60`), static files included. Your limits sit well below it.
   - Unit tests count in memory: `Platform.Memory`'s `rateLimits` lists every check with its key.
 - **Client keys and dedupe.** Key abuse controls (one vote per client, signup throttles) by
   `client.network` from `yield* clientInfo`: the IPv4 address, or the IPv6 /64, since one IPv6 client
