@@ -1,0 +1,567 @@
+/**
+ * An app stage at a glance: what's live, five figures against the previous
+ * period, the four charts that explain most incidents (status, latency,
+ * errors, the latency distribution) on one cursor with deployment markers,
+ * the busiest routes, and what happened lately.
+ */
+import { useAtomValue } from '@effect/atom-react';
+import {
+  type ErrorGroup,
+  type MetricsView,
+  percentile,
+  QUERY_RESOLUTION_MS,
+  type QueryResolution,
+  type SeriesQuery,
+  type SeriesResponse,
+} from '@ericminassian/platform-core';
+import { Link } from '@tanstack/react-router';
+import { Option } from 'effect';
+import { AsyncResult, Atom } from 'effect/reactivity';
+import { ArrowUpRight, Bell, CircleCheck, Layers, TriangleAlert } from 'lucide-react';
+import type { ReactNode } from 'react';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
+import { Sparkline } from '../../components/charts/sparkline.tsx';
+import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
+import { viewResolution } from '../../components/metrics/metric-view.tsx';
+import {
+  EmptyState,
+  Loaded,
+  Mono,
+  PageHeader,
+  Panel,
+  RouteLabel,
+  Stat,
+  StatusPill,
+  statusTone,
+} from '../../components/page.tsx';
+import { Button } from '../../components/ui/button.tsx';
+import { deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
+import { stageOf, useAppSummary, useDeployment } from '../../data/hooks.ts';
+import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../../format.ts';
+import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
+import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
+import { overviewRoute } from '../../router.tsx';
+
+const STATUS: MetricsView = {
+  kind: 'metrics',
+  queries: [{ id: 'a', metric: 'requests', stat: 'count', groupBy: 'status' }],
+  chart: 'bar',
+};
+const LATENCY: MetricsView = {
+  kind: 'metrics',
+  queries: [
+    { id: 'a', metric: 'latency', stat: 'p50', label: 'p50' },
+    { id: 'b', metric: 'latency', stat: 'p95', label: 'p95' },
+    { id: 'c', metric: 'latency', stat: 'p99', label: 'p99' },
+  ],
+  chart: 'line',
+  scale: 'log',
+};
+const ERROR_RATE: MetricsView = {
+  kind: 'metrics',
+  queries: [
+    { id: 'a', metric: 'requests', stat: 'percent', filter: { status: ['5xx'] }, label: '5xx % of requests' },
+  ],
+  chart: 'area',
+};
+const DISTRIBUTION: MetricsView = {
+  kind: 'metrics',
+  queries: [{ id: 'a', metric: 'latency', stat: 'histogram' }],
+  chart: 'heatmap',
+};
+
+const STATUS_QUERY: SeriesQuery = { metric: 'requests', stat: 'count', groupBy: 'status' };
+const HISTOGRAM_QUERY: SeriesQuery = { metric: 'latency', stat: 'histogram' };
+const ROUTES_QUERY: SeriesQuery = { metric: 'requests', stat: 'count', groupBy: 'route' };
+
+const uptimeAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+  fresh(
+    ApiClient.query('observe', 'uptime', {
+      params: { app: k.app },
+      query: { stage: k.stage, ...apiParams(k.time) },
+      timeToLive,
+    }),
+  ),
+);
+const routesAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+  fresh(
+    ApiClient.query('observe', 'routes', {
+      params: { app: k.app },
+      query: { stage: k.stage, ...apiParams(k.time) },
+      timeToLive,
+    }),
+  ),
+);
+const openErrorsAtom = family((k: { app: string; stage: string }) =>
+  fresh(
+    ApiClient.query('observe', 'errors', {
+      params: { app: k.app },
+      query: { stage: k.stage, status: 'open' },
+      timeToLive,
+    }),
+  ),
+);
+const alertHistoryAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+  fresh(
+    ApiClient.query('alerts', 'history', {
+      params: { app: k.app },
+      query: { stage: k.stage, ...apiParams(k.time) },
+      timeToLive,
+    }),
+  ),
+);
+
+function apiParams(t: TimeSearch): { range?: string; from?: string; to?: string } {
+  return t.from !== undefined && t.to !== undefined
+    ? { from: String(t.from), to: String(t.to) }
+    : { range: t.range ?? '24h' };
+}
+
+/**
+ * The window just before this one, of the same length. A moving window's is
+ * pinned to the start of the current bucket, so it changes once a bucket
+ * rather than on every refresh.
+ */
+function previousWindow(time: TimeSearch, now: number, res: QueryResolution): TimeSearch {
+  const step = QUERY_RESOLUTION_MS[res];
+  const w = resolveWindow(time, Math.floor(now / step) * step);
+  const span = w.to - w.from;
+  return { from: w.from - span, to: w.from };
+}
+
+interface Figures {
+  readonly requests: number;
+  readonly errors: number;
+  readonly p95: number | null;
+  readonly traffic: readonly number[];
+}
+
+function figures(status: SeriesResponse, histogram: SeriesResponse): Figures {
+  const sum = (key?: string) =>
+    status.series
+      .filter((s) => key === undefined || s.key === key)
+      .reduce((n, s) => n + s.values.reduce<number>((a, v) => a + (v ?? 0), 0), 0);
+  const traffic = status.timestamps.map((_, i) => status.series.reduce((n, s) => n + (s.values[i] ?? 0), 0));
+  const hist: number[] = [];
+  for (const counts of histogram.histogram ?? []) counts.forEach((c, i) => (hist[i] = (hist[i] ?? 0) + c));
+  return { requests: sum(), errors: sum('5xx'), p95: percentile(hist, 95), traffic };
+}
+
+/** The current and previous windows' figures, answered together. */
+const figuresAtom = family(
+  (k: { app: string; stage: string; time: TimeSearch; previous: TimeSearch; res: QueryResolution }) =>
+    Atom.make((get) => {
+      const read = (time: TimeSearch, query: SeriesQuery) =>
+        get(seriesAtom({ app: k.app, stage: k.stage, time, res: k.res, query }));
+      return AsyncResult.all([
+        read(k.time, STATUS_QUERY),
+        read(k.time, HISTOGRAM_QUERY),
+        read(k.previous, STATUS_QUERY),
+        read(k.previous, HISTOGRAM_QUERY),
+      ]);
+    }),
+);
+
+function Delta({
+  now,
+  before,
+  better,
+}: {
+  now: number | null;
+  before: number | null;
+  better: 'up' | 'down' | 'none';
+}) {
+  if (now === null || before === null || before === 0) return <span>no earlier data</span>;
+  const change = (now - before) / before;
+  if (Math.abs(change) < 0.005) return <span>same as the previous period</span>;
+  const good = better === 'none' ? undefined : change > 0 === (better === 'up');
+  return (
+    <span>
+      <span className={good === undefined ? undefined : good ? 'text-ok' : 'text-bad'}>
+        {change > 0 ? '+' : '−'}
+        {fmtPct(Math.abs(change), Math.abs(change) < 0.1 ? 1 : 0)}
+      </span>{' '}
+      vs previous period
+    </span>
+  );
+}
+
+export function OverviewPage() {
+  const { app } = overviewRoute.useParams();
+  const stage = useStage();
+  const time = useTime();
+  const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));
+  const current = stageOf(summary, stage);
+
+  if (summary && !current) {
+    return (
+      <>
+        <PageHeader title={app} description={summary.app.description} />
+        <Panel>
+          <EmptyState title={`${app} has no ${stage} stage`}>
+            Deploy it with <Mono>plat deploy{stage === 'prod' ? '' : ` --stage ${stage}`}</Mono>, or pick
+            another stage in the sidebar.
+          </EmptyState>
+        </Panel>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Header app={app} stage={stage} />
+      <Figures app={app} stage={stage} time={time.search} cost={summary?.costMonthToDateUsd} />
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <ChartPanel
+          title="Requests"
+          description="by status class"
+          app={app}
+          stage={stage}
+          time={time.search}
+          view={STATUS}
+        />
+        <ChartPanel
+          title="Latency"
+          description="p50, p95 and p99, log scale"
+          app={app}
+          stage={stage}
+          time={time.search}
+          view={LATENCY}
+        />
+        <ChartPanel
+          title="5xx rate"
+          description="share of requests answered 5xx"
+          app={app}
+          stage={stage}
+          time={time.search}
+          view={ERROR_RATE}
+        />
+        <ChartPanel
+          title="Latency distribution"
+          description="requests per latency bucket"
+          app={app}
+          stage={stage}
+          time={time.search}
+          view={DISTRIBUTION}
+        />
+      </div>
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[3fr_2fr]">
+        <TopRoutes app={app} stage={stage} time={time.search} />
+        <Activity app={app} stage={stage} time={time.search} />
+      </div>
+    </>
+  );
+}
+
+function Header({ app, stage }: { app: string; stage: string }) {
+  const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));
+  const current = stageOf(summary, stage);
+  const live = useDeployment(current?.currentDeployment);
+  const up = stage === 'prod' ? summary?.health?.up : undefined;
+  return (
+    <PageHeader
+      title={
+        <>
+          {app}
+          {current && (
+            <StatusPill tone={up === false ? 'bad' : statusTone(current.status)}>
+              {up === false ? 'Down' : current.status === 'active' ? 'Live' : current.status}
+            </StatusPill>
+          )}
+        </>
+      }
+      actions={
+        current && (
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              nativeButton={false}
+              render={<Link to="/apps/$app/deployments" params={{ app }} />}
+            >
+              <Layers />
+              Deployments
+            </Button>
+            <Button
+              size="sm"
+              nativeButton={false}
+              render={
+                <a href={current.url} target="_blank" rel="noreferrer" aria-label={`Visit ${current.host}`} />
+              }
+            >
+              Visit
+              <ArrowUpRight />
+            </Button>
+          </>
+        )
+      }
+    >
+      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
+        {current && (
+          <a href={current.url} target="_blank" rel="noreferrer" className="text-foreground hover:underline">
+            {current.host}
+          </a>
+        )}
+        {live && (
+          <>
+            <span className="text-subtle">·</span>
+            {live.commit && <Mono className="text-foreground">{live.commit.slice(0, 7)}</Mono>}
+            {live.message && <span className="max-w-96 truncate">{live.message.split('\n')[0]}</span>}
+            <span className="text-subtle">·</span>
+            <span>
+              {relTime(live.finishedAt ?? live.createdAt)} by {live.actor.replace(/^ci:/, 'CI ')}
+            </span>
+          </>
+        )}
+        {current?.compute && (
+          <>
+            <span className="text-subtle">·</span>
+            <span>{current.compute === 'request' ? 'Request mode' : 'Instance mode'}</span>
+          </>
+        )}
+      </div>
+    </PageHeader>
+  );
+}
+
+function Figures({
+  app,
+  stage,
+  time,
+  cost,
+}: {
+  app: string;
+  stage: string;
+  time: TimeSearch;
+  cost: number | undefined;
+}) {
+  const { window } = useTime();
+  const res = viewResolution(time, window.to);
+  const previous = previousWindow(time, window.to, res);
+  const key = { app, stage, time, previous, res };
+  const atom = figuresAtom(key);
+  useAutoRefresh(atom, time.from === undefined);
+  const result = useSticky(useAtomValue(atom));
+  const uptime = Option.getOrUndefined(AsyncResult.value(useAtomValue(uptimeAtom({ app, stage, time }))));
+  const up = uptime?.length ? uptime.filter((u) => u.ok).length / uptime.length : null;
+  const fromTraffic = uptime?.filter((u) => u.source === 'traffic').length ?? 0;
+  return (
+    <Loaded result={result} loading={<div className="grid h-[92px] grid-cols-2 gap-3 lg:grid-cols-5" />}>
+      {([status, hist, prevStatus, prevHist]) => {
+        const nowF = figures(status, hist);
+        const before = figures(prevStatus, prevHist);
+        const rate = nowF.requests ? nowF.errors / nowF.requests : null;
+        const prevRate = before.requests ? before.errors / before.requests : null;
+        return (
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+            <Stat
+              label="Requests"
+              value={fmtNum(nowF.requests)}
+              trend={<Sparkline values={nowF.traffic} width={80} height={28} />}
+              note={<Delta now={nowF.requests} before={before.requests} better="none" />}
+            />
+            <Stat
+              label="5xx rate"
+              value={rate === null ? '–' : fmtPct(rate, 2)}
+              tone={rate !== null && rate > 0.01 ? 'bad' : undefined}
+              note={<Delta now={rate} before={prevRate} better="down" />}
+            />
+            <Stat
+              label="p95 latency"
+              value={fmtMs(nowF.p95)}
+              note={<Delta now={nowF.p95} before={before.p95} better="down" />}
+            />
+            <Stat
+              label="Uptime"
+              value={up === null ? '–' : fmtPct(up, up === 1 ? 0 : 2)}
+              tone={up !== null && up < 0.999 ? 'warn' : undefined}
+              note={
+                stage !== 'prod'
+                  ? 'prod stages only'
+                  : uptime?.length
+                    ? `${fmtNum(uptime.length)} windows, ${fromTraffic === uptime.length ? 'all' : fmtNum(fromTraffic)} from traffic`
+                    : 'no results in this range'
+              }
+            />
+            <Stat label="Cost, month to date" value={fmtUsd(cost)} note="tagged to this app" />
+          </div>
+        );
+      }}
+    </Loaded>
+  );
+}
+
+function TopRoutes({ app, stage, time }: { app: string; stage: string; time: TimeSearch }) {
+  const routes = useAtomValue(routesAtom({ app, stage, time }));
+  const res = viewResolution(time);
+  const trend = Option.getOrUndefined(
+    AsyncResult.value(useAtomValue(seriesAtom({ app, stage, time, res, query: ROUTES_QUERY }))),
+  );
+  const trendOf = (route: string) => trend?.series.find((s) => s.key === route)?.values ?? [];
+  return (
+    <Panel
+      flush
+      title="Busiest routes"
+      actions={
+        <Button
+          variant="ghost"
+          size="sm"
+          nativeButton={false}
+          render={
+            <Link
+              to="/apps/$app/metrics"
+              params={{ app }}
+              search={(prev) => ({
+                ...prev,
+                view: {
+                  kind: 'metrics',
+                  queries: [{ id: 'a', metric: 'latency', stat: 'p95', groupBy: 'route' }],
+                  chart: 'line',
+                  scale: 'log',
+                } satisfies MetricsView,
+              })}
+            />
+          }
+        >
+          Latency by route
+        </Button>
+      }
+    >
+      <Loaded result={routes} loading={<div className="h-48" />}>
+        {(list) =>
+          list.length === 0 ? (
+            <EmptyState title="No requests in this range" />
+          ) : (
+            <table className="w-full table-fixed text-sm">
+              <thead className="text-xs text-muted-foreground">
+                <tr className="border-b">
+                  <th className="h-9 pl-4 text-left font-medium">Route</th>
+                  <th className="w-24 px-3 text-right font-medium">Requests</th>
+                  <th className="w-20 px-3 text-right font-medium">5xx</th>
+                  <th className="w-20 px-3 text-right font-medium">p95</th>
+                  <th className="w-32 pr-4 pl-3 text-left font-medium">Trend</th>
+                </tr>
+              </thead>
+              <tbody>
+                {list
+                  .toSorted((a, b) => b.req - a.req)
+                  .slice(0, 8)
+                  .map((r) => {
+                    const route = `${r.method} ${r.route}`;
+                    const rate = r.req ? r.s5xx / r.req : 0;
+                    return (
+                      <tr key={route} className="border-b last:border-0">
+                        <td className="py-2 pl-4">
+                          <RouteLabel route={route} className="max-w-full" />
+                        </td>
+                        <td className="px-3 text-right tabular">{fmtNum(r.req)}</td>
+                        <td className={`px-3 text-right tabular ${rate > 0.01 ? 'text-bad' : ''}`}>
+                          {r.s5xx ? fmtPct(rate, 2) : '0%'}
+                        </td>
+                        <td className={`px-3 text-right tabular ${(r.p95 ?? 0) >= 1000 ? 'text-warn' : ''}`}>
+                          {fmtMs(r.p95)}
+                        </td>
+                        <td className="pr-4 pl-3">
+                          <Sparkline values={trendOf(route)} width={84} height={20} />
+                        </td>
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          )
+        }
+      </Loaded>
+    </Panel>
+  );
+}
+
+interface ActivityItem {
+  readonly key: string;
+  readonly at: number;
+  readonly icon: ReactNode;
+  readonly title: ReactNode;
+  readonly detail?: string | undefined;
+}
+
+function Activity({ app, stage, time }: { app: string; stage: string; time: TimeSearch }) {
+  const deployments = Option.getOrElse(
+    AsyncResult.value(useAtomValue(deploymentsAtom({ app, stage }))),
+    () => [],
+  );
+  const errors = Option.getOrElse(
+    AsyncResult.value(useAtomValue(openErrorsAtom({ app, stage }))),
+    (): readonly ErrorGroup[] => [],
+  );
+  const alerts =
+    Option.getOrUndefined(AsyncResult.value(useAtomValue(alertHistoryAtom({ app, stage, time }))))?.events ??
+    [];
+  const items: ActivityItem[] = [
+    ...deployments.slice(0, 6).map((d) => ({
+      key: `deploy:${d.id}`,
+      at: Date.parse(d.finishedAt ?? d.createdAt),
+      icon: <Layers className={d.status === 'failed' ? 'text-bad' : 'text-muted-foreground'} />,
+      title: (
+        <>
+          {d.status === 'failed'
+            ? 'Failed to deploy'
+            : d.computeSwitchOf
+              ? 'Switched compute of'
+              : 'Deployed'}{' '}
+          <Mono>{d.commit?.slice(0, 7) ?? d.id.slice(-7)}</Mono>
+        </>
+      ),
+      detail: [d.message?.split('\n')[0], d.actor.replace(/^ci:/, 'CI ')].filter(Boolean).join(' · '),
+    })),
+    ...errors.slice(0, 4).map((g) => ({
+      key: `error:${g.fingerprint}`,
+      at: Date.parse(g.lastSeen),
+      icon: <TriangleAlert className="text-bad" />,
+      title: (
+        <>
+          {g.name} <span className="text-muted-foreground">· {fmtNum(g.count)} events</span>
+        </>
+      ),
+      detail: g.message,
+    })),
+    ...alerts.slice(0, 6).map((e) => ({
+      key: `alert:${e.rule}:${e.ts}`,
+      at: Date.parse(e.ts),
+      icon: e.to === 'alarm' ? <Bell className="text-bad" /> : <CircleCheck className="text-ok" />,
+      title: (
+        <>
+          {e.name} {e.to === 'alarm' ? 'fired' : e.to === 'ok' ? 'recovered' : 'has no data'}
+        </>
+      ),
+      detail: e.value === null ? undefined : `value ${fmtNum(e.value)}, threshold ${fmtNum(e.threshold)}`,
+    })),
+  ]
+    .filter((i) => Number.isFinite(i.at))
+    .toSorted((a, b) => b.at - a.at)
+    .slice(0, 8);
+  return (
+    <Panel flush title="Activity">
+      {items.length === 0 ? (
+        <EmptyState title="Nothing happened lately" />
+      ) : (
+        <ul>
+          {items.map((i) => (
+            <li
+              key={i.key}
+              className="grid grid-cols-[20px_1fr_auto] gap-x-3 border-b px-4 py-2.5 last:border-0"
+            >
+              <span className="mt-0.5 [&_svg]:size-4">{i.icon}</span>
+              <span className="min-w-0 truncate text-sm">{i.title}</span>
+              <span className="text-xs text-muted-foreground tabular">
+                {relTime(new Date(i.at).toISOString())}
+              </span>
+              {i.detail && (
+                <span className="col-start-2 truncate text-xs text-muted-foreground">{i.detail}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}

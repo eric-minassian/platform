@@ -1,63 +1,156 @@
 @import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
+/* The console is dark only: `<html class="dark">`, and every token below is its dark value. */
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --color-bg: var(--bg);
-  --color-panel: var(--panel);
-  --color-panel-2: var(--panel-2);
-  --color-border: var(--border);
-  --color-fg: var(--fg);
+  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-heading: var(--font-sans);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
   --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Text that states a status (with its label or icon, never color alone). */
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-bad: var(--bad);
   --color-info: var(--info);
-  --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  /* Marks that state a status: dots, bars, heatmap highlights. */
+  --color-ok-mark: var(--ok-mark);
+  --color-warn-mark: var(--warn-mark);
+  --color-bad-mark: var(--bad-mark);
+  --color-subtle: var(--subtle);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
 }
 
 :root {
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --panel-2: #f1f3f6;
-  --border: #e3e6eb;
-  --fg: #14171c;
-  --muted: #677080;
-  --accent: #5b5bd6;
-  --ok: #1f9d55;
-  --warn: #c98a04;
-  --bad: #d23f3f;
-  --info: #2f7fd1;
-  --grid: #e9ecf0;
+  color-scheme: dark;
+  /* Neutrals lean slightly blue, toward the focus color. */
+  --background: #0a0b0d;
+  --foreground: #ececef;
+  --card: #111316;
+  --card-foreground: #ececef;
+  --popover: #15181c;
+  --popover-foreground: #ececef;
+  --primary: #ececef;
+  --primary-foreground: #0b0c0e;
+  --secondary: #1b1e23;
+  --secondary-foreground: #ececef;
+  --muted: #16191d;
+  --muted-foreground: #8b909a;
+  --subtle: #5f6570;
+  --accent: #1c1f24;
+  --accent-foreground: #ececef;
+  --destructive: #f26a6a;
+  --border: #22262c;
+  --input: #2b3038;
+  --ring: #4c9aff;
+  --radius: 0.5rem;
+
+  --sidebar: #0c0d10;
+  --sidebar-foreground: #b4b9c2;
+  --sidebar-primary: #ececef;
+  --sidebar-primary-foreground: #0b0c0e;
+  --sidebar-accent: #171a1e;
+  --sidebar-accent-foreground: #ececef;
+  --sidebar-border: #1d2026;
+  --sidebar-ring: #4c9aff;
+
+  --ok: #4cc76a;
+  --warn: #f5c04a;
+  --bad: #f47a7a;
+  --info: #6aa9f7;
+  --ok-mark: #0ca30c;
+  --warn-mark: #fab219;
+  --bad-mark: #d03b3b;
+
+  /*
+   * Chart colors, validated for this surface (dataviz palette validator, dark mode):
+   * categorical order for adjacent series, status classes, latency percentiles as one
+   * blue ramp, and the sequential heatmap ramp.
+   */
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
+  --chart-5: #d55181;
+  --chart-6: #0ca30c;
+  --chart-7: #9085e9;
+  --chart-8: #e66767;
+  --s2xx: #3987e5;
+  --s3xx: #199e70;
+  --s4xx: #c98500;
+  --s5xx: #d03b3b;
+  --p50: #256abf;
+  --p90: #3f80d6;
+  --p95: #5598e7;
+  --p99: #9ec5f4;
+  --chart-grid: #1c2025;
+  --chart-axis: #2d3239;
+  --ts-chart-1: var(--chart-1);
+  --ts-chart-2: var(--chart-2);
+  --ts-chart-3: var(--chart-3);
+  --ts-chart-4: var(--chart-4);
+  --ts-chart-5: var(--chart-5);
+  --ts-chart-6: var(--chart-6);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0c0e12;
-    --panel: #14171d;
-    --panel-2: #1b1f27;
-    --border: #262b35;
-    --fg: #e7e9ee;
-    --muted: #8b93a3;
-    --accent: #8b8cf5;
-    --ok: #3fbf74;
-    --warn: #e0a72a;
-    --bad: #f06363;
-    --info: #5aa4ef;
-    --grid: #1f242d;
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-background font-sans text-foreground;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: 'ss01', 'cv11';
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--ring) 35%, transparent);
   }
 }
 
-html,
-body {
-  background: var(--bg);
-  color: var(--fg);
-}
-
-body {
-  font-family: var(--font-sans);
-  font-size: 13px;
-  -webkit-font-smoothing: antialiased;
+@utility tabular {
+  font-variant-numeric: tabular-nums;
 }
 
 /* index.html's copy of the signed-out page is for clients that don't run scripts; React replaces it. */
@@ -67,7 +160,30 @@ body {
   }
 }
 
-.recharts-cartesian-axis-tick-value {
-  fill: var(--muted);
+/* TanStack Charts inherit color from their container and style tooltips through these variables. */
+.ts-chart-host {
+  color: var(--muted-foreground);
+  font-family: var(--font-sans);
   font-size: 11px;
+  --ts-chart-tooltip-background: var(--popover);
+  --ts-chart-tooltip-color: var(--popover-foreground);
+  --ts-chart-tooltip-border: 1px solid var(--input);
+  --ts-chart-tooltip-border-radius: 8px;
+  --ts-chart-tooltip-shadow: 0 10px 28px rgb(0 0 0 / 0.5);
+  --ts-chart-tooltip-font: 500 12px/1.5 var(--font-sans);
+  --ts-chart-tooltip-active-row-background: var(--accent);
+  --ts-chart-crosshair-label-halo: var(--background);
+}
+.ts-chart-tooltip {
+  font-variant-numeric: tabular-nums;
+}
+
+/* react-grid-layout: placeholder and resize handle in the console's colors. */
+.react-grid-item.react-grid-placeholder {
+  background: color-mix(in oklch, var(--ring) 20%, transparent) !important;
+  border-radius: var(--radius);
+  opacity: 1 !important;
+}
+.react-grid-item > .react-resizable-handle::after {
+  border-color: var(--subtle) !important;
 }

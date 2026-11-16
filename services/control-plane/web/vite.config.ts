@@ -4,7 +4,8 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
-const api = 'http://127.0.0.1:8787';
+// The local API (`pnpm api:dev` or `pnpm web:demo`); another port when worktrees run side by side.
+const api = process.env.PLATFORM_DEV_API ?? 'http://127.0.0.1:8787';
 // Under `plat dev`, the port it picked; it waits for exactly that one.
 const platDevPort = Number(process.env.PLATFORM_DEV_WEB_PORT) || undefined;
 const guidePath = fileURLToPath(new URL('./src/agent-guide.md', import.meta.url));
@@ -41,15 +42,23 @@ function agentGuide(): Plugin {
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   plugins: [react(), tailwindcss(), agentGuide()],
+  resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   build: {
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
     rolldownOptions: {
       output: {
-        // Effect (the API client and its atoms) changes far less often than the console:
-        // its own chunk stays cached across deploys.
-        codeSplitting: { groups: [{ name: 'effect', test: /[\\/]node_modules[\\/](effect|@effect)[\\/]/ }] },
+        // Libraries change far less often than the console: their own chunks stay cached across deploys.
+        codeSplitting: {
+          groups: [
+            { name: 'effect', test: /[\\/]node_modules[\\/](effect|@effect)[\\/]/ },
+            {
+              name: 'charts',
+              test: /[\\/]node_modules[\\/](@tanstack[\\/]charts|d3-[a-z-]+|internmap)[\\/]/,
+            },
+          ],
+        },
       },
     },
   },
