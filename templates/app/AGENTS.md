@@ -405,6 +405,10 @@ Browser tests need Chromium once: `pnpm exec playwright install chromium`.
 - **Merge to `main`:** deploys `https://template-app.ericminassian.com`, then runs the browser tests
   against it.
 - Deploys take seconds. A failed deploy never goes live. Roll back with `plat rollback`.
+- The platform runs the server one invocation per request (previews, quiet prod) or as a Web
+  Function (busy prod), and moves prod between them by cost (`web.compute`, default `auto`). Per
+  request, a request body is at most 6 MB (about 4.5 MB of binary): send files to storage with
+  `uploadUrl`, not through the server.
 - One-time per app: `plat apps create template-app --repo <owner>/<repo>` registers the repo with the
   platform. Without it, CI deploys are rejected.
 
