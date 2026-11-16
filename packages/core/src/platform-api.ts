@@ -40,11 +40,16 @@ import {
   EdgeFloorResponse,
   EmailStatsResponse,
   ErrorGroup,
+  ErrorOccurrencesResponse,
   ErrorStatus,
+  InsightsRequest,
+  InsightsResponse,
   JobsResponse,
   LimitsResponse,
+  LogContextResponse,
   LogLine,
   LogsResponse,
+  LogStatsResponse,
   MeResponse,
   MetricsResponse,
   PutSecretRequest,
@@ -54,6 +59,7 @@ import {
   RollbackResponse,
   RouteStats,
   SecretsResponse,
+  SeriesResponse,
   ServiceActionResponse,
   ServicesResponse,
   StageDestroyed,
@@ -63,12 +69,25 @@ import {
   StorageResponse,
   SuppressedResponse,
   TraceResponse,
+  TracesResponse,
   UpdateAppRequest,
   UpdateErrorRequest,
   UptimePoint,
   UrlResponse,
 } from './api.ts';
 import type { MemberRole } from './config.ts';
+import {
+  AlertHistoryResponse,
+  AlertRule,
+  AlertRuleInput,
+  Dashboard,
+  LogFilters,
+  SaveDashboardRequest,
+  SavedQuery,
+  SaveQueryRequest,
+  SeriesQuery,
+  TraceFilters,
+} from './explore.ts';
 
 // ---------------------------------------------------------------------------
 // Errors: one class per status, each encoded as `{ error: { code, message } }`
@@ -445,6 +464,8 @@ export class ObserveApi extends HttpApiGroup.make('observe')
         q: Schema.optional(Schema.String),
         /** `web`, `worker` or `service:<name>`. */
         stream: Schema.optional(Schema.String),
+        /** Structured filters as JSON (`LogFilters`); any of them runs the search on Logs Insights. */
+        f: Schema.optional(Schema.fromJsonString(LogFilters)),
         limit,
         next: Schema.optional(Schema.String),
       },
@@ -463,6 +484,8 @@ export class ObserveApi extends HttpApiGroup.make('observe')
         q: Schema.optional(Schema.String),
         /** `web`, `worker` or `service:<name>`. */
         stream: Schema.optional(Schema.String),
+        /** Structured filters as JSON (`LogFilters`), applied to the live lines. */
+        f: Schema.optional(Schema.fromJsonString(LogFilters)),
       },
       success: HttpApiSchema.StreamSse({ events: TailEvent, keepAlive: '20 seconds' }),
       error: errors,
@@ -471,6 +494,165 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       params: { ...app, trace: Schema.String },
       query: rangeQuery,
       success: TraceResponse,
+      error: errors,
+    }),
+    /**
+     * The explorer's query (`SeriesQuery`, as JSON in `q`) over the range. `res`
+     * may also be `5m`, `10m`, `15m` or `30m` (sums of minute rollups); by
+     * default about 150 buckets.
+     */
+    HttpApiEndpoint.get('series', '/apps/:app/series', {
+      params: app,
+      query: { ...rangeQuery, q: Schema.fromJsonString(SeriesQuery) },
+      success: SeriesResponse,
+      error: errors,
+    }),
+    /** Requests and jobs that started traces, newest first (Logs Insights over their root lines). */
+    HttpApiEndpoint.get('traces', '/apps/:app/traces', {
+      params: app,
+      query: { ...rangeQuery, f: Schema.optional(Schema.fromJsonString(TraceFilters)), limit },
+      success: TracesResponse,
+      error: errors,
+    }),
+    /** Lines per bucket by level and the commonest field values, for the same search as `logs` (Logs Insights). */
+    HttpApiEndpoint.get('logStats', '/apps/:app/logs/stats', {
+      params: app,
+      query: {
+        ...rangeQuery,
+        q: Schema.optional(Schema.String),
+        stream: Schema.optional(Schema.String),
+        f: Schema.optional(Schema.fromJsonString(LogFilters)),
+      },
+      success: LogStatsResponse,
+      error: errors,
+    }),
+    /** The lines just before and after one line (`ts`, epoch ms) of one stream. */
+    HttpApiEndpoint.get('logContext', '/apps/:app/logs/context', {
+      params: app,
+      query: {
+        ...stageQuery,
+        stream: Schema.String,
+        ts: Schema.String,
+        before: limit,
+        after: limit,
+      },
+      success: LogContextResponse,
+      error: errors,
+    }),
+    /** Runs a Logs Insights query on the stage's log groups and waits for it (up to 25 s). */
+    HttpApiEndpoint.post('insights', '/apps/:app/insights', {
+      params: app,
+      payload: InsightsRequest,
+      success: InsightsResponse,
+      error: errors,
+    }),
+    /** An error group's events over the range (Logs Insights). */
+    HttpApiEndpoint.get('errorOccurrences', '/apps/:app/errors/:fingerprint/occurrences', {
+      params: { ...app, fingerprint: Schema.String },
+      query: rangeQuery,
+      success: ErrorOccurrencesResponse,
+      error: errors,
+    }),
+  )
+  .middleware(Authenticated) {}
+
+/** Named explorer, log and trace queries of an app, shared by everyone who can see it. */
+export class QueriesApi extends HttpApiGroup.make('queries')
+  .add(
+    HttpApiEndpoint.get('list', '/apps/:app/queries', {
+      params: app,
+      success: Schema.Array(SavedQuery),
+      error: errors,
+    }),
+    HttpApiEndpoint.post('create', '/apps/:app/queries', {
+      params: app,
+      payload: SaveQueryRequest,
+      success: SavedQuery.pipe(HttpApiSchema.status(201)),
+      error: errors,
+    }),
+    HttpApiEndpoint.put('update', '/apps/:app/queries/:id', {
+      params: { ...app, id: Schema.String },
+      payload: SaveQueryRequest,
+      success: SavedQuery,
+      error: errors,
+    }),
+    HttpApiEndpoint.delete('remove', '/apps/:app/queries/:id', {
+      params: { ...app, id: Schema.String },
+      success: HttpApiSchema.NoContent,
+      error: errors,
+    }),
+  )
+  .middleware(Authenticated) {}
+
+/**
+ * Dashboards: widgets on a 12-column grid. One with an `app` belongs to that
+ * app (members who can see it); one without spans apps, and each widget's
+ * data still needs access to its own app.
+ */
+export class DashboardsApi extends HttpApiGroup.make('dashboards')
+  .add(
+    HttpApiEndpoint.get('list', '/dashboards', {
+      query: { app: Schema.optional(Schema.String) },
+      success: Schema.Array(Dashboard),
+      error: errors,
+    }),
+    HttpApiEndpoint.post('create', '/dashboards', {
+      payload: SaveDashboardRequest,
+      success: Dashboard.pipe(HttpApiSchema.status(201)),
+      error: errors,
+    }),
+    HttpApiEndpoint.get('get', '/dashboards/:id', {
+      params: { id: Schema.String },
+      success: Dashboard,
+      error: errors,
+    }),
+    HttpApiEndpoint.put('update', '/dashboards/:id', {
+      params: { id: Schema.String },
+      payload: SaveDashboardRequest,
+      success: Dashboard,
+      error: errors,
+    }),
+    HttpApiEndpoint.delete('remove', '/dashboards/:id', {
+      params: { id: Schema.String },
+      success: HttpApiSchema.NoContent,
+      error: errors,
+    }),
+  )
+  .middleware(Authenticated) {}
+
+/** Alert rules on an app's stages, evaluated every minute by the control plane. */
+export class AlertsApi extends HttpApiGroup.make('alerts')
+  .add(
+    /** Every stage's rules, or `?stage=`'s. */
+    HttpApiEndpoint.get('list', '/apps/:app/alerts', {
+      params: app,
+      query: { stage: Schema.optional(Schema.String) },
+      success: Schema.Array(AlertRule),
+      error: errors,
+    }),
+    HttpApiEndpoint.post('create', '/apps/:app/alerts', {
+      params: app,
+      payload: AlertRuleInput,
+      success: AlertRule.pipe(HttpApiSchema.status(201)),
+      error: errors,
+    }),
+    /** Replaces the rule's settings; a changed query or condition starts it over in `no_data`. */
+    HttpApiEndpoint.put('update', '/apps/:app/alerts/:id', {
+      params: { ...app, id: Schema.String },
+      payload: AlertRuleInput,
+      success: AlertRule,
+      error: errors,
+    }),
+    HttpApiEndpoint.delete('remove', '/apps/:app/alerts/:id', {
+      params: { ...app, id: Schema.String },
+      success: HttpApiSchema.NoContent,
+      error: errors,
+    }),
+    /** State changes of the app's rules (or `?stage=`'s) in the range, newest first. */
+    HttpApiEndpoint.get('history', '/apps/:app/alerts/history', {
+      params: app,
+      query: { stage: Schema.optional(Schema.String), ...timeQuery },
+      success: AlertHistoryResponse,
       error: errors,
     }),
   )
@@ -623,6 +805,9 @@ export class PlatformApi extends HttpApi.make('platform')
   .add(StagesApi)
   .add(DeploymentsApi)
   .add(ObserveApi)
+  .add(QueriesApi)
+  .add(DashboardsApi)
+  .add(AlertsApi)
   .add(ManageApi)
   .add(AdminApi)
   .prefix('/v1')
