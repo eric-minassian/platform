@@ -7,10 +7,13 @@ import {
   definePlatformConfig,
   errorFingerprint,
   HEALTH_PATH,
+  handlerFunctionName,
+  handlerSettings,
   latencyBucket,
   names,
   newDeploymentId,
   normalizeErrorMessage,
+  ownFunctionHandlers,
   parseManifest,
   parseStageHost,
   percentile,
@@ -58,6 +61,34 @@ describe('naming', () => {
     expect(names.workerFunction(app, stage).length).toBeLessThanOrEqual(64);
     expect(names.deadLetterQueue(app, stage, 'c'.repeat(20)).length).toBeLessThanOrEqual(80);
     expect(names.eventRule(app, stage, 'x'.repeat(60)).length).toBeLessThanOrEqual(64);
+  });
+
+  it('names handler functions within Lambda’s limits, one name per handler', () => {
+    expect(names.handlerFunction('atlas', 'prod', 'queue', 'ais')).toBe('atlas--prod--worker--queue-ais');
+    expect(names.handlerFunction('atlas', 'prod', 'cron', 'ais')).toBe('atlas--prod--worker--cron-ais');
+    expect(names.handlerFunction('todo', 'prod', 'event', 'todo.created')).toBe(
+      'todo--prod--worker--event-todo_created',
+    );
+    // `.` and `:` both become `_`, so a type with `:` carries a hash of itself.
+    const colon = names.handlerFunction('todo', 'prod', 'event', 'todo:created');
+    expect(colon).toMatch(/^todo--prod--worker--event-todo_created-[0-9a-f]{8}$/);
+    expect(names.handlerFunction('todo', 'prod', 'event', 'todo:created')).toBe(colon);
+
+    const app = 'a'.repeat(30);
+    const stage = 'b'.repeat(20);
+    const all = [
+      names.handlerFunction(app, stage, 'queue', 'c'.repeat(20)),
+      names.handlerFunction(app, stage, 'queue', `${'c'.repeat(19)}d`),
+      names.handlerFunction(app, stage, 'event', `Order.${'x'.repeat(58)}`),
+      names.handlerFunction(app, stage, 'event', `Order:${'x'.repeat(58)}`),
+    ];
+    expect(new Set(all).size).toBe(all.length);
+    for (const name of all) {
+      expect(name.length).toBeLessThanOrEqual(64);
+      expect(name).toMatch(/^[A-Za-z0-9_-]+$/);
+      // What the engine finds a stage's functions by, and what the role boundary allows to be invoked.
+      expect(name.startsWith(`${app}--${stage}--`)).toBe(true);
+    }
   });
 });
 
@@ -111,6 +142,72 @@ describe('manifest', () => {
     expect(() => parseManifest({ name: 'atlas', storage: { snapshots: { expireAfterDays: 0 } } })).toThrow(
       /storage.*snapshots.*expireAfterDays/s,
     );
+  });
+
+  it('takes a handler’s own memory and timeout, and sizes its queue’s visibility by it', () => {
+    const m = parseManifest({
+      name: 'atlas',
+      worker: { timeoutSeconds: 300, memoryMb: 1024 },
+      queues: { refresh: { batchSize: 1 }, ais: { memoryMb: 256, timeoutSeconds: 90 } },
+      events: { 'fire.detected': {}, 'ship.seen': { memoryMb: 256 } },
+      crons: { tick: 'rate(1 minute)', listen: { schedule: 'rate(1 minute)', timeoutSeconds: 90 } },
+    });
+    expect(m.queues.refresh?.visibilityTimeoutSeconds).toBe(1800);
+    expect(m.queues.ais).toMatchObject({ memoryMb: 256, timeoutSeconds: 90, visibilityTimeoutSeconds: 540 });
+    expect(m.events).toEqual(['fire.detected', 'ship.seen']);
+    expect(m.eventOptions).toEqual({ 'fire.detected': {}, 'ship.seen': { memoryMb: 256 } });
+    expect(m.crons.listen).toEqual({ schedule: 'rate(1 minute)', timeoutSeconds: 90 });
+
+    // A handler that sets one setting gets the worker's other one.
+    expect(handlerSettings(m, 'event', 'ship.seen')).toEqual({
+      kind: 'event',
+      name: 'ship.seen',
+      memoryMb: 256,
+      timeoutSeconds: 300,
+      own: true,
+    });
+    expect(handlerSettings(m, 'queue', 'refresh')).toMatchObject({
+      memoryMb: 1024,
+      timeoutSeconds: 300,
+      own: false,
+    });
+    expect(ownFunctionHandlers(m).map((h) => `${h.kind}:${h.name}`)).toEqual([
+      'queue:ais',
+      'event:ship.seen',
+      'cron:listen',
+    ]);
+    expect(handlerFunctionName('atlas', 'prod', m, 'cron', 'listen')).toBe(
+      'atlas--prod--worker--cron-listen',
+    );
+    expect(handlerFunctionName('atlas', 'prod', m, 'cron', 'tick')).toBe('atlas--prod--worker');
+
+    // Without a worker block, the defaults stand in for the worker's settings.
+    const bare = parseManifest({
+      name: 'atlas',
+      crons: { ais: { schedule: 'rate(1 minute)', memoryMb: 256 } },
+    });
+    expect(handlerSettings(bare, 'cron', 'ais')).toMatchObject({ memoryMb: 256, timeoutSeconds: 60 });
+
+    expect(() => parseManifest({ name: 'atlas', queues: { ais: { memoryMb: 64 } } })).toThrow(
+      /queues\.ais\.memoryMb/,
+    );
+    expect(() => parseManifest({ name: 'atlas', events: { 'ship.seen': { timeoutSeconds: 901 } } })).toThrow(
+      /events\.ship\.seen\.timeoutSeconds/,
+    );
+    expect(() =>
+      parseManifest({ name: 'atlas', crons: { ais: { schedule: 'rate(1 minute)', memoryMb: 100.5 } } }),
+    ).toThrow(/crons\.ais/);
+  });
+
+  it('decodes deployments recorded before handlers had settings', () => {
+    const stored = {
+      ...parseManifest({ name: 'todo', events: ['a.b'], crons: { nightly: '0 3 * * *' } }),
+      eventOptions: undefined,
+    };
+    const m = Schema.decodeUnknownSync(ResolvedManifest)(JSON.parse(JSON.stringify(stored)));
+    expect(m.events).toEqual(['a.b']);
+    expect(m.eventOptions).toEqual({});
+    expect(handlerFunctionName('todo', 'prod', m, 'event', 'a.b')).toBe('todo--prod--worker');
   });
 
   it('decodes deployments recorded before stores had options', () => {

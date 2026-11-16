@@ -2,7 +2,13 @@ import { Effect, Schema } from 'effect';
 import { FARGATE_CPUS, type FargateCpu, fargateSizeIssue } from './compute.ts';
 import { validateCron } from './cron.ts';
 import { EMAIL_DEFAULT_DAILY_LIMIT, EMAIL_NAME_MESSAGE, EMAIL_NAME_PATTERN } from './email.ts';
-import { APP_NAME_PATTERN, ENV_NAME_PATTERN, EVENT_TYPE_PATTERN, RESOURCE_KEY_PATTERN } from './naming.ts';
+import {
+  APP_NAME_PATTERN,
+  ENV_NAME_PATTERN,
+  EVENT_TYPE_PATTERN,
+  names,
+  RESOURCE_KEY_PATTERN,
+} from './naming.ts';
 import { CHANNEL_DECLARATION_PATTERN, CHANNEL_MESSAGE, realtimeIssues } from './realtime.ts';
 
 /**
@@ -65,23 +71,39 @@ const WebSchema = Schema.Struct({
   ),
 );
 
+const WORKER_TIMEOUT_SECONDS = 60;
+const WORKER_MEMORY_MB = 512;
+const timeoutSeconds = intBetween(1, 900);
+const memoryMb = intBetween(128, 10240);
+
 const WorkerSchema = Schema.Struct({
   entry: Schema.String.pipe(orElse('src/worker.ts')),
-  timeoutSeconds: intBetween(1, 900).pipe(orElse(60)),
-  memoryMb: intBetween(128, 10240).pipe(orElse(512)),
+  timeoutSeconds: timeoutSeconds.pipe(orElse(WORKER_TIMEOUT_SECONDS)),
+  memoryMb: memoryMb.pipe(orElse(WORKER_MEMORY_MB)),
 });
+
+/** A queue, event or cron handler's own settings; unset ones are the worker's. */
+const HandlerFields = {
+  timeoutSeconds: Schema.optional(timeoutSeconds),
+  memoryMb: Schema.optional(memoryMb),
+};
+const HandlerSchema = Schema.Struct(HandlerFields);
 
 const QueueSchema = Schema.Struct({
   batchSize: intBetween(1, 10).pipe(orElse(10)),
   visibilityTimeoutSeconds: Schema.optional(intBetween(0, 43200)),
   maxReceiveCount: intBetween(1, 1000).pipe(orElse(5)),
   concurrency: Schema.optional(intBetween(2, 1000)),
+  ...HandlerFields,
 });
 
-const CronSchema = Schema.Union([
-  Schema.String,
-  Schema.Struct({ schedule: Schema.String, timezone: Schema.optional(Schema.String) }),
-]).check(
+const CronScheduleSchema = Schema.Struct({
+  schedule: Schema.String,
+  timezone: Schema.optional(Schema.String),
+  ...HandlerFields,
+});
+
+const CronSchema = Schema.Union([Schema.String, CronScheduleSchema]).check(
   Schema.makeFilter((cron) => validateCron(typeof cron === 'string' ? cron : cron.schedule) ?? undefined),
 );
 
@@ -139,7 +161,7 @@ export const ManifestSchema = Schema.Struct({
   queues: recordOf(RESOURCE_KEY_PATTERN, QueueSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
   // The array form predates typed event payloads; deployments recorded
   // before then still store it.
-  events: Schema.Union([Schema.Array(eventType), recordOf(EVENT_TYPE_PATTERN, Schema.Struct({}))]).pipe(
+  events: Schema.Union([Schema.Array(eventType), recordOf(EVENT_TYPE_PATTERN, HandlerSchema)]).pipe(
     orElse([]),
   ),
   crons: recordOf(RESOURCE_KEY_PATTERN, CronSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
@@ -208,17 +230,30 @@ export interface WebConfig {
 export interface WorkerConfig {
   /** Module whose default export is `defineWorker(...)`. Default `src/worker.ts`. */
   entry?: string;
-  /** 1-900. Default 60. */
+  /** 1-900. Default 60. Handlers can set their own (`HandlerConfig`). */
   timeoutSeconds?: number;
-  /** 128-10240. Default 512. */
+  /** 128-10240. Default 512. Handlers can set their own (`HandlerConfig`). */
+  memoryMb?: number;
+}
+
+/**
+ * A queue, event or cron handler's own Lambda settings, for handlers whose
+ * needs differ from the rest (a big parse, a long idle wait). A handler that
+ * sets either runs in a function of its own, from the same worker bundle;
+ * the one it doesn't set is the worker's.
+ */
+export interface HandlerConfig {
+  /** 1-900. Default: the worker's `timeoutSeconds`. */
+  timeoutSeconds?: number;
+  /** 128-10240. Default: the worker's `memoryMb`. */
   memoryMb?: number;
 }
 
 /** Declare one with `queue<Body>({ ... })` to type what is sent and received. */
-export interface QueueConfig<Body = unknown> extends Payload<Body> {
+export interface QueueConfig<Body = unknown> extends Payload<Body>, HandlerConfig {
   /** Messages per worker invocation, 1-10. Default 10. */
   batchSize?: number;
-  /** Defaults to 6x the worker timeout, as AWS recommends for Lambda consumers. */
+  /** Defaults to 6x the handler's timeout, as AWS recommends for Lambda consumers. */
   visibilityTimeoutSeconds?: number;
   /** Deliveries before a message moves to the dead-letter queue, 1-1000. Default 5. */
   maxReceiveCount?: number;
@@ -227,10 +262,19 @@ export interface QueueConfig<Body = unknown> extends Payload<Body> {
 }
 
 /** Declare one with `event<Detail>()` to type what is published and handled. */
-export type EventConfig<Detail = unknown> = Payload<Detail>;
+export type EventConfig<Detail = unknown> = Payload<Detail> & HandlerConfig;
 
-/** 5-field cron in UTC (`0 3 * * *`) or `rate(5 minutes)`. */
-export type CronConfig = string | { schedule: string; timezone?: string };
+/**
+ * 5-field cron in UTC (`0 3 * * *`) or `rate(5 minutes)`; the object form adds
+ * a timezone or the handler's own settings.
+ */
+export type CronConfig = string | CronSchedule;
+
+export interface CronSchedule extends HandlerConfig {
+  schedule: string;
+  /** IANA name, e.g. `America/Los_Angeles`. Default UTC. */
+  timezone?: string;
+}
 
 /** Declare one with `channel<Event>()` to type what is published and received. */
 export type ChannelConfig<Event = unknown> = Payload<Event>;
@@ -376,8 +420,8 @@ export function queue<Body>(options: QueueConfig = {}): QueueConfig<Body> {
 }
 
 /** An event subscription whose detail is `Detail`: `events: { 'todo.created': event<TodoCreated>() }`. */
-export function event<Detail>(): EventConfig<Detail> {
-  return {};
+export function event<Detail>(options: HandlerConfig = {}): EventConfig<Detail> {
+  return options;
 }
 
 /** A realtime channel whose events are `Event`: `realtime: { channels: { board: channel<BoardEvent>() } }`. */
@@ -405,10 +449,13 @@ export const ResolvedManifest = Schema.Struct({
     Schema.Struct({ ...QueueSchema.fields, visibilityTimeoutSeconds: Schema.Finite }),
   ),
   events: Schema.Array(Schema.String),
-  crons: Schema.Record(
-    Schema.String,
-    Schema.Struct({ schedule: Schema.String, timezone: Schema.optional(Schema.String) }),
-  ),
+  /**
+   * Each event handler's own settings, by type. Absent from deployments
+   * recorded before handlers had any. A field of its own, so clients that
+   * know only `events` keep decoding manifests.
+   */
+  eventOptions: Schema.Record(Schema.String, HandlerSchema).pipe(orElse({})),
+  crons: Schema.Record(Schema.String, CronScheduleSchema),
   /** Every store's name. */
   storage: Schema.Array(Schema.String),
   /**
@@ -461,7 +508,10 @@ export function parseManifest(input: unknown): ResolvedManifest {
 }
 
 export function resolveManifest(m: Manifest): ResolvedManifest {
-  const events = Array.isArray(m.events) ? m.events : Object.keys(m.events);
+  const eventOptions: ResolvedManifest['eventOptions'] = isEventList(m.events)
+    ? Object.fromEntries(m.events.map((type) => [type, {}]))
+    : m.events;
+  const events = Object.keys(eventOptions);
   const needsWorker =
     Object.keys(m.queues).length > 0 || events.length > 0 || Object.keys(m.crons).length > 0;
   const worker = m.worker ?? (needsWorker ? Schema.decodeUnknownSync(WorkerSchema)({}) : undefined);
@@ -472,7 +522,12 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
   const queues: ResolvedManifest['queues'] = Object.fromEntries(
     Object.entries(m.queues).map(([key, q]) => [
       key,
-      { ...q, visibilityTimeoutSeconds: q.visibilityTimeoutSeconds ?? (worker?.timeoutSeconds ?? 60) * 6 },
+      {
+        ...q,
+        visibilityTimeoutSeconds:
+          q.visibilityTimeoutSeconds ??
+          (q.timeoutSeconds ?? worker?.timeoutSeconds ?? WORKER_TIMEOUT_SECONDS) * 6,
+      },
     ]),
   );
   const email: ResolvedManifest['email'] =
@@ -496,7 +551,8 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     auth,
     db: m.db,
     queues,
-    events: [...new Set(events)],
+    events,
+    eventOptions,
     crons,
     storage: Object.keys(stores),
     storageOptions: stores,
@@ -511,8 +567,70 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
 }
 
 const isStoreList = (storage: Manifest['storage']): storage is readonly string[] => Array.isArray(storage);
+const isEventList = (events: Manifest['events']): events is readonly string[] => Array.isArray(events);
 
 /** The stores the edge serves (`public: true`). */
 export function publicStores(m: Pick<ResolvedManifest, 'storage' | 'storageOptions'>): string[] {
   return m.storage.filter((name) => m.storageOptions[name]?.public === true);
+}
+
+// ---------------------------------------------------------------------------
+// Worker functions
+
+const HANDLER_KINDS = ['queue', 'event', 'cron'] as const;
+export type HandlerKind = (typeof HANDLER_KINDS)[number];
+
+/** A queue, event or cron handler and the settings it runs with. */
+export interface HandlerSettings {
+  kind: HandlerKind;
+  /** The queue or cron key, or the event type. */
+  name: string;
+  timeoutSeconds: number;
+  memoryMb: number;
+  /** It sets its own memory or timeout, so it runs in a function of its own (`names.handlerFunction`). */
+  own: boolean;
+}
+
+type WorkerManifest = Pick<ResolvedManifest, 'worker' | 'queues' | 'eventOptions' | 'crons'>;
+
+/** Each kind's handlers, by name, with what they set. */
+const declaredHandlers = (
+  m: WorkerManifest,
+): Record<HandlerKind, { readonly [name: string]: HandlerConfig }> => ({
+  queue: m.queues,
+  event: m.eventOptions,
+  cron: m.crons,
+});
+
+/** A handler's settings: its own, and the worker's for any it doesn't set. */
+export function handlerSettings(m: WorkerManifest, kind: HandlerKind, name: string): HandlerSettings {
+  const own = declaredHandlers(m)[kind][name] ?? {};
+  return {
+    kind,
+    name,
+    timeoutSeconds: own.timeoutSeconds ?? m.worker?.timeoutSeconds ?? WORKER_TIMEOUT_SECONDS,
+    memoryMb: own.memoryMb ?? m.worker?.memoryMb ?? WORKER_MEMORY_MB,
+    own: own.timeoutSeconds !== undefined || own.memoryMb !== undefined,
+  };
+}
+
+/** The handlers that run in functions of their own. The worker's function runs the rest. */
+export function ownFunctionHandlers(m: WorkerManifest): HandlerSettings[] {
+  const declared = declaredHandlers(m);
+  return HANDLER_KINDS.flatMap((kind) =>
+    Object.keys(declared[kind]).map((name) => handlerSettings(m, kind, name)),
+  ).filter((h) => h.own);
+}
+
+/** The Lambda function a handler runs in: its own, or the worker's. */
+export function handlerFunctionName(
+  app: string,
+  stage: string,
+  m: WorkerManifest,
+  kind: HandlerKind,
+  name: string,
+): string {
+  return handlerSettings(m, kind, name).own
+    ? names.handlerFunction(app, stage, kind, name)
+    : names.workerFunction(app, stage);
 }

@@ -102,6 +102,18 @@ export const names = {
    */
   webEndpoints: () => ['live', 'live-b'] as const,
   workerFunction: (app: string, stage: string) => `${app}--${stage}--worker`,
+  /**
+   * The function a queue, event or cron handler with its own memory or timeout
+   * runs in, from the worker's bundle. Function names are ≤ 64 chars of
+   * A-Z, a-z, 0-9, `-` and `_`: long names are hashed, and an event type's
+   * `.` becomes `_` (which no event type contains). `:` has no such stand-in,
+   * so a type with one always carries a hash of the type.
+   */
+  handlerFunction: (app: string, stage: string, kind: 'queue' | 'event' | 'cron', name: string) => {
+    const full = `${app}--${stage}--worker--${kind}-${name}`;
+    const safe = full.replaceAll('.', '_').replaceAll(':', '_');
+    return name.includes(':') ? `${safe.slice(0, 55)}-${fingerprint([full])}` : fit(safe, 64);
+  },
   /** IAM role name; created under {@link IAM_APP_PATH}. */
   role: (app: string, stage: string) => `${app}--${stage}`,
   queue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}`,
