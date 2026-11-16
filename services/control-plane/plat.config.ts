@@ -37,6 +37,8 @@ const app = defineApp({
     'realtime-key': '0 9 * * *',
     // Deletes files of stores with `expireAfterDays`.
     'storage-expiry': '30 9 * * *',
+    // Evaluates alert rules; one read and done when there are none.
+    alerts: '* * * * *',
   },
 });
 

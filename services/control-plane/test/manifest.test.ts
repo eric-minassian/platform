@@ -23,6 +23,7 @@ describe('control plane plat.config.ts', () => {
     // Its own server stays off the account's Lambda concurrency that apps' servers share.
     expect(m.web?.compute).toBe('instance');
     expect(Object.keys(m.crons).toSorted()).toEqual([
+      'alerts',
       'compute',
       'cost',
       'pinger',

@@ -6,6 +6,8 @@
 import { defineWorker, Queues } from '@ericminassian/platform';
 import { EDGE_FLOOR_JOB } from '@ericminassian/platform-core';
 import { Effect, Exit, Layer, Schema } from 'effect';
+import { AlertEvaluator } from './alerts/evaluator.ts';
+import { AlertRules } from './alerts/rules.ts';
 import { Artifacts } from './artifacts.ts';
 import { Deployer, StageEngine } from './deploy.ts';
 import { EdgeFloor } from './edge-floor.ts';
@@ -25,6 +27,7 @@ import { TelemetryQuery } from './telemetry/query.ts';
 import { TelemetryWriter } from './telemetry/write.ts';
 
 const WorkerLive = Layer.mergeAll(
+  AlertEvaluator.layer,
   ComputeChooser.layer,
   CostCollector.layer,
   Deployer.layer,
@@ -38,6 +41,7 @@ const WorkerLive = Layer.mergeAll(
 ).pipe(
   Layer.provide(
     Layer.mergeAll(
+      AlertRules.layer,
       AppEmail.layer,
       Artifacts.layer,
       GitHub.layer,
@@ -94,6 +98,12 @@ export default defineWorker({
     reaper: () => Reaper.use((r) => r.run),
     'realtime-key': () => RealtimeKey.use((k) => k.run),
     'storage-expiry': () => StorageExpiry.use((s) => s.run),
+    alerts: () =>
+      AlertEvaluator.use((e) => e.run).pipe(
+        Effect.flatMap((r) =>
+          r.changed ? Effect.logInfo('alert rules changed state').pipe(Effect.annotateLogs(r)) : Effect.void,
+        ),
+      ),
   },
   logs: (batch) =>
     Effect.gen(function* () {

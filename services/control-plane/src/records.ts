@@ -7,12 +7,14 @@
  *   APP#<name>      META              APPS          <name>           AppRecord
  *   APP#<name>      STAGE#<stage>     STAGES        <name>#<stage>   StageItem
  *   APP#<name>      DEP#<id>          DEP#<id>      DEP              DeploymentItem
+ *   APP#<name>      ALERT#<id>        ALERTS        <name>#<id>      AlertRule (alerts/rules.ts)
  *   PLATFORM        EDGE_FLOOR        -             -                EdgeFloorItem
  *
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
  */
 import {
+  type AlertRule,
   type AppRecord,
   DeploymentRecord,
   RouteRecordSchema,
@@ -82,6 +84,7 @@ export function stageCompute(stage: Pick<StageItem, 'compute' | 'route'>): WebCo
 export const appKey = (name: string) => ({ pk: `APP#${name}`, sk: 'META' });
 export const stageKey = (app: string, stage: string) => ({ pk: `APP#${app}`, sk: `STAGE#${stage}` });
 export const deploymentKey = (app: string, id: string) => ({ pk: `APP#${app}`, sk: `DEP#${id}` });
+export const alertRuleKey = (app: string, id: string) => ({ pk: `APP#${app}`, sk: `ALERT#${id}` });
 
 export function appItem(app: AppRecord) {
   return { ...appKey(app.name), gsi1pk: 'APPS', gsi1sk: app.name, ...app };
@@ -98,4 +101,8 @@ export function stageItem(stage: StageItem) {
 
 export function deploymentItem(dep: DeploymentItem) {
   return { ...deploymentKey(dep.app, dep.id), gsi1pk: `DEP#${dep.id}`, gsi1sk: 'DEP', ...dep };
+}
+
+export function alertRuleItem(rule: AlertRule) {
+  return { ...alertRuleKey(rule.app, rule.id), gsi1pk: 'ALERTS', gsi1sk: `${rule.app}#${rule.id}`, ...rule };
 }

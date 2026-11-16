@@ -369,7 +369,7 @@ export class Store extends Context.Service<
 }
 
 /** Builds `SET #k0 = :v0, ... REMOVE #k1` for a partial update. */
-function setExpression(patch: Readonly<Record<string, unknown>>) {
+export function setExpression(patch: Readonly<Record<string, unknown>>) {
   const names: Record<string, string> = {};
   const values: Record<string, unknown> = {};
   const sets: string[] = [];

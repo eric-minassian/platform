@@ -5,6 +5,7 @@
  */
 import { Queues, toFetchHandler } from '@ericminassian/platform';
 import { Layer } from 'effect';
+import { AlertRules } from './alerts/rules.ts';
 import { HttpLive } from './api/http.ts';
 import { Artifacts } from './artifacts.ts';
 import { Tokens } from './auth.ts';
@@ -27,6 +28,7 @@ import { TelemetryQuery } from './telemetry/query.ts';
 export const ServerLive = HttpLive.pipe(
   Layer.provide(
     Layer.mergeAll(
+      AlertRules.layer,
       AppEmail.layer,
       AppQueues.layer,
       AppRealtime.layer,
