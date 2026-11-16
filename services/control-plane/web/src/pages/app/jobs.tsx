@@ -24,7 +24,6 @@ import { report } from '../../components/actions/report.ts';
 import { Sparkline } from '../../components/charts/sparkline.tsx';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
-import { viewResolution } from '../../components/metrics/metric-view.tsx';
 import { EmptyState, Loaded, Mono, PageHeader, Panel, Stat } from '../../components/page.tsx';
 import { Badge } from '../../components/ui/badge.tsx';
 import { Button } from '../../components/ui/button.tsx';
@@ -40,6 +39,7 @@ import { family, seriesAtom } from '../../data/atoms.ts';
 import { fmtDateTime, fmtMs, fmtNum, fmtPct, relTime } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { apiTime, type TimeSearch } from '../../lib/time.ts';
+import { viewResolution } from '../../lib/view.ts';
 import { appRoute } from '../../router.tsx';
 
 /** Reactivity key of an app's scheduled jobs and dead letters. */
