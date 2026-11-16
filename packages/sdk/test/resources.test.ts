@@ -86,6 +86,46 @@ describe('queue / events / storage / secrets', () => {
     expect(await s.list('a/')).toEqual({ objects: [{ key: 'a/b.txt', size: 3 }], cursor: 'n' });
     await expect(s.put('../escape', 'x')).rejects.toThrow(/Invalid storage key/);
     await expect(storage('other').get('x')).rejects.toThrow(/Declared storage: uploads/);
+    expect(() => s.publicUrl('a.png')).toThrow(/Store "uploads" isn't public/);
+  });
+
+  it('keeps public stores under their own prefix and names their edge URLs', async () => {
+    useTestBindings({
+      app: 'atlas',
+      url: 'https://atlas.example.com',
+      storage: {
+        bucket: 'storage-bucket',
+        prefix: 'atlas/test/',
+        stores: ['uploads', 'snapshots'],
+        public: ['snapshots'],
+        publicPrefix: '_public/atlas/test/',
+      },
+    });
+    const inputs: Array<Record<string, unknown>> = [];
+    mockClient('s3', (cmd) => {
+      inputs.push(cmd.input);
+      return {};
+    });
+    const snapshots = storage('snapshots');
+    await snapshots.put('fires/1105.json', '{}', { cacheControl: 'public, max-age=31536000, immutable' });
+    expect(inputs[0]).toMatchObject({
+      Bucket: 'storage-bucket',
+      Key: '_public/atlas/test/snapshots/fires/1105.json',
+      ContentType: 'application/json; charset=utf-8',
+      CacheControl: 'public, max-age=31536000, immutable',
+    });
+    await storage('uploads').put('raw', new Uint8Array([1]));
+    expect(inputs[1]).toMatchObject({
+      Key: 'atlas/test/uploads/raw',
+      ContentType: 'application/octet-stream',
+    });
+    expect(inputs[1]).not.toHaveProperty('CacheControl');
+
+    expect(snapshots.publicUrl('fires/today 1.json')).toBe(
+      'https://atlas.example.com/__platform/storage/snapshots/fires/today%201.json',
+    );
+    expect(() => snapshots.publicUrl('a/../b')).toThrow(/can't be served/);
+    expect(() => storage('uploads').publicUrl('a')).toThrow(/isn't public/);
   });
 
   it('reads secrets with shared fallback and caching', async () => {

@@ -19,7 +19,7 @@ import {
   Secrets,
   Storage,
 } from '@ericminassian/platform';
-import { RealtimeClient, type RealtimeStatus } from '@ericminassian/platform/client';
+import { RealtimeClient, type RealtimeStatus, storageUrl } from '@ericminassian/platform/client';
 import { Context, Effect, Layer, Schema, Stream } from 'effect';
 import type { HttpServerRequest } from 'effect/http';
 import { HttpApiMiddleware } from 'effect/http-api';
@@ -42,9 +42,15 @@ export const usage = Effect.gen(function* () {
   yield* events.publish('todo.deleted', {});
 
   const storage = yield* Storage;
-  storage.store('uploads');
+  const uploads = storage.store('uploads');
+  yield* uploads.uploadUrl('a.png', { contentType: 'image/png', cacheControl: 'no-cache' });
+  // A private store isn't served from the edge.
+  const privateHasNoUrl: 'publicUrl' extends keyof typeof uploads ? false : true = true;
   // @ts-expect-error undeclared store
   storage.store('upload');
+  const snapshots = storage.store('snapshots');
+  yield* snapshots.put('fires.json', '{}', { cacheControl: 'public, max-age=60' });
+  const fires: string = yield* snapshots.publicUrl('fires.json');
   const secrets = yield* Secrets;
   yield* secrets.get('STRIPE_KEY');
   // @ts-expect-error undeclared secret
@@ -65,7 +71,7 @@ export const usage = Effect.gen(function* () {
   // A channel under two declared patterns takes either declared type.
   const both: ChannelEvent<'boards/cursors/c1'> = { x: 1, y: 2 } satisfies Cursor;
   const alsoBoard: ChannelEvent<'boards/cursors/c1'> = { stroke: [] } satisfies BoardEvent;
-  return [both, alsoBoard];
+  return [both, alsoBoard, fires, privateHasNoUrl];
 });
 
 export const browserStreams = Effect.gen(function* () {
@@ -81,6 +87,12 @@ export const browserStreams = Effect.gen(function* () {
   yield* Stream.runDrain(status);
   return wrong;
 });
+
+export const browserFiles = (): string[] => [
+  storageUrl('snapshots', 'fires/latest.json'),
+  // @ts-expect-error a private store isn't served from the edge
+  storageUrl('uploads', 'a.png'),
+];
 
 const handlers = {
   queues: {
