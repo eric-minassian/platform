@@ -30,6 +30,7 @@ import { WorkerJobs } from '../src/jobs/call.ts';
 import { AppQueues } from '../src/jobs/queues.ts';
 import { AppRealtime } from '../src/jobs/realtime.ts';
 import { AppServices } from '../src/jobs/services.ts';
+import { Library } from '../src/library.ts';
 import { Logs } from '../src/logs.ts';
 import { AppSecrets } from '../src/secrets.ts';
 import {
@@ -272,6 +273,8 @@ export interface TestServices {
   readonly github?: Partial<GitHub['Service']>;
   readonly telemetry?: Partial<TelemetryQuery['Service']>;
   readonly logs?: Partial<Logs['Service']>;
+  /** Saved queries and dashboards (in memory unless given). */
+  readonly library?: Layer.Layer<Library>;
   readonly data?: Partial<DataBrowser['Service']>;
   readonly secrets?: Partial<AppSecrets['Service']>;
   readonly queues?: Partial<AppQueues['Service']>;
@@ -315,6 +318,7 @@ export const testServices = (options: TestServices = {}) => {
       Layer.provide([Layer.mock(StageEngine, options.engine ?? {}), awsLayer(options.aws ?? {}), telemetry]),
     ),
     Layer.mock(Logs, options.logs ?? {}),
+    options.library ?? Library.memory(),
     Layer.mock(DataBrowser, options.data ?? {}),
     Layer.mock(AppSecrets, options.secrets ?? {}),
     Layer.mock(AppQueues, options.queues ?? {}),
