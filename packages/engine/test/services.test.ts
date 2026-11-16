@@ -456,6 +456,7 @@ function fakeEcs(
       stoppedAt: Date;
     }>;
     logs?: Record<string, string[]>;
+    running?: Array<{ taskArn: string; taskDefinitionArn: string; startedAt: Date }>;
   } = {},
 ) {
   const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
@@ -497,16 +498,22 @@ function fakeEcs(
     UpdateServiceCommand: () => ({ service: { serviceArn: 'arn:svc' } }),
     TagResourceCommand: () => ({}),
     ListTasksCommand: (i) => ({
-      taskArns: i.desiredStatus === 'STOPPED' ? (opts.stopped ?? []).map((t) => t.taskArn) : [],
+      taskArns: (i.desiredStatus === 'STOPPED' ? (opts.stopped ?? []) : (opts.running ?? [])).map(
+        (t) => t.taskArn,
+      ),
     }),
-    DescribeTasksCommand: () => ({
-      tasks: (opts.stopped ?? []).map((t) => ({
-        taskArn: t.taskArn,
-        taskDefinitionArn: t.taskDefinitionArn,
-        stoppedReason: t.stoppedReason,
-        stoppedAt: t.stoppedAt,
-        containers: [{ name: 'app', ...(t.exitCode !== undefined ? { exitCode: t.exitCode } : {}) }],
-      })),
+    DescribeTasksCommand: (i) => ({
+      tasks: [
+        ...(opts.stopped ?? []).map((t) => ({
+          taskArn: t.taskArn,
+          taskDefinitionArn: t.taskDefinitionArn,
+          lastStatus: 'STOPPED',
+          stoppedReason: t.stoppedReason,
+          stoppedAt: t.stoppedAt,
+          containers: [{ name: 'app', ...(t.exitCode !== undefined ? { exitCode: t.exitCode } : {}) }],
+        })),
+        ...(opts.running ?? []).map((t) => ({ ...t, lastStatus: 'RUNNING' })),
+      ].filter((t) => (i.tasks as string[]).includes(t.taskArn)),
     }),
     GetLogEventsCommand: (i) => {
       const lines = opts.logs?.[i.logStreamName as string];
@@ -566,6 +573,25 @@ describe('waitForRollout', () => {
     });
     await waitForRollout(ecs.ctx, spec());
     expect(ecs.sent('DescribeServicesCommand')).toHaveLength(3);
+  });
+
+  it('returns once every new task has run for the stable time, before ECS completes it', async () => {
+    const running = (startedAt: Date) => [
+      { taskArn: 'arn:task/platform/new', taskDefinitionArn: TD2, startedAt },
+    ];
+    const inProgress = {
+      deployments: [
+        { taskDefinition: TD2, rolloutState: 'IN_PROGRESS', desiredCount: 1, runningCount: 1, createdAt: t1 },
+      ],
+    };
+    const settled = fakeEcs({ script: [inProgress], running: running(new Date(Date.now() - 31_000)) });
+    await waitForRollout(settled.ctx, spec());
+    expect(settled.sent('DescribeServicesCommand')).toHaveLength(1);
+
+    // A task that only just started is still being watched: here, until the deadline.
+    const fresh = fakeEcs({ script: [inProgress], running: running(new Date()) });
+    const late = waitForRollout(fresh.ctx, spec({ deadline: Date.now() + 50 }));
+    await expect(late).rejects.toMatchObject({ failure: 'timeout' });
   });
 
   it('fails fast on the second failed task, with the stop reason and the last log lines', async () => {

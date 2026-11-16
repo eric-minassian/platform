@@ -503,6 +503,21 @@ export async function listTasks(
   return tasks.toSorted((a, b) => at(b) - at(a));
 }
 
+/** Every task `deployment` asks for runs on its task definition, has for `stableMs`, and none failed. */
+async function settled(ctx: EngineContext, spec: RolloutSpec, deployment: Deployment): Promise<boolean> {
+  const desired = deployment.desiredCount ?? 0;
+  if (desired === 0 || (deployment.runningCount ?? 0) < desired || (deployment.failedTasks ?? 0) > 0)
+    return false;
+  const since = Date.now() - (spec.stableMs ?? ROLLOUT_STABLE_MS);
+  const stable = (await listTasks(ctx, spec.cluster, spec.service, 'RUNNING')).filter(
+    (t) =>
+      t.taskDefinitionArn === spec.taskDefinition &&
+      t.lastStatus === 'RUNNING' &&
+      (t.startedAt?.getTime() ?? Number.POSITIVE_INFINITY) <= since,
+  );
+  return stable.length >= desired;
+}
+
 export function taskId(taskArn: string): string {
   return taskArn.slice(taskArn.lastIndexOf('/') + 1);
 }
@@ -547,12 +562,23 @@ export interface RolloutSpec {
   deadline: number;
   /** Poll interval. Default 5 s. */
   intervalMs?: number;
+  /** How long the new tasks must have run, none failing, to count as started. Default {@link ROLLOUT_STABLE_MS}. */
+  stableMs?: number;
 }
 
 /**
- * Wait until the service's deployment of `taskDefinition` has COMPLETED.
- * Fails as soon as ECS marks it FAILED or two of its tasks have failed, with
- * the stopped tasks' reasons and last log lines in the error.
+ * A rollout counts as done once every task it asks for has run this long
+ * and none has failed. ECS marks it COMPLETED only at its next steady-state
+ * check, about two minutes after the task started; a container that can't
+ * start fails well within this.
+ */
+export const ROLLOUT_STABLE_MS = 30_000;
+
+/**
+ * Wait until the service's deployment of `taskDefinition` has COMPLETED, or
+ * its tasks have all run for `stableMs` with none failed. Fails as soon as
+ * ECS marks it FAILED or two of its tasks have failed, with the stopped
+ * tasks' reasons and last log lines in the error.
  */
 export async function waitForRollout(ctx: EngineContext, spec: RolloutSpec): Promise<void> {
   const interval = spec.intervalMs ?? 5_000;
@@ -566,6 +592,7 @@ export async function waitForRollout(ctx: EngineContext, spec: RolloutSpec): Pro
     else if (deployment.rolloutState === 'COMPLETED') return;
     else if (deployment.rolloutState === 'FAILED') failure = 'failed';
     else if ((deployment.failedTasks ?? 0) >= 2) failure = 'failing';
+    else if (await settled(ctx, spec, deployment)) return;
     else if (Date.now() >= spec.deadline) failure = 'timeout';
     if (failure) throw await rolloutError(ctx, spec, failure, svc, deployment);
     await sleep(Math.max(0, Math.min(interval, spec.deadline - Date.now())));
