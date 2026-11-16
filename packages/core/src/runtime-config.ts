@@ -28,8 +28,8 @@ export interface PlatformRuntimeConfig {
   kvsArn?: string;
   /** The router distribution; Web Function resource policies trust only this. */
   distributionArn?: string;
-  /** The router's web ACL, the per-client request floor; absent without `limits.edgeRequestsPerMinute`. */
-  edgeWebAclArn?: string;
+  /** The edge floor's alarm and trigger; absent without `limits.edgeFloorAt`. */
+  edgeFloor?: EdgeFloorRuntimeConfig;
   /** Shared Cognito user pool for app end users. */
   userPoolId?: string;
   /** Hosted login origin, e.g. `https://login.platform.ericminassian.com`. */
@@ -65,6 +65,18 @@ export interface ContainersRuntimeConfig {
   executionRoleArn: string;
   /** Assumed by EventBridge Scheduler to scale a stage's services (preview stop schedules). */
   schedulerRoleArn: string;
+}
+
+/**
+ * The edge floor (`limits.edgeFloorAt`): a CloudWatch alarm on the router
+ * distribution's requests per minute, and an EventBridge rule that invokes
+ * the control plane's worker when it goes off. The web ACL itself belongs to
+ * the control plane, which creates it only while the floor is on.
+ */
+export interface EdgeFloorRuntimeConfig {
+  alarmArn: string;
+  /** The rule's ARN, which the worker's resource policy names. */
+  ruleArn: string;
 }
 
 export interface EmailRuntimeConfig {

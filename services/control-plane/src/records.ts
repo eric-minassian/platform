@@ -7,6 +7,7 @@
  *   APP#<name>      META              APPS          <name>           AppRecord
  *   APP#<name>      STAGE#<stage>     STAGES        <name>#<stage>   StageItem
  *   APP#<name>      DEP#<id>          DEP#<id>      DEP              DeploymentItem
+ *   PLATFORM        EDGE_FLOOR        -             -                EdgeFloorItem
  *
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
@@ -50,6 +51,20 @@ export const DeploymentItem = Schema.Struct({
   revisionId: Schema.optional(Schema.String),
 });
 export type DeploymentItem = typeof DeploymentItem.Type;
+
+/**
+ * The edge floor as the control plane last set it (edge-floor.ts): on or
+ * off, since when and why. The distribution and the web ACL are brought back
+ * to it when something else changed them.
+ */
+export const EdgeFloorItem = Schema.Struct({
+  on: Schema.Boolean,
+  since: Schema.String,
+  why: Schema.String,
+});
+export type EdgeFloorItem = typeof EdgeFloorItem.Type;
+
+export const edgeFloorKey = { pk: 'PLATFORM', sk: 'EDGE_FLOOR' } as const;
 
 export const appKey = (name: string) => ({ pk: `APP#${name}`, sk: 'META' });
 export const stageKey = (app: string, stage: string) => ({ pk: `APP#${app}`, sk: `STAGE#${stage}` });

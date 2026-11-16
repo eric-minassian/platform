@@ -607,7 +607,7 @@ export class ManageApi extends HttpApiGroup.make('manage')
 
 export class AdminApi extends HttpApiGroup.make('admin')
   .add(HttpApiEndpoint.get('overview', '/admin/overview', { success: AdminOverview, error: errors }))
-  /** The edge's per-client request floor: blocked and allowed requests, and recently blocked ones. */
+  /** The edge's per-client request floor: on or off, blocked and allowed requests, recently blocked ones. */
   .add(
     HttpApiEndpoint.get('edge', '/admin/edge', {
       query: timeQuery,

@@ -31,7 +31,14 @@ import { AppRealtime } from '../src/jobs/realtime.ts';
 import { AppServices } from '../src/jobs/services.ts';
 import { Logs } from '../src/logs.ts';
 import { AppSecrets } from '../src/secrets.ts';
-import { AlreadyExists, type DeploymentItem, type Patch, type StageItem, Store } from '../src/store.ts';
+import {
+  AlreadyExists,
+  type DeploymentItem,
+  type EdgeFloorItem,
+  type Patch,
+  type StageItem,
+  Store,
+} from '../src/store.ts';
 import { TelemetryQuery } from '../src/telemetry/query.ts';
 
 export const platform: PlatformConfig = definePlatformConfig({
@@ -97,12 +104,14 @@ export const memoryStore = (
     readonly apps?: ReadonlyArray<AppRecord>;
     readonly stages?: ReadonlyArray<StageItem>;
     readonly deployments?: ReadonlyArray<DeploymentItem>;
+    readonly edgeFloor?: EdgeFloorItem;
   } = {},
 ): Layer.Layer<Store> =>
   Layer.sync(Store, () => {
     const apps = new Map((seed.apps ?? []).map((a) => [a.name, a]));
     const stages = new Map((seed.stages ?? []).map((s) => [`${s.app}#${s.stage}`, s]));
     const deployments = new Map((seed.deployments ?? []).map((d) => [d.id, d]));
+    let edgeFloor = seed.edgeFloor;
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
     const required = <A>(value: A | undefined, what: string) =>
       value === undefined ? Effect.die(new Error(`${what} does not exist`)) : Effect.succeed(value);
@@ -167,6 +176,13 @@ export const memoryStore = (
           const current = deployments.get(id);
           if (current)
             deployments.set(id, { ...current, events: [...current.events, ...events].slice(0, 500) });
+        }),
+      getEdgeFloor: Effect.sync(() => Option.fromNullishOr(edgeFloor)),
+      setEdgeFloor: (item) =>
+        Effect.sync(() => {
+          if (edgeFloor?.on === item.on) return false;
+          edgeFloor = item;
+          return true;
         }),
     });
   });
@@ -241,6 +257,7 @@ export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => 
       sesv2: missing('sesv2'),
       ce: missing('ce'),
       wafv2: missing('wafv2'),
+      cloudfront: missing('cloudfront'),
       ...clients,
     }),
   );

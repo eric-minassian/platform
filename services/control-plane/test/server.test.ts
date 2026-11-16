@@ -947,7 +947,9 @@ describe('observability', () => {
               ranges.push(range.res);
               return {
                 enabled: true,
+                state: { on: true, since: '2026-11-16T10:02:00.000Z', why: 'a flood' },
                 limit: 1000,
+                threshold: 1000,
                 res: range.res,
                 totals: { blocked: 4, allowed: 100 },
                 points: [],
@@ -958,10 +960,9 @@ describe('observability', () => {
       });
       const admin = yield* request('/v1/admin/edge', { headers: yield* signIn('ada') });
       assert.strictEqual(admin.status, 200);
-      assert.deepStrictEqual(((yield* json(admin)) as { totals: unknown }).totals, {
-        blocked: 4,
-        allowed: 100,
-      });
+      const body = (yield* json(admin)) as { totals: unknown; state: unknown };
+      assert.deepStrictEqual(body.totals, { blocked: 4, allowed: 100 });
+      assert.deepStrictEqual(body.state, { on: true, since: '2026-11-16T10:02:00.000Z', why: 'a flood' });
       // 24 hours by default.
       assert.deepStrictEqual(ranges, ['1h']);
       const member = yield* request('/v1/admin/edge', { headers: yield* signIn('bob') });

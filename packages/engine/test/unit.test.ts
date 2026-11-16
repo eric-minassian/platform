@@ -206,18 +206,31 @@ describe('stage role policy', () => {
     expect(create?.Resource).toBe('arn:aws:iam::1:role/platform/apps/*');
   });
 
-  it("lets the control plane read the edge floor's samples only when there is one", () => {
+  it("lets the control plane run the edge floor's own web ACL on the router, and nothing else", () => {
     const runtime = { artifactsBucket: 'a', sitesBucket: 's', storageBucket: 'st' };
-    const acl = 'arn:aws:wafv2:us-east-1:1:global/webacl/platform-edge/abc';
-    const with_ = policies.controlPlanePolicy({
+    const distribution = 'arn:aws:cloudfront::1:distribution/E1';
+    const cp = policies.controlPlanePolicy({
       region: 'us-east-1',
       accountId: '1',
-      runtime: { ...runtime, edgeWebAclArn: acl },
+      runtime: { ...runtime, distributionArn: distribution },
     });
-    expect(allows(with_, 'wafv2:GetSampledRequests', acl)).toBe(true);
-    expect(allows(with_, 'wafv2:UpdateWebACL', acl)).toBe(false);
-    const without = policies.controlPlanePolicy({ region: 'us-east-1', accountId: '1', runtime });
-    expect(without.Statement.some((st) => st.Sid === 'EdgeFloor')).toBe(false);
+    const floor = 'arn:aws:wafv2:us-east-1:1:global/webacl/platform-edge-floor/abc';
+    for (const action of ['CreateWebACL', 'GetWebACL', 'UpdateWebACL', 'DeleteWebACL', 'GetSampledRequests'])
+      expect(allows(cp, `wafv2:${action}`, floor)).toBe(true);
+    // Not the stack's old always-on web ACL, nor any other.
+    expect(
+      allows(cp, 'wafv2:DeleteWebACL', 'arn:aws:wafv2:us-east-1:1:global/webacl/platform-edge/abc'),
+    ).toBe(false);
+    expect(allows(cp, 'cloudfront:UpdateDistribution', distribution)).toBe(true);
+    expect(allows(cp, 'cloudfront:UpdateDistribution', 'arn:aws:cloudfront::1:distribution/E2')).toBe(false);
+    expect(
+      allows(cp, 'cloudwatch:DescribeAlarms', 'arn:aws:cloudwatch:us-east-1:1:alarm:platform-edge-floor'),
+    ).toBe(true);
+    expect(
+      allows(cp, 'cloudwatch:PutMetricAlarm', 'arn:aws:cloudwatch:us-east-1:1:alarm:platform-edge-floor'),
+    ).toBe(false);
+    const local = policies.controlPlanePolicy({ region: 'us-east-1', accountId: '1', runtime });
+    expect(local.Statement.some((st) => st.Sid?.startsWith('EdgeFloor'))).toBe(false);
   });
 
   it('lets the control plane create tagged secrets, list and delete them', () => {

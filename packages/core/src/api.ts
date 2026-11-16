@@ -754,6 +754,7 @@ export const AdminOverview = Schema.Struct({
     stagesPerApp: Schema.Finite,
     emailsPerDay: Schema.Finite,
     edgeRequestsPerMinute: optional(Schema.Finite),
+    edgeFloorAt: optional(Schema.Finite),
     servicesPerApp: Schema.Finite,
   }),
   apps: Schema.Finite,
@@ -786,12 +787,28 @@ export const EdgeFloorSample = Schema.Struct({
 });
 export type EdgeFloorSample = typeof EdgeFloorSample.Type;
 
-/** The edge's per-client request floor (`limits.edgeRequestsPerMinute`) across every app. */
+/** Whether the edge floor is on, since when, and why it turned on or off. */
+export const EdgeFloorState = Schema.Struct({
+  on: Schema.Boolean,
+  /** Absent until it first turns on. */
+  since: optional(Schema.String),
+  why: optional(Schema.String),
+});
+export type EdgeFloorState = typeof EdgeFloorState.Type;
+
+/**
+ * The edge's per-client request floor across every app: on only while the
+ * whole edge is busy (`limits.edgeFloorAt`), then `limits.edgeRequestsPerMinute`
+ * per client and host. Counts cover the range whether or not it was on then.
+ */
 export const EdgeFloorResponse = Schema.Struct({
   /** False when the platform has no floor; the rest is then empty. */
   enabled: Schema.Boolean,
-  /** Requests per client per host per minute. */
+  state: EdgeFloorState,
+  /** Requests per client per host per minute while it's on. */
   limit: optional(Schema.Finite),
+  /** Requests per minute across the edge that turn it on. */
+  threshold: optional(Schema.Finite),
   res: Resolution,
   totals: Schema.Struct({ blocked: Schema.Finite, allowed: Schema.Finite }),
   points: Schema.Array(EdgeFloorPoint),

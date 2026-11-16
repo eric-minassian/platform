@@ -559,13 +559,26 @@ describe('platform config', () => {
     limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1, servicesPerApp: 1 },
     telemetry: { logRetentionDays: { prod: 1, other: 1 } },
   };
-  const floor = (edgeRequestsPerMinute: number) =>
-    definePlatformConfig({ ...base, limits: { ...base.limits, edgeRequestsPerMinute } });
+  const floor = (edgeRequestsPerMinute?: number, edgeFloorAt?: number) =>
+    definePlatformConfig({
+      ...base,
+      limits: {
+        ...base.limits,
+        ...(edgeRequestsPerMinute !== undefined ? { edgeRequestsPerMinute } : {}),
+        ...(edgeFloorAt !== undefined ? { edgeFloorAt } : {}),
+      },
+    });
 
   it('takes an edge floor WAF can enforce, or none', () => {
     expect(definePlatformConfig(base).limits.edgeRequestsPerMinute).toBeUndefined();
-    expect(floor(1000).limits.edgeRequestsPerMinute).toBe(1000);
-    expect(() => floor(9)).toThrow(/at least 10/);
-    expect(() => floor(10.5)).toThrow(/at least 10/);
+    expect(floor(1000, 1000).limits).toMatchObject({ edgeRequestsPerMinute: 1000, edgeFloorAt: 1000 });
+    expect(() => floor(9, 1000)).toThrow(/at least 10/);
+    expect(() => floor(10.5, 1000)).toThrow(/at least 10/);
+    expect(() => floor(1000, 0)).toThrow(/edgeFloorAt must be a positive integer/);
+  });
+
+  it('turns the floor on only with both its limit and its threshold', () => {
+    expect(() => floor(1000)).toThrow(/set together/);
+    expect(() => floor(undefined, 1000)).toThrow(/set together/);
   });
 });

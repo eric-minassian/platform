@@ -1,7 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import {
-  EDGE_RATE_LIMITED_BODY,
-  EDGE_RETRY_AFTER_SECONDS,
+  EDGE_FLOOR_JOB,
   EMAIL_LOGIN_LOCAL_PART,
   emailDomain,
   emailMailFromDomain,
@@ -25,12 +24,14 @@ import {
   aws_appsync as appsync,
   CfnOutput,
   aws_cloudfront as cloudfront,
+  aws_cloudwatch as cloudwatch,
   aws_cognito as cognito,
   Duration,
   aws_dynamodb as dynamodb,
   aws_ec2 as ec2,
   aws_ecr as ecr,
   aws_ecs as ecs,
+  aws_events as events,
   Fn,
   aws_iam as iam,
   aws_lambda as lambda,
@@ -44,7 +45,6 @@ import {
   aws_sns as sns,
   aws_ssm as ssm,
   Tags,
-  aws_wafv2 as wafv2,
 } from 'aws-cdk-lib';
 import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
@@ -53,7 +53,7 @@ import type { Construct, IConstruct } from 'constructs';
 
 export const FOUNDATION_STACK = 'platform-foundation';
 /** The control plane is deployed by the engine as an ordinary app, after this stack. */
-export const CONTROL_PLANE_APP = 'platform';
+export const CONTROL_PLANE_APP = platformNames.controlPlaneApp;
 
 export interface FoundationStackProps extends StackProps {
   config: PlatformConfig;
@@ -269,72 +269,14 @@ export class FoundationStack extends Stack {
       },
     });
 
-    // The floor under every app's own limits: a client sending one host more
-    // than `edgeRequestsPerMinute` is answered 429 at the edge, static files
-    // included, until its rate drops. Counted per client and host, so a busy
-    // client of one app (or a CI runner testing several) isn't blocked from
-    // the others. WAF evaluates before the router function, so `host` is the
-    // app's own host; lowercased, so spelling it differently doesn't buy a
-    // second budget.
-    const floor = config.limits.edgeRequestsPerMinute;
-    const edgeWebAcl =
-      floor === undefined
-        ? undefined
-        : new wafv2.CfnWebACL(this, 'EdgeFloor', {
-            name: platformNames.edgeWebAcl,
-            scope: 'CLOUDFRONT',
-            description: `At most ${floor} requests per client per app host per minute`,
-            defaultAction: { allow: {} },
-            customResponseBodies: {
-              'rate-limited': {
-                contentType: 'APPLICATION_JSON',
-                content: JSON.stringify(EDGE_RATE_LIMITED_BODY),
-              },
-            },
-            rules: [
-              {
-                name: platformNames.edgeFloorRule,
-                priority: 0,
-                statement: {
-                  rateBasedStatement: {
-                    limit: floor,
-                    evaluationWindowSec: 60,
-                    aggregateKeyType: 'CUSTOM_KEYS',
-                    customKeys: [
-                      { ip: {} },
-                      { header: { name: 'host', textTransformations: [{ priority: 0, type: 'LOWERCASE' }] } },
-                    ],
-                  },
-                },
-                action: {
-                  block: {
-                    customResponse: {
-                      responseCode: 429,
-                      customResponseBodyKey: 'rate-limited',
-                      responseHeaders: [{ name: 'retry-after', value: String(EDGE_RETRY_AFTER_SECONDS) }],
-                    },
-                  },
-                },
-                visibilityConfig: {
-                  cloudWatchMetricsEnabled: true,
-                  metricName: platformNames.edgeFloorRule,
-                  // The console lists recently blocked requests from WAF's free sample.
-                  sampledRequestsEnabled: true,
-                },
-              },
-            ],
-            visibilityConfig: {
-              cloudWatchMetricsEnabled: true,
-              metricName: platformNames.edgeWebAcl,
-              sampledRequestsEnabled: true,
-            },
-          });
-    if (edgeWebAcl) tag(edgeWebAcl, 'edge');
-
     // One distribution for every app. The router function serves static files
     // from the sites bucket or switches the origin to the stage's Web Function.
+    // No web ACL: the control plane attaches the edge floor's only while it's on
+    // (below). A deploy of this stack writes the whole distribution config, and
+    // its drift-reverting change sets undo changes made outside it, so a deploy
+    // during a flood takes the floor off; the control plane's 5-minute watchdog
+    // puts it back.
     const distribution = new cloudfront.Distribution(this, 'Edge', {
-      ...(edgeWebAcl ? { webAclId: edgeWebAcl.attrArn } : {}),
       comment: 'platform-edge',
       domainNames: [`*.${config.domain}`],
       certificate: edgeCertificate,
@@ -402,6 +344,75 @@ export class FoundationStack extends Stack {
         },
       }),
     );
+
+    // The edge floor (control plane edge-floor.ts): a per-client limit at the
+    // edge that's on only while the whole edge is busy, since its web ACL bills
+    // by the hour. This alarm goes off when the distribution serves
+    // `edgeFloorAt` requests in a minute, and the rule hands that to the
+    // control plane's worker as its `edge-floor` job, which attaches the web
+    // ACL; the worker's watchdog takes it off after an hour back under. Alarm
+    // state changes always reach the default bus, so the alarm needs no action.
+    // The rule names the worker by ARN: it's deployed after this stack, and
+    // its permission to be invoked comes with it (src/deploy.ts).
+    const controlPlaneWorkerArn = this.formatArn({
+      service: 'lambda',
+      resource: 'function',
+      resourceName: names.workerFunction(CONTROL_PLANE_APP, PROD_STAGE),
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+    const floorAt = config.limits.edgeFloorAt;
+    const edgeFloor =
+      floorAt === undefined
+        ? undefined
+        : (() => {
+            const alarm = new cloudwatch.Alarm(this, 'EdgeFloorAlarm', {
+              alarmName: platformNames.edgeFloorAlarm,
+              alarmDescription: `The router served ${floorAt} requests in a minute: the edge floor turns on`,
+              // Not `distribution.metricRequests()`: CloudFront reports its metrics with
+              // `Region: Global` too, and a metric missing a dimension has no data.
+              metric: new cloudwatch.Metric({
+                namespace: 'AWS/CloudFront',
+                metricName: 'Requests',
+                dimensionsMap: { DistributionId: distribution.distributionId, Region: 'Global' },
+                statistic: 'Sum',
+                period: Duration.minutes(1),
+              }),
+              threshold: floorAt,
+              comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+              evaluationPeriods: 1,
+              datapointsToAlarm: 1,
+              // CloudFront reports nothing for a minute without requests.
+              treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+            });
+            tag(alarm, 'edge');
+            const trigger = new events.Rule(this, 'EdgeFloorTrigger', {
+              ruleName: platformNames.edgeFloorAlarm,
+              description: 'Turns the edge floor on when its alarm goes off',
+              eventPattern: {
+                source: ['aws.cloudwatch'],
+                detailType: ['CloudWatch Alarm State Change'],
+                resources: [alarm.alarmArn],
+                detail: { state: { value: ['ALARM'] } },
+              },
+            });
+            // A plain target, not `targets.LambdaFunction`: that adds the invoke permission
+            // to this stack, which a fresh platform deploys before the worker exists.
+            trigger.addTarget({
+              bind: () => ({
+                arn: controlPlaneWorkerArn,
+                // The worker's `invoke` dispatch (the SDK's DirectPayload).
+                input: events.RuleTargetInput.fromObject({
+                  __platform: 'invoke',
+                  name: EDGE_FLOOR_JOB,
+                  payload: {},
+                }),
+                // Past that, the watchdog has seen the alarm itself.
+                retryPolicy: { maximumEventAgeInSeconds: Duration.minutes(15).toSeconds() },
+              }),
+            });
+            tag(trigger, 'edge');
+            return { alarmArn: alarm.alarmArn, ruleArn: trigger.ruleArn };
+          })();
 
     // `*.<domain>` in the root zone is a CNAME to the edge host; the console
     // is the zone apex.
@@ -743,7 +754,7 @@ export class FoundationStack extends Stack {
               alertsTopicArn: alerts.topicArn,
               realtime: { apiId: realtimeApi.attrApiId },
               email: { identityArn: mail.emailIdentityArn },
-              ...(edgeWebAcl ? { edgeWebAclArn: edgeWebAcl.attrArn } : {}),
+              distributionArn: distribution.distributionArn,
               containers: {
                 cluster: cluster.clusterName,
                 repository: repository.repositoryName,
@@ -803,17 +814,12 @@ export class FoundationStack extends Stack {
       boundaryPolicyArn: boundary.managedPolicyArn,
       kvsArn: routes.keyValueStoreArn,
       distributionArn: distribution.distributionArn,
-      ...(edgeWebAcl ? { edgeWebAclArn: edgeWebAcl.attrArn } : {}),
+      ...(edgeFloor ? { edgeFloor } : {}),
       userPoolId: users.userPoolId,
       loginUrl: `https://${config.loginHost}`,
       alertsTopicArn: alerts.topicArn,
       // The control plane's worker, deployed after this stack; its name is fixed.
-      telemetryFunctionArn: this.formatArn({
-        service: 'lambda',
-        resource: 'function',
-        resourceName: names.workerFunction(CONTROL_PLANE_APP, PROD_STAGE),
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      }),
+      telemetryFunctionArn: controlPlaneWorkerArn,
       realtime: {
         apiId: realtimeApi.attrApiId,
         httpDomain: realtimeApi.attrDnsHttp,

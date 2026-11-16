@@ -67,7 +67,7 @@ export function AdminPage() {
                 app, {o.limits.emailsPerDay} email recipients a day per stage
                 {o.limits.edgeRequestsPerMinute === undefined
                   ? '.'
-                  : `, ${o.limits.edgeRequestsPerMinute} requests per client per app per minute at the edge.`}
+                  : `, ${o.limits.edgeRequestsPerMinute} requests per client per app per minute at the edge while the floor is on.`}
               </p>
             </Card>
             <p className="text-[12px] text-muted">
@@ -83,8 +83,9 @@ export function AdminPage() {
 }
 
 /**
- * The edge's per-client request floor over the last 24 hours, for every app:
- * how many requests it blocked, when, and a sample of whom it blocked on
+ * The edge's per-client request floor, for every app: whether it's on (it is
+ * only while the whole edge is busy), and over the last 24 hours how many
+ * requests it blocked and when. While it's on, a sample of whom it blocked on
  * which host (WAF samples a share of requests, from the last three hours).
  */
 function EdgeFloorCard() {
@@ -92,10 +93,29 @@ function EdgeFloorCard() {
   return (
     <Card title="Edge floor">
       <Loaded result={result}>
-        {(e) =>
-          e.enabled ? (
+        {(e) => {
+          if (!e.enabled && !e.state.on)
+            return (
+              <p className="text-[12px] text-muted">
+                Not set up. Set <Mono>limits.edgeRequestsPerMinute</Mono> and <Mono>limits.edgeFloorAt</Mono>{' '}
+                in <Mono>platform.config.ts</Mono> and deploy the platform to block floods at the edge.
+              </p>
+            );
+          const { on, since, why } = e.state;
+          const seen = e.totals.blocked + e.totals.allowed;
+          return (
             <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <Stat
+                  label="State"
+                  value={on ? 'On' : 'Off'}
+                  tone={on ? 'warn' : 'muted'}
+                  hint={
+                    on && since
+                      ? `since ${fmtDateTime(since)}`
+                      : `on at ${e.threshold?.toLocaleString('en') ?? '—'} requests a minute across the edge`
+                  }
+                />
                 <Stat
                   label="Limit"
                   value={e.limit?.toLocaleString('en') ?? '—'}
@@ -105,44 +125,48 @@ function EdgeFloorCard() {
                   label="Blocked (24h)"
                   value={fmtNum(e.totals.blocked)}
                   tone={e.totals.blocked ? 'warn' : 'muted'}
-                  hint={`${fmtPct(e.totals.blocked / (e.totals.blocked + e.totals.allowed || 1), 2)} of requests`}
+                  hint={seen ? `${fmtPct(e.totals.blocked / seen, 2)} of requests while on` : undefined}
                 />
-                <Stat label="Allowed (24h)" value={fmtNum(e.totals.allowed)} />
+                <Stat label="Allowed (24h)" value={fmtNum(e.totals.allowed)} hint="while on" />
               </div>
-              <Bars
-                data={[...e.points]}
-                range="24h"
-                format={fmtNum}
-                series={[{ key: 'blocked', label: 'blocked', color: SERIES_COLORS.s4xx }]}
-              />
-              <Table
-                head={['Blocked at', 'Host', 'Client', 'Request']}
-                empty="Nothing blocked in the last three hours."
-              >
-                {e.samples.slice(0, 20).map((s) => (
-                  <tr key={`${s.at}${s.client}${s.path}`}>
-                    <td className="whitespace-nowrap">{fmtDateTime(s.at)}</td>
-                    <td>
-                      <Mono>{s.host}</Mono>
-                    </td>
-                    <td>
-                      <Mono>{s.client}</Mono>
-                      {s.country && <span className="pl-1.5 text-muted">{s.country}</span>}
-                    </td>
-                    <td>
-                      <Mono>{`${s.method} ${s.path}`}</Mono>
-                    </td>
-                  </tr>
-                ))}
-              </Table>
+              {why && since && (
+                <p className="text-[12px] text-muted">
+                  {on ? 'Turned on' : `Turned off ${fmtDateTime(since)}`}: {why}.
+                </p>
+              )}
+              {seen > 0 && (
+                <Bars
+                  data={[...e.points]}
+                  range="24h"
+                  format={fmtNum}
+                  series={[{ key: 'blocked', label: 'blocked', color: SERIES_COLORS.s4xx }]}
+                />
+              )}
+              {on && (
+                <Table
+                  head={['Blocked at', 'Host', 'Client', 'Request']}
+                  empty="Nothing blocked in the last three hours."
+                >
+                  {e.samples.slice(0, 20).map((s) => (
+                    <tr key={`${s.at}${s.client}${s.path}`}>
+                      <td className="whitespace-nowrap">{fmtDateTime(s.at)}</td>
+                      <td>
+                        <Mono>{s.host}</Mono>
+                      </td>
+                      <td>
+                        <Mono>{s.client}</Mono>
+                        {s.country && <span className="pl-1.5 text-muted">{s.country}</span>}
+                      </td>
+                      <td>
+                        <Mono>{`${s.method} ${s.path}`}</Mono>
+                      </td>
+                    </tr>
+                  ))}
+                </Table>
+              )}
             </div>
-          ) : (
-            <p className="text-[12px] text-muted">
-              Off. Set <Mono>limits.edgeRequestsPerMinute</Mono> in <Mono>platform.config.ts</Mono> and deploy
-              the platform to block floods at the edge.
-            </p>
-          )
-        }
+          );
+        }}
       </Loaded>
     </Card>
   );

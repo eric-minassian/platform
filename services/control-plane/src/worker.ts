@@ -4,9 +4,11 @@
  * the `stages` queue's, which runs in a function of its own (plat.config.ts).
  */
 import { defineWorker, Queues } from '@ericminassian/platform';
-import { Effect, Layer, Schema } from 'effect';
+import { EDGE_FLOOR_JOB } from '@ericminassian/platform-core';
+import { Effect, Exit, Layer, Schema } from 'effect';
 import { Artifacts } from './artifacts.ts';
 import { Deployer, StageEngine } from './deploy.ts';
+import { EdgeFloor } from './edge-floor.ts';
 import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
 import { StageJob, WorkerJobs } from './jobs/call.ts';
@@ -24,6 +26,7 @@ import { TelemetryWriter } from './telemetry/write.ts';
 const WorkerLive = Layer.mergeAll(
   CostCollector.layer,
   Deployer.layer,
+  EdgeFloor.layer,
   Pinger.layer,
   RealtimeKey.layer,
   Reaper.layer,
@@ -67,10 +70,20 @@ export default defineWorker({
       Effect.flatMap(Schema.decodeUnknownEffect(RollbackJob)(payload), ({ app, stage, deploymentId }) =>
         Deployer.use((d) => d.rollback(app, stage, deploymentId)),
       ),
+    // The edge floor's alarm went off (an EventBridge rule in the foundation stack).
+    [EDGE_FLOOR_JOB]: () => EdgeFloor.use((f) => f.reconcile({ alarming: true })),
   },
   crons: {
     pinger: () => Pinger.use((p) => p.run),
-    watchdog: () => Watchdog.use((w) => w.run),
+    // Stuck deployments, and the edge floor where its alarm says (a missed alarm event, a
+    // foundation deploy that took it off, an hour back under). Each runs whether or not the
+    // other fails, and either failing fails the run.
+    watchdog: () =>
+      Effect.gen(function* () {
+        const deployments = yield* Effect.exit(Watchdog.use((w) => w.run));
+        const floor = yield* Effect.exit(EdgeFloor.use((f) => f.reconcile()));
+        return yield* Exit.asVoidAll([deployments, floor]);
+      }),
     cost: () => CostCollector.use((c) => c.run()),
     reaper: () => Reaper.use((r) => r.run),
     'realtime-key': () => RealtimeKey.use((k) => k.run),

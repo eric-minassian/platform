@@ -21,12 +21,14 @@ import {
   DeploymentItem,
   deploymentItem,
   deploymentKey,
+  EdgeFloorItem,
+  edgeFloorKey,
   StageItem,
   stageItem,
   stageKey,
 } from './records.ts';
 
-export { DeploymentItem, StageItem } from './records.ts';
+export { DeploymentItem, EdgeFloorItem, StageItem } from './records.ts';
 
 /** `createApp` found an app with that name. */
 export class AlreadyExists extends Schema.TaggedError<AlreadyExists, { readonly brand: unique symbol }>()(
@@ -75,6 +77,15 @@ export class Store extends Context.Service<
       id: string,
       events: ReadonlyArray<DeploymentEventEntry>,
     ): Effect.Effect<void>;
+
+    /** None until the edge floor first turns on. */
+    readonly getEdgeFloor: Effect.Effect<Option.Option<EdgeFloorItem>>;
+    /**
+     * Records the floor turning on or off. Applies only when `on` differs from
+     * what's stored and answers whether it did, so when two runs turn it on at
+     * once, the first one's `since` and `why` stay.
+     */
+    setEdgeFloor(item: EdgeFloorItem): Effect.Effect<boolean>;
   }
 >()('@ericminassian/platform-control-plane/Store') {
   static readonly layer: Layer.Layer<Store, never, Aws | Settings> = Layer.effect(
@@ -87,6 +98,7 @@ export class Store extends Context.Service<
       const decodeApp = Schema.decodeUnknownEffect(AppRecord);
       const decodeStage = Schema.decodeUnknownEffect(StageItem);
       const decodeDeployment = Schema.decodeUnknownEffect(DeploymentItem);
+      const decodeEdgeFloor = Schema.decodeUnknownEffect(EdgeFloorItem);
 
       const queryAll = Effect.fnUntraced(function* (
         input: Omit<QueryCommandInput, 'TableName' | 'ExclusiveStartKey'>,
@@ -309,6 +321,30 @@ export class Store extends Context.Service<
         );
       }, Effect.orDie);
 
+      const getEdgeFloor = Effect.gen(function* () {
+        // Consistent: the reconcile reads it to decide what to change.
+        const item = yield* getItem(edgeFloorKey, true);
+        return Option.isSome(item) ? Option.some(yield* decodeEdgeFloor(item.value)) : Option.none();
+      }).pipe(Effect.orDie, Effect.withSpan('Store.getEdgeFloor'));
+
+      const setEdgeFloor = Effect.fn('Store.setEdgeFloor')(function* (item: EdgeFloorItem) {
+        const TableName = yield* table;
+        return yield* tryAws(() =>
+          aws.ddb().send(
+            new PutCommand({
+              TableName,
+              Item: { ...edgeFloorKey, ...item },
+              ConditionExpression: 'attribute_not_exists(pk) OR #on <> :on',
+              ExpressionAttributeNames: { '#on': 'on' },
+              ExpressionAttributeValues: { ':on': item.on },
+            }),
+          ),
+        ).pipe(
+          Effect.as(true),
+          Effect.catchIf(AwsError.is('ConditionalCheckFailedException'), () => Effect.succeed(false)),
+        );
+      }, Effect.orDie);
+
       return Store.of({
         getApp,
         listApps,
@@ -325,6 +361,8 @@ export class Store extends Context.Service<
         listDeployments,
         updateDeployment,
         appendDeploymentEvents,
+        getEdgeFloor,
+        setEdgeFloor,
       });
     }),
   );
