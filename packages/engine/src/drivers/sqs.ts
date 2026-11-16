@@ -21,6 +21,27 @@ export async function getQueueUrl(ctx: EngineContext, name: string): Promise<str
   return res?.QueueUrl;
 }
 
+/** A queue's visibility timeout in seconds; undefined when the queue doesn't exist. */
+export async function getQueueVisibility(ctx: EngineContext, name: string): Promise<number | undefined> {
+  const url = await getQueueUrl(ctx, name);
+  if (!url) return undefined;
+  const res = await ignoreNotFound(
+    ctx.clients.sqs.send(
+      new GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['VisibilityTimeout'] }),
+    ),
+  );
+  const value = res?.Attributes?.VisibilityTimeout;
+  return value === undefined ? undefined : Number(value);
+}
+
+export async function setQueueAttributes(
+  ctx: EngineContext,
+  url: string,
+  attributes: Record<string, string>,
+): Promise<void> {
+  await ctx.clients.sqs.send(new SetQueueAttributesCommand({ QueueUrl: url, Attributes: attributes }));
+}
+
 export async function ensureQueue(
   ctx: EngineContext,
   spec: { name: string; attributes?: Record<string, string>; tags?: Record<string, string> },

@@ -31,6 +31,11 @@ export interface RuleSpec {
   pattern: unknown;
   targets: Array<{ id: string; arn: string; input?: string; roleArn?: string }>;
   tags?: Record<string, string>;
+  /**
+   * Runs once the rule exists, before it targets anything new: where the
+   * targets grant the rule access, so no event is refused in between.
+   */
+  beforeTargets?: (ruleArn: string) => Promise<void>;
 }
 
 export async function ensureRule(ctx: EngineContext, spec: RuleSpec): Promise<string> {
@@ -44,6 +49,7 @@ export async function ensureRule(ctx: EngineContext, spec: RuleSpec): Promise<st
       Tags: spec.tags ? tagList(spec.tags) : undefined,
     }),
   );
+  await spec.beforeTargets?.(rule.RuleArn!);
   await ev.send(
     new PutTargetsCommand({
       Rule: spec.name,

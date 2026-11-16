@@ -1,7 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { DescribeEventBusCommand } from '@aws-sdk/client-eventbridge';
 import { GetRoleCommand } from '@aws-sdk/client-iam';
-import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
 import { GetWebFunctionCommand } from '@aws-sdk/client-lambda-web';
 import {
   AUTH_ROUTES,
@@ -13,10 +12,14 @@ import {
   emailDailyLimit,
   emailFromAddress,
   encodeBindings,
+  type HandlerKind,
+  handlerFunctionName,
+  handlerSettings,
   IAM_APP_PATH,
   LOCAL_STAGE,
   NODE_RUNTIME,
   names,
+  ownFunctionHandlers,
   type PlatformRuntimeConfig,
   PROD_STAGE,
   platformNames,
@@ -47,7 +50,10 @@ import {
   ensureEventSourceMapping,
   ensureFunction,
   ensurePermission,
+  type FunctionState,
   listEventSourceMappings,
+  listFunctions,
+  listPermissionIds,
   removePermission,
 } from './drivers/lambda.ts';
 import { deleteLogGroup, ensureLogGroup, listLogGroups } from './drivers/logs.ts';
@@ -75,7 +81,13 @@ import {
   getConfigurationSet,
   getTenant,
 } from './drivers/ses.ts';
-import { deleteQueue, ensureQueue, listQueues } from './drivers/sqs.ts';
+import {
+  deleteQueue,
+  ensureQueue,
+  getQueueVisibility,
+  listQueues,
+  setQueueAttributes,
+} from './drivers/sqs.ts';
 import { deleteParameter, deleteParametersByPath, ensureParameterOnce } from './drivers/ssm.ts';
 import {
   createRevision,
@@ -227,30 +239,42 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     );
   }
 
-  // 3. Queues (dead-letter queue first).
+  // 3. Queues (dead-letter queue first). A queue's visibility timeout must cover the timeout of
+  // each function receiving from it, and a queue whose handler moves to a function with a shorter
+  // timeout keeps its old one until step 9 moves it. So a timeout is only raised here; one that
+  // comes down is lowered after step 9.
   const queues: Bindings['queues'] = {};
-  const workerTimeout = m.worker?.timeoutSeconds ?? 60;
+  const lowerVisibility: Array<{ url: string; seconds: number }> = [];
   for (const [key, q] of Object.entries(m.queues)) {
     const dlq = await ensureQueue(ctx, {
       name: names.deadLetterQueue(app, stage, key),
       attributes: { MessageRetentionPeriod: String(14 * 24 * 3600) },
       tags,
     });
+    const handlerTimeout = handlerSettings(m, 'queue', key).timeoutSeconds;
     let visibility = q.visibilityTimeoutSeconds;
-    if (visibility < workerTimeout) {
-      ctx.log('warn', `visibility timeout raised to the worker timeout (${workerTimeout}s)`, `queue ${key}`);
-      visibility = workerTimeout;
+    if (visibility < handlerTimeout) {
+      ctx.log(
+        'warn',
+        `visibility timeout raised to the handler's timeout (${handlerTimeout}s)`,
+        `queue ${key}`,
+      );
+      visibility = handlerTimeout;
     }
+    const name = names.queue(app, stage, key);
+    const current = await getQueueVisibility(ctx, name);
     const main = await ensureQueue(ctx, {
-      name: names.queue(app, stage, key),
+      name,
       attributes: {
-        VisibilityTimeout: String(visibility),
+        VisibilityTimeout: String(Math.max(visibility, current ?? 0)),
         MessageRetentionPeriod: String(4 * 24 * 3600),
         RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlq.arn, maxReceiveCount: q.maxReceiveCount }),
       },
       tags,
     });
     queues[key] = { url: main.url, arn: main.arn };
+    if (current !== undefined && current > visibility)
+      lowerVisibility.push({ url: main.url, seconds: visibility });
     resources.push(
       { type: 'queue', name: main.name, arn: main.arn },
       { type: 'queue', name: dlq.name, arn: dlq.arn },
@@ -384,31 +408,45 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     ...input.extraEnv,
   };
 
-  // 9. Worker + its triggers.
+  // 9. Worker + its triggers. A handler that sets its own memory or timeout runs in a function of
+  // its own: same bundle, environment and log group, other settings (Lambda sets them per function).
   let workerFunction: DeployStageResult['workerFunction'];
   if (hasWorker && m.worker && input.artifacts.worker) {
-    const fn = await ensureFunction(ctx, {
-      name: workerName,
-      roleArn,
-      runtime: NODE_RUNTIME,
-      handler: 'index.handler',
-      architecture: 'arm64',
-      memoryMb: m.worker.memoryMb,
-      timeoutSeconds: m.worker.timeoutSeconds,
-      code: input.artifacts.worker,
-      env,
-      logGroup: workerLogGroup,
-      description: `${app}/${stage} worker (${deploymentId})`,
-      tags,
-    });
+    const code = input.artifacts.worker;
+    const deployFunction = (
+      name: string,
+      settings: { memoryMb: number; timeoutSeconds: number },
+      of: string,
+    ) =>
+      ensureFunction(ctx, {
+        name,
+        roleArn,
+        runtime: NODE_RUNTIME,
+        handler: 'index.handler',
+        architecture: 'arm64',
+        memoryMb: settings.memoryMb,
+        timeoutSeconds: settings.timeoutSeconds,
+        code,
+        env,
+        logGroup: workerLogGroup,
+        description: `${app}/${stage} ${of} (${deploymentId})`,
+        tags,
+      });
+    // Each takes seconds of updates and waits, and none depends on another.
+    const functions = await settleAll([
+      deployFunction(workerName, m.worker, 'worker'),
+      ...ownFunctionHandlers(m).map((h) =>
+        deployFunction(names.handlerFunction(app, stage, h.kind, h.name), h, `worker, ${h.kind} ${h.name}`),
+      ),
+    ]);
+    const fn = functions[0]!;
     workerFunction = { name: fn.name, arn: fn.arn };
-    resources.push({ type: 'function', name: fn.name, arn: fn.arn });
+    for (const f of functions) resources.push({ type: 'function', name: f.name, arn: f.arn });
     await reconcileWorkerTriggers(ctx, {
       app,
       stage,
       manifest: m,
-      workerName,
-      workerArn: fn.arn,
+      functions,
       roleArn,
       busName,
       queues,
@@ -418,6 +456,9 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   } else {
     await removeWorker(ctx, app, stage);
   }
+  // Nothing with a longer timeout receives from these queues any more (step 3).
+  for (const q of lowerVisibility)
+    await setQueueAttributes(ctx, q.url, { VisibilityTimeout: String(q.seconds) });
 
   // 9b. Services: images, task definitions and ECS services. Their rollouts run while the static
   // files and the web revision go up, and must finish before the route flips.
@@ -696,14 +737,27 @@ export async function expireStorage(
   return deleted;
 }
 
+/** Waits for every promise, then fails with the first failure, so nothing runs on after a deploy fails. */
+async function settleAll<T>(promises: Array<Promise<T>>): Promise<T[]> {
+  const results = await Promise.allSettled(promises);
+  const failed = results.find((r) => r.status === 'rejected');
+  if (failed) throw failed.reason;
+  return results.map((r) => (r as PromiseFulfilledResult<T>).value);
+}
+
+/**
+ * Points each queue, event subscription and cron at the function its handler
+ * runs in, then removes handler functions no longer declared. A trigger
+ * reaches its new function before it leaves the old one.
+ */
 async function reconcileWorkerTriggers(
   ctx: EngineContext,
   p: {
     app: string;
     stage: string;
     manifest: ResolvedManifest;
-    workerName: string;
-    workerArn: string;
+    /** The worker's function, then each handler's own. */
+    functions: FunctionState[];
     roleArn: string;
     busName: string;
     queues: Bindings['queues'];
@@ -713,52 +767,72 @@ async function reconcileWorkerTriggers(
 ): Promise<void> {
   const { app, stage, manifest: m } = p;
   const base = names.base(app, stage);
+  const arns = new Map(p.functions.map((f) => [f.name, f.arn]));
+  const target = (kind: HandlerKind, name: string) => {
+    const fn = handlerFunctionName(app, stage, m, kind, name);
+    return { name: fn, arn: arns.get(fn)! };
+  };
+  // Every function under the stage's base is the worker's or a handler's.
+  const stale = (await listFunctions(ctx, `${base}--`)).filter((f) => !arns.has(f.name));
 
-  // Queue → worker mappings.
-  const wantedSources = new Set<string>();
+  // Queue → function mappings.
+  const wantedMappings = new Set<string>();
   for (const [key, q] of Object.entries(m.queues)) {
+    const fn = target('queue', key);
     const source = p.queues[key]!.arn;
-    wantedSources.add(source);
+    wantedMappings.add(`${fn.name} ${source}`);
     await ensureEventSourceMapping(ctx, {
-      functionName: p.workerName,
+      functionName: fn.name,
       sourceArn: source,
       batchSize: q.batchSize,
       ...(q.concurrency ? { maxConcurrency: q.concurrency } : {}),
     });
-    p.resources.push({ type: 'esm', name: `${key} → worker` });
+    p.resources.push({ type: 'esm', name: `${key} → ${fn.name}` });
   }
-  for (const esm of await listEventSourceMappings(ctx, p.workerName)) {
-    if (!wantedSources.has(esm.sourceArn)) await deleteEventSourceMapping(ctx, esm.uuid);
+  for (const fn of [...p.functions, ...stale]) {
+    for (const esm of await listEventSourceMappings(ctx, fn.name)) {
+      if (!wantedMappings.has(`${fn.name} ${esm.sourceArn}`)) await deleteEventSourceMapping(ctx, esm.uuid);
+    }
   }
 
   // Event subscriptions → rules on the stage bus.
   const wantedRules = new Set<string>();
+  const wantedGrants = new Set<string>();
   for (const type of m.events) {
+    const fn = target('event', type);
     const ruleName = names.eventRule(app, stage, type);
     wantedRules.add(ruleName);
+    const sid = statementId('events', ruleName);
+    wantedGrants.add(`${fn.name} ${sid}`);
     const ruleArn = await ensureRule(ctx, {
       bus: p.busName,
       name: ruleName,
       pattern: { 'detail-type': [type] },
-      targets: [{ id: 'worker', arn: p.workerArn }],
+      targets: [{ id: 'worker', arn: fn.arn }],
       tags: p.tags,
-    });
-    await ensurePermission(ctx, {
-      functionName: p.workerName,
-      statementId: statementId('events', ruleName),
-      principal: 'events.amazonaws.com',
-      action: 'lambda:InvokeFunction',
-      sourceArn: ruleArn,
+      beforeTargets: (arn) =>
+        ensurePermission(ctx, {
+          functionName: fn.name,
+          statementId: sid,
+          principal: 'events.amazonaws.com',
+          action: 'lambda:InvokeFunction',
+          sourceArn: arn,
+        }),
     });
     p.resources.push({ type: 'rule', name: ruleName, arn: ruleArn });
   }
   for (const rule of await listRules(ctx, p.busName, `${base}--`)) {
-    if (wantedRules.has(rule)) continue;
-    await deleteRule(ctx, p.busName, rule);
-    await removePermission(ctx, p.workerName, statementId('events', rule));
+    if (!wantedRules.has(rule)) await deleteRule(ctx, p.busName, rule);
+  }
+  // Grants for rules that are gone or now target another function.
+  for (const fn of p.functions) {
+    for (const sid of await listPermissionIds(ctx, fn.name)) {
+      if (sid.startsWith('events-') && !wantedGrants.has(`${fn.name} ${sid}`))
+        await removePermission(ctx, fn.name, sid);
+    }
   }
 
-  // Crons → schedules (EventBridge Scheduler invokes the worker with the stage role).
+  // Crons → schedules (EventBridge Scheduler invokes the function with the stage role).
   const group = names.scheduleGroup(app, stage);
   const cronKeys = Object.keys(m.crons);
   if (cronKeys.length) await ensureScheduleGroup(ctx, { name: group, tags: p.tags });
@@ -769,7 +843,7 @@ async function reconcileWorkerTriggers(
       expression: toSchedulerExpression(cron.schedule),
       ...(cron.timezone ? { timezone: cron.timezone } : {}),
       target: {
-        arn: p.workerArn,
+        arn: target('cron', key).arn,
         roleArn: p.roleArn,
         input: JSON.stringify({ __platform: 'cron', name: key }),
       },
@@ -780,14 +854,16 @@ async function reconcileWorkerTriggers(
   for (const s of existing)
     if (isCronSchedule(s) && !cronKeys.includes(s)) await deleteSchedule(ctx, group, s);
   if (!cronKeys.length && existing.length) await deleteScheduleGroupIfEmpty(ctx, group);
+
+  // Nothing triggers these any more.
+  for (const fn of stale) await deleteWorkerFunction(ctx, fn.name);
 }
 
 /**
- * The manifest no longer has a worker: remove it and everything that
- * targets it. Services' stop schedules stay (and with them the group).
+ * The manifest no longer has a worker: remove its functions and everything
+ * that targets them. Services' stop schedules stay (and with them the group).
  */
 async function removeWorker(ctx: EngineContext, app: string, stage: string): Promise<void> {
-  const workerName = names.workerFunction(app, stage);
   const group = names.scheduleGroup(app, stage);
   const schedules = await listSchedules(ctx, group);
   for (const s of schedules) if (isCronSchedule(s)) await deleteSchedule(ctx, group, s);
@@ -795,9 +871,14 @@ async function removeWorker(ctx: EngineContext, app: string, stage: string): Pro
   const bus = names.eventBus(app, stage);
   for (const rule of await listRules(ctx, bus, `${names.base(app, stage)}--`))
     await deleteRule(ctx, bus, rule);
-  for (const esm of await listEventSourceMappings(ctx, workerName))
-    await deleteEventSourceMapping(ctx, esm.uuid);
-  await deleteFunction(ctx, workerName);
+  for (const fn of await listFunctions(ctx, `${names.base(app, stage)}--`))
+    await deleteWorkerFunction(ctx, fn.name);
+}
+
+/** Lambda keeps a function's event source mappings when it deletes the function, so they go first. */
+async function deleteWorkerFunction(ctx: EngineContext, name: string): Promise<void> {
+  for (const esm of await listEventSourceMappings(ctx, name)) await deleteEventSourceMapping(ctx, esm.uuid);
+  await deleteFunction(ctx, name);
 }
 
 /**
@@ -917,13 +998,9 @@ export async function listStageResources(
   if (role?.Role) out.push({ type: 'role', name: role.Role.RoleName!, arn: role.Role.Arn! });
   const table = await describeTable(ctx, names.table(app, stage));
   if (table) out.push({ type: 'table', name: table.TableName!, arn: table.TableArn! });
-  const worker = await ignoreNotFound(
-    ctx.clients.lambda.send(
-      new GetFunctionConfigurationCommand({ FunctionName: names.workerFunction(app, stage) }),
-    ),
-  );
-  if (worker?.FunctionArn)
-    out.push({ type: 'function', name: worker.FunctionName!, arn: worker.FunctionArn });
+  // The worker's function and its handlers' own.
+  for (const fn of await listFunctions(ctx, `${names.base(app, stage)}--`))
+    out.push({ type: 'function', name: fn.name, arn: fn.arn });
   const web = await ignoreNotFound(
     ctx.clients.lambdaWeb.send(new GetWebFunctionCommand({ functionName: names.webFunction(app, stage) })),
   );

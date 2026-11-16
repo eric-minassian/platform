@@ -7,6 +7,7 @@ import {
   GetFunctionConfigurationCommand,
   GetPolicyCommand,
   ListEventSourceMappingsCommand,
+  ListFunctionsCommand,
   RemovePermissionCommand,
   TagResourceCommand,
   UpdateEventSourceMappingCommand,
@@ -128,6 +129,24 @@ export async function deleteFunction(ctx: EngineContext, name: string): Promise<
   return res !== undefined;
 }
 
+/** Functions whose names start with `prefix`. Lambda can't filter by name, so this pages through all of them. */
+export async function listFunctions(
+  ctx: EngineContext,
+  prefix: string,
+): Promise<Array<{ name: string; arn: string }>> {
+  const out: Array<{ name: string; arn: string }> = [];
+  let Marker: string | undefined;
+  do {
+    const res = await ctx.clients.lambda.send(new ListFunctionsCommand({ Marker }));
+    for (const f of res.Functions ?? []) {
+      if (f.FunctionName?.startsWith(prefix) && f.FunctionArn)
+        out.push({ name: f.FunctionName, arn: f.FunctionArn });
+    }
+    Marker = res.NextMarker;
+  } while (Marker);
+  return out;
+}
+
 // ------------------------------------------------------------------ event source mappings
 
 export interface EventSourceMappingSpec {
@@ -179,6 +198,7 @@ export async function ensureEventSourceMapping(
   return res.UUID!;
 }
 
+/** A function's mappings, except those already being deleted (deletion takes a while, and they still list). */
 export async function listEventSourceMappings(
   ctx: EngineContext,
   functionName: string,
@@ -191,7 +211,8 @@ export async function listEventSourceMappings(
     );
     if (!res) return out;
     for (const m of res.EventSourceMappings ?? []) {
-      if (m.UUID && m.EventSourceArn) out.push({ uuid: m.UUID, sourceArn: m.EventSourceArn });
+      if (m.UUID && m.EventSourceArn && m.State !== 'Deleting')
+        out.push({ uuid: m.UUID, sourceArn: m.EventSourceArn });
     }
     Marker = res.NextMarker;
   } while (Marker);

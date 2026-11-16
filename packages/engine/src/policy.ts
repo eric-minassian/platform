@@ -4,6 +4,7 @@ import {
   type ContainersRuntimeConfig,
   IAM_APP_PATH,
   names,
+  ownFunctionHandlers,
   type PlatformRuntimeConfig,
   platformNames,
   publicStores,
@@ -207,12 +208,20 @@ export function stageRolePolicy(input: StagePolicyInput): PolicyDocument {
     );
   }
 
+  // The SDK's `invokeJob` calls the worker's function, and Scheduler calls each cron's function as
+  // this role.
   if (manifest.worker) {
+    const functions = [
+      names.workerFunction(app, stage),
+      ...ownFunctionHandlers(manifest)
+        .filter((h) => h.kind === 'cron')
+        .map((h) => names.handlerFunction(app, stage, h.kind, h.name)),
+    ].map((fn) => `arn:aws:lambda:${region}:${acct}:function:${fn}`);
     statements.push({
       Sid: 'InvokeWorker',
       Effect: 'Allow',
       Action: 'lambda:InvokeFunction',
-      Resource: `arn:aws:lambda:${region}:${acct}:function:${names.workerFunction(app, stage)}`,
+      Resource: functions.length === 1 ? functions[0]! : functions,
     });
   }
 
@@ -322,10 +331,12 @@ export function boundaryPolicy(input: {
       ],
     },
     {
+      // Workers are `<app>--<stage>--worker`; handlers' own functions are `…--worker--<handler>`,
+      // hashed when long, so all that's sure to remain is a second `--`.
       Sid: 'StageWorkers',
       Effect: 'Allow',
       Action: 'lambda:InvokeFunction',
-      Resource: `arn:aws:lambda:${region}:${acct}:function:*--*--worker`,
+      Resource: `arn:aws:lambda:${region}:${acct}:function:*--*--*`,
     },
     ...realtime,
     ...email,

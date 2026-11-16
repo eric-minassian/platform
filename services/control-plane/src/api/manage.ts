@@ -173,7 +173,7 @@ export const ManageLive = HttpApiBuilder.group(
           const manifest = yield* access.liveManifest(app, stage);
           if (Option.isNone(manifest) || !manifest.value.crons[params.name])
             return yield* NotFound.of(`cron ${params.name} on ${stage}`);
-          yield* queues.runCron(app, stage, params.name);
+          yield* queues.runCron(app, stage, manifest.value, params.name);
           return { started: params.name };
         }),
 

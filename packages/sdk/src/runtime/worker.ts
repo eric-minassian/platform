@@ -4,8 +4,10 @@
  * compiles to `JobHandlers`; `plat build` generates
  * `export const handler = createWorkerHandler(def)`.
  *
- * One function per stage handles every queue, event subscription, cron and
- * direct invocation; the handler dispatches on the event shape. Each job is
+ * One bundle per stage handles every queue, event subscription, cron and
+ * direct invocation; the handler dispatches on the event shape. It runs in the
+ * worker's function, and in each function of a handler that sets its own
+ * memory or timeout, which only that handler's events reach. Each job is
  * auto-instrumented (`job`/`err` telemetry, trace propagation from the
  * producer). SQS batches report partial failures.
  *

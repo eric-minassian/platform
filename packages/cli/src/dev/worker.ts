@@ -21,7 +21,15 @@ import {
   SetQueueAttributesCommand,
   SQSClient,
 } from '@aws-sdk/client-sqs';
-import { LOCAL_MAIL_URL_ENV, names, type ResolvedManifest } from '@ericminassian/platform-core';
+import {
+  type HandlerKind,
+  handlerFunctionName,
+  handlerSettings,
+  LOCAL_MAIL_URL_ENV,
+  names,
+  ownFunctionHandlers,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { SDK_WORKER } from '../build.ts';
 import { resolveFromApp } from '../project.ts';
 import { freePort, waitForPort } from '../util/net.ts';
@@ -34,7 +42,9 @@ import { killTree } from './proc.ts';
  * for why), fed by a dispatcher that does what Lambda's event sources would:
  * polls each SQS queue (batches, partial failures, retries via visibility
  * timeout, DLQ via the queue's redrive policy), receives EventBridge events
- * through a tap queue, and runs crons on demand.
+ * through a tap queue, and runs crons on demand. One process runs every
+ * handler, each invoked as the function it runs in when deployed (its name,
+ * timeout and memory).
  */
 export interface InvokeResult {
   ok: boolean;
@@ -42,12 +52,25 @@ export interface InvokeResult {
   error?: { name: string; message: string; stack?: string };
 }
 
+/** A queue, event or cron handler; anything else is invoked as the worker's own function. */
+export interface HandlerRef {
+  kind: HandlerKind;
+  name: string;
+}
+
 export interface LocalWorker {
   port: number;
   child: ChildProcess;
-  invoke(event: unknown): Promise<InvokeResult>;
+  invoke(event: unknown, handler?: HandlerRef): Promise<InvokeResult>;
   stop(): void;
 }
+
+/** Headers that tell worker-host.ts which function an invocation stands for. */
+const INVOKE_HEADERS = {
+  function: 'x-platform-function',
+  timeoutMs: 'x-platform-timeout-ms',
+  memoryMb: 'x-platform-memory-mb',
+} as const;
 
 export async function startLocalWorker(
   stage: LocalStage,
@@ -66,6 +89,7 @@ export async function startLocalWorker(
     PLATFORM_SDK_WORKER: resolveFromApp(root, SDK_WORKER),
     PLATFORM_WORKER_PORT: String(port),
     PLATFORM_WORKER_TIMEOUT_MS: String(manifest.worker.timeoutSeconds * 1000),
+    PLATFORM_WORKER_MEMORY_MB: String(manifest.worker.memoryMb),
     PLATFORM_WORKER_FUNCTION:
       stage.result.workerFunction?.name ?? names.workerFunction(manifest.name, stage.stage),
     PLATFORM_LOG_PRETTY: '1',
@@ -81,15 +105,34 @@ export async function startLocalWorker(
   return {
     port,
     child,
-    async invoke(event) {
+    async invoke(event, handler) {
       // tsx watch restarts the host on edits; wait for it to come back.
       await waitForPort(port, '127.0.0.1', 30_000);
-      const res = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST', body: JSON.stringify(event) });
+      const res = await fetch(`http://127.0.0.1:${port}/`, {
+        method: 'POST',
+        body: JSON.stringify(event),
+        headers: handler ? invokeHeaders(stage, manifest, handler) : {},
+      });
       return (await res.json()) as InvokeResult;
     },
     stop() {
       killTree(child);
     },
+  };
+}
+
+function invokeHeaders(stage: LocalStage, manifest: ResolvedManifest, handler: HandlerRef) {
+  const settings = handlerSettings(manifest, handler.kind, handler.name);
+  return {
+    [INVOKE_HEADERS.function]: handlerFunctionName(
+      manifest.name,
+      stage.stage,
+      manifest,
+      handler.kind,
+      handler.name,
+    ),
+    [INVOKE_HEADERS.timeoutMs]: String(settings.timeoutSeconds * 1000),
+    [INVOKE_HEADERS.memoryMb]: String(settings.memoryMb),
   };
 }
 
@@ -118,10 +161,19 @@ export async function startWorkerDispatch(
   const functionName = stage.result.workerFunction?.name;
   let stopped = false;
 
-  // The emulator's own event source mappings would hand messages to its sandboxed runtime; turn them off.
-  if (functionName) {
+  // The emulator's own event source mappings would hand messages to its sandboxed runtime; turn them
+  // off, on the worker's function and on each handler's own.
+  const functions = functionName
+    ? [
+        functionName,
+        ...ownFunctionHandlers(manifest).map((h) =>
+          names.handlerFunction(manifest.name, stage.stage, h.kind, h.name),
+        ),
+      ]
+    : [];
+  for (const fn of functions) {
     const esms = await lambda
-      .send(new ListEventSourceMappingsCommand({ FunctionName: functionName }))
+      .send(new ListEventSourceMappingsCommand({ FunctionName: fn }))
       .catch(() => undefined);
     for (const m of esms?.EventSourceMappings ?? []) {
       if (m.UUID && m.State !== 'Disabled') {
@@ -142,7 +194,10 @@ export async function startWorkerDispatch(
         batchSize,
         () => stopped,
         async (messages) => {
-          const r = await worker.invoke(sqsEvent(messages, q.arn, stage.conn.region));
+          const r = await worker.invoke(sqsEvent(messages, q.arn, stage.conn.region), {
+            kind: 'queue',
+            name,
+          });
           const failed = new Set(
             r.ok
               ? (
@@ -164,7 +219,7 @@ export async function startWorkerDispatch(
   }
 
   if (functionName && stage.bindings.bus) {
-    const tapUrl = await tapEventRules(sqs, events, stage, functionName);
+    const tapUrl = await tapEventRules(sqs, events, stage);
     if (tapUrl) {
       loops.push(
         pollQueue(
@@ -177,7 +232,8 @@ export async function startWorkerDispatch(
             for (const m of messages) {
               const event = JSON.parse(m.Body ?? '{}') as { 'detail-type'?: string };
               const attempts = Number(m.Attributes?.ApproximateReceiveCount ?? '1');
-              const r = await worker.invoke(event);
+              const type = event['detail-type'];
+              const r = await worker.invoke(event, type ? { kind: 'event', name: type } : undefined);
               log('event', event['detail-type'] ?? '?', r.ok ? 'ok' : 'error', r.error?.message);
               // Lambda async invokes retry twice, then drop: same here.
               if (r.ok || attempts >= 3) done.push(m);
@@ -192,7 +248,7 @@ export async function startWorkerDispatch(
 
   return {
     async runCron(name) {
-      const r = await worker.invoke({ __platform: 'cron', name });
+      const r = await worker.invoke({ __platform: 'cron', name }, { kind: 'cron', name });
       log('cron', name, r.ok ? 'ok' : 'error', r.error?.message);
       return r;
     },
@@ -241,7 +297,6 @@ async function tapEventRules(
   sqs: SQSClient,
   events: EventBridgeClient,
   stage: LocalStage,
-  functionName: string,
 ): Promise<string | null> {
   const bus = stage.bindings.bus!.name;
   const rules =
@@ -274,7 +329,9 @@ async function tapEventRules(
     if (!rule.Name) continue;
     const targets =
       (await events.send(new ListTargetsByRuleCommand({ Rule: rule.Name, EventBusName: bus }))).Targets ?? [];
-    const lambdaTargets = targets.filter((t) => t.Arn?.includes(`:function:${functionName}`));
+    // Every function under the stage's base is the worker's or a handler's own.
+    const base = names.base(stage.bindings.app, stage.stage);
+    const lambdaTargets = targets.filter((t) => t.Arn?.includes(`:function:${base}--`));
     if (lambdaTargets.length === 0) continue;
     await events.send(
       new RemoveTargetsCommand({ Rule: rule.Name, EventBusName: bus, Ids: lambdaTargets.map((t) => t.Id!) }),

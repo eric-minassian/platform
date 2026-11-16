@@ -86,10 +86,11 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
     expect(stage.result.workerFunction?.name).toBeTruthy();
   });
 
-  it('runs a cron in the local worker', async () => {
+  it('runs a cron in the local worker, with its own timeout', async () => {
     const r = await dispatcher!.runCron('tick');
     expect(r.error).toBeUndefined();
     expect(r.ok).toBe(true);
+    expect(workerOutput).toContain('tick 30');
   });
 
   it('delivers queue messages from the emulator to the worker', async () => {
