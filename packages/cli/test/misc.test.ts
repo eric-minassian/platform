@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import { describeCompute } from '../src/commands/apps.ts';
 import {
   formatCollections,
   formatCustomMetrics,
@@ -14,6 +15,26 @@ import { prettyLine } from '../src/dev/pretty.ts';
 import { sparkline, table } from '../src/util/output.ts';
 import { parseDuration, resolutionFor } from '../src/util/time.ts';
 import { tempDir } from './helpers.ts';
+
+describe('plat apps show', () => {
+  it('shows how each server runs and what the other mode would cost', () => {
+    const estimate = {
+      at: '2026-11-16T07:30:00.000Z',
+      request: { monthlyUsd: 0.0027, coldStartsPerMonth: 304 },
+      instance: { monthlyUsd: 3.1, environmentHoursPerMonth: 30 },
+      requestsPerMonth: 304,
+      days: 3,
+    };
+    expect(describeCompute({ compute: 'request', computeEstimate: estimate })).toBe(
+      'request (≈ <$0.01/mo; instance ≈ $3.10)',
+    );
+    expect(describeCompute({ compute: 'instance', computeEstimate: estimate })).toBe(
+      'instance (≈ $3.10/mo; request ≈ <$0.01)',
+    );
+    expect(describeCompute({ compute: 'request' })).toBe('request');
+    expect(describeCompute({})).toBe('-');
+  });
+});
 
 describe('crons', () => {
   it('computes next runs in UTC', () => {

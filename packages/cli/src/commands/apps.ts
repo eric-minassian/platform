@@ -1,10 +1,21 @@
-import { validateAppName } from '@ericminassian/platform-core';
+import { type StageRecord, validateAppName } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { CliError, EXIT, result, table } from '../util/output.ts';
 import { confirmByTyping } from '../util/prompt.ts';
 import { shortTime } from '../util/time.ts';
 import { action, apiFor, type CommonOpts, withCommon } from './common.ts';
+
+const usd = (n: number) => (n > 0 && n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`);
+
+/** `request (≈ $0.04/mo; instance ≈ $3.10)`: how the server runs and, for prod, what each mode costs. */
+export function describeCompute(stage: Pick<StageRecord, 'compute' | 'computeEstimate'>): string {
+  if (!stage.compute) return '-';
+  const e = stage.computeEstimate;
+  if (!e) return stage.compute;
+  const other = stage.compute === 'request' ? 'instance' : 'request';
+  return `${stage.compute} (≈ ${usd(e[stage.compute].monthlyUsd)}/mo; ${other} ≈ ${usd(e[other].monthlyUsd)})`;
+}
 
 export function registerApps(program: Command): void {
   const apps = program
@@ -79,6 +90,7 @@ export function registerApps(program: Command): void {
               status: st.status,
               url: st.url,
               deployment: st.currentDeployment ?? '',
+              compute: describeCompute(st),
               updated: shortTime(st.updatedAt),
             })),
           ),
