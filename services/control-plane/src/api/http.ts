@@ -10,11 +10,14 @@ import { HttpApiBuilder } from 'effect/http-api';
 import { AuthenticatedLive } from '../auth.ts';
 import { Access } from './access.ts';
 import { AdminLive } from './admin.ts';
+import { AlertsLive } from './alerts.ts';
 import { AppsLive } from './apps.ts';
+import { DashboardsLive } from './dashboards.ts';
 import { DeploymentsLive, StagesLive } from './deployments.ts';
 import { RequestValidationLive, RouterErrorsLive } from './errors.ts';
 import { ManageLive } from './manage.ts';
 import { ObserveLive } from './observe.ts';
+import { QueriesLive } from './queries.ts';
 import { ConsoleSignInLive, SessionLive } from './session.ts';
 
 export const HttpLive = Layer.mergeAll(
@@ -22,6 +25,17 @@ export const HttpLive = Layer.mergeAll(
   ConsoleSignInLive,
   RouterErrorsLive,
 ).pipe(
-  Layer.provide([SessionLive, AppsLive, StagesLive, DeploymentsLive, ObserveLive, ManageLive, AdminLive]),
+  Layer.provide([
+    SessionLive,
+    AppsLive,
+    StagesLive,
+    DeploymentsLive,
+    ObserveLive,
+    QueriesLive,
+    DashboardsLive,
+    AlertsLive,
+    ManageLive,
+    AdminLive,
+  ]),
   Layer.provide([AuthenticatedLive, RequestValidationLive, Access.layer]),
 );
