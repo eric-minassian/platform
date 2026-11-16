@@ -193,7 +193,7 @@ function AppsBody({
   const reqPerMin = apps.reduce((n, s) => n + (s.health?.reqPerMin ?? 0), 0);
   const cost = apps.reduce((n, s) => n + (s.costMonthToDateUsd ?? 0), 0);
   return (
-    <>
+    <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat
           label="Apps"
@@ -234,6 +234,6 @@ function AppsBody({
           empty={<EmptyState title="No app matches">Try another name.</EmptyState>}
         />
       </Panel>
-    </>
+    </div>
   );
 }

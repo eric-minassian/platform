@@ -1242,13 +1242,15 @@ const AlertsDemo = HttpApiBuilder.group(PlatformApi, 'alerts', (h) =>
       history: ({ params, query }) => {
         const w = windowOf(query, '7d');
         return Effect.succeed({
-          events: alertEvents.filter((e) => {
-            const r = alertRules.get(e.rule);
-            const t = Date.parse(e.ts);
-            return (
-              r?.app === params.app && (!query.stage || e.stage === query.stage) && t >= w.from && t <= w.to
-            );
-          }),
+          events: alertEvents
+            .toSorted((x, y) => y.ts.localeCompare(x.ts))
+            .filter((e) => {
+              const r = alertRules.get(e.rule);
+              const t = Date.parse(e.ts);
+              return (
+                r?.app === params.app && (!query.stage || e.stage === query.stage) && t >= w.from && t <= w.to
+              );
+            }),
         });
       },
     }),
