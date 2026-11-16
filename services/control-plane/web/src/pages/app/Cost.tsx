@@ -3,7 +3,7 @@ import { Atom } from 'effect/reactivity';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Bars, SERIES_COLORS } from '../../components/charts.tsx';
 import { Card, Loaded, Mono, Stat, Table } from '../../components/ui.tsx';
-import { fmtUsd } from '../../format.ts';
+import { fmtUsd, fmtUsdCents } from '../../format.ts';
 import { useApp } from '../AppLayout.tsx';
 
 // Cost Explorer refreshes daily and charges per request, so an hour-old answer is fresh enough.
@@ -54,9 +54,9 @@ export function CostTab() {
                         <Mono>{a.name}</Mono>
                       </td>
                       <td>{a.detail}</td>
-                      <td className="tabular-nums">{fmtUsd(a.monthly.computeUsd)}</td>
-                      <td className="tabular-nums">{fmtUsd(a.monthly.publicIpv4Usd)}</td>
-                      <td className="font-medium tabular-nums">{fmtUsd(a.monthly.totalUsd)}</td>
+                      <td className="tabular-nums">{fmtUsdCents(a.monthly.computeUsd)}</td>
+                      <td className="tabular-nums">{fmtUsdCents(a.monthly.publicIpv4Usd)}</td>
+                      <td className="font-medium tabular-nums">{fmtUsdCents(a.monthly.totalUsd)}</td>
                     </tr>
                   ))}
                 </Table>

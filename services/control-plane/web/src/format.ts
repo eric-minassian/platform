@@ -16,6 +16,9 @@ export const fmtPct = (n: number | null | undefined, digits = 1): string =>
 export const fmtUsd = (n: number | null | undefined): string =>
   n === null || n === undefined ? '—' : `$${n < 10 ? n.toFixed(2) : n.toFixed(0)}`;
 
+/** Always to the cent: for estimates shown as parts and their sum, which must visibly add up. */
+export const fmtUsdCents = (n: number): string => `$${n.toFixed(2)}`;
+
 export const fmtBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];

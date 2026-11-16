@@ -27,6 +27,16 @@ const levelTone = (l?: string): Tone =>
 const streamColor = (stream: string): string =>
   stream === 'worker' ? 'text-warn' : stream === 'web' ? 'text-info' : 'text-ok';
 
+/**
+ * A service's stream is `service:<name>`; its lines show the name, which fits the column,
+ * unless the name is one of the other streams'.
+ */
+const SERVICE_PREFIX = 'service:';
+const streamLabel = (stream: string): string => {
+  const name = stream.startsWith(SERVICE_PREFIX) ? stream.slice(SERVICE_PREFIX.length) : undefined;
+  return name && name !== 'web' && name !== 'worker' ? name : stream;
+};
+
 // A deployment's manifest never changes, so one read serves the tab.
 const deploymentAtom = Atom.family((id: string) =>
   fresh(ApiClient.query('deployments', 'get', { params: { id }, timeToLive }), { staleTime: '1 hour' }),
@@ -70,7 +80,7 @@ export function LogRows({ lines, app, search }: { lines: readonly LogLine[]; app
         >
           <span className="shrink-0 text-muted">{fmtDateTime(l.ts)}</span>
           <span className={cx('w-24 shrink-0 truncate', streamColor(l.stream))} title={l.stream}>
-            {l.stream}
+            {streamLabel(l.stream)}
           </span>
           <span className="w-12 shrink-0">
             {l.level && <Badge tone={levelTone(l.level)}>{l.level}</Badge>}
