@@ -60,6 +60,8 @@ describe('defineApp', () => {
     defineApp({ name: 'todo', web: { server: 'src/server.ts', dev: { command: 'vite', prot: 5173 } } });
     // @ts-expect-error misspelled store option
     defineApp({ name: 'todo', storage: { snapshots: { pubic: true } } });
+    // @ts-expect-error misspelled handler option
+    defineApp({ name: 'todo', crons: { tick: { schedule: 'rate(1 minute)', memoryMB: 256 } } });
     expect(true).toBe(true);
   });
 
@@ -71,6 +73,26 @@ describe('defineApp', () => {
     const isPublic: true = files.storage.snapshots.public;
     const uploads: Same<typeof files.storage.uploads, {}> = true;
     expect([isPublic, uploads]).toEqual([true, true]);
+  });
+});
+
+describe('handler settings', () => {
+  it('keep payload types', () => {
+    const app = defineApp({
+      name: 'atlas',
+      queues: { ais: queue<EmailJob>({ memoryMb: 256, timeoutSeconds: 90 }) },
+      events: { 'ship.seen': event<{ mmsi: number }>({ memoryMb: 256 }) },
+      crons: { ais: { schedule: 'rate(1 minute)', memoryMb: 256, timeoutSeconds: 90 } },
+    });
+    const body: PayloadOf<typeof app.queues.ais> = { to: 'a' };
+    const detail: PayloadOf<(typeof app.events)['ship.seen']> = { mmsi: 1 };
+    const m = parseManifest(JSON.parse(JSON.stringify(app)));
+    expect([body, detail, m.eventOptions['ship.seen'], m.crons.ais?.timeoutSeconds]).toEqual([
+      { to: 'a' },
+      { mmsi: 1 },
+      { memoryMb: 256 },
+      90,
+    ]);
   });
 });
 
