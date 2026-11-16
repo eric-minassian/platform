@@ -1,5 +1,6 @@
 /** Registering apps, and the summaries the console's home and `plat apps` show. */
 import {
+  type AlertRule,
   type AppRecord,
   type AppSummary,
   PROD_STAGE,
@@ -9,6 +10,7 @@ import {
 import { BadRequest, Conflict, LimitReached, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { DateTime, Effect, Option } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
+import { AlertRules } from '../alerts/rules.ts';
 import { canAccessApp, canCreateApp } from '../authz.ts';
 import { Settings } from '../config.ts';
 import { Dns } from '../dns.ts';
@@ -25,18 +27,35 @@ export const ifAvailable = <A>(what: string, effect: Effect.Effect<A>): Effect.E
     ),
   );
 
+type AlertCounts = NonNullable<AppSummary['alerts']>;
+
+/** Each app's rules and how many of them are firing (enabled and in alarm), by app (pure). */
+export function alertCounts(rules: ReadonlyArray<AlertRule>): Map<string, AlertCounts> {
+  const out = new Map<string, AlertCounts>();
+  for (const r of rules) {
+    const prev = out.get(r.app) ?? { total: 0, alarm: 0 };
+    out.set(r.app, { total: prev.total + 1, alarm: prev.alarm + (r.enabled && r.state === 'alarm' ? 1 : 0) });
+  }
+  return out;
+}
+
 export const AppsLive = HttpApiBuilder.group(
   PlatformApi,
   'apps',
   Effect.fn(function* (handlers) {
     const access = yield* Access;
+    const alerts = yield* AlertRules;
     const dns = yield* Dns;
     const settings = yield* Settings;
     const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
     const exists = (name: string) => new Conflict({ code: 'exists', message: `app ${name} already exists` });
 
-    const summarize = Effect.fn('summarize')(function* (app: AppRecord) {
+    /** `alerts`: the app's counts, when the rules could be read. */
+    const summarize = Effect.fn('summarize')(function* (
+      app: AppRecord,
+      alertsOf: Option.Option<AlertCounts>,
+    ) {
       const [stages, deployments, cost] = yield* Effect.all(
         [
           store.listStages(app.name),
@@ -46,9 +65,15 @@ export const AppsLive = HttpApiBuilder.group(
         { concurrency: 'unbounded' },
       );
       const prod = stages.find((s) => s.stage === PROD_STAGE && s.status === 'active');
-      const health = prod
-        ? yield* ifAvailable('health', telemetry.health(app.name, prod.up ?? null))
-        : Option.none();
+      const [health, traffic] = prod
+        ? yield* Effect.all(
+            [
+              ifAvailable('health', telemetry.health(app.name, prod.up ?? null)),
+              ifAvailable('traffic', telemetry.traffic(app.name)),
+            ],
+            { concurrency: 'unbounded' },
+          )
+        : [Option.none(), Option.none()];
       const lastDeployment = deployments[0];
       return {
         app,
@@ -56,15 +81,29 @@ export const AppsLive = HttpApiBuilder.group(
         health: Option.getOrNull(health),
         ...(Option.isSome(cost) ? { costMonthToDateUsd: cost.value.monthToDateUsd } : {}),
         ...(lastDeployment ? { lastDeployment: publicDeployment(lastDeployment) } : {}),
+        ...(Option.isSome(traffic) ? { traffic: traffic.value } : {}),
+        ...(Option.isSome(alertsOf) ? { alerts: alertsOf.value } : {}),
       } satisfies AppSummary;
     });
+
+    const noAlerts: AlertCounts = { total: 0, alarm: 0 };
 
     return handlers.handleAll({
       list: () =>
         Effect.gen(function* () {
           const me = yield* access.member;
           const visible = (yield* store.listApps).filter((a) => canAccessApp(me, a));
-          const summaries = yield* Effect.forEach(visible, summarize, { concurrency: 8 });
+          // One read of every app's rules rather than one per app.
+          const counts = yield* ifAvailable('alerts', Effect.map(alerts.listAll, alertCounts));
+          const summaries = yield* Effect.forEach(
+            visible,
+            (app) =>
+              summarize(
+                app,
+                Option.map(counts, (c) => c.get(app.name) ?? noAlerts),
+              ),
+            { concurrency: 8 },
+          );
           return summaries.toSorted((x, y) => x.app.name.localeCompare(y.app.name));
         }),
 
@@ -104,7 +143,11 @@ export const AppsLive = HttpApiBuilder.group(
       get: ({ params }) =>
         Effect.gen(function* () {
           const { app } = yield* access.memberApp(params.app);
-          return yield* summarize(app);
+          const counts = yield* ifAvailable(
+            'alerts',
+            Effect.map(alerts.list(app.name), (rules) => alertCounts(rules).get(app.name) ?? noAlerts),
+          );
+          return yield* summarize(app, counts);
         }),
 
       update: ({ params, payload }) =>
@@ -129,6 +172,8 @@ export const AppsLive = HttpApiBuilder.group(
               message: `destroy stages first: ${live.map((s) => s.stage).join(', ')}`,
             });
           }
+          // Its rules first: an app registered again under the name starts without them.
+          yield* alerts.removeAll(app.name);
           return yield* store.deleteApp(app.name);
         }),
     });

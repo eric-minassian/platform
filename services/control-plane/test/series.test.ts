@@ -1,9 +1,10 @@
 import type { MetricDataResult } from '@aws-sdk/client-cloudwatch';
 import { assert, it as effect } from '@effect/vitest';
-import type { AppRecord, SeriesQuery } from '@ericminassian/platform-core';
+import type { AlertRule, AppRecord, AppSummary, SeriesQuery } from '@ericminassian/platform-core';
 import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
 import { Effect } from 'effect';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { AlertRules } from '../src/alerts/rules.ts';
 import { cloudWatchSeriesRes } from '../src/cloudwatch.ts';
 import { toRealtimeSeriesResponse } from '../src/jobs/realtime.ts';
 import { toServiceSeriesResponse } from '../src/jobs/services.ts';
@@ -443,6 +444,72 @@ describe('series endpoint', () => {
       assert.deepStrictEqual(((yield* json(services)) as { series: unknown }).series, [
         { key: 'all', values: [null, null, null] },
       ]);
+    }),
+  );
+});
+
+describe('app summaries', () => {
+  const rule = (id: string, over: Partial<AlertRule>): AlertRule => ({
+    id,
+    app: 'shop',
+    name: id,
+    stage: 'prod',
+    query: { metric: 'requests', stat: 'count' },
+    condition: { op: 'above', threshold: 1, minutes: 5 },
+    missing: 'keep',
+    notify: false,
+    enabled: true,
+    state: 'ok',
+    createdBy: 'bob',
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    ...over,
+  });
+
+  effect.effect('show prod’s hourly traffic and how many alert rules are firing', () =>
+    Effect.gen(function* () {
+      const traffic = Array.from({ length: 24 }, (_, i) => i);
+      const { request, bob } = yield* setup({
+        telemetry: {
+          health: () => Effect.succeed({ up: true, reqPerMin: 1, errorRate: 0, p95: 25 }),
+          traffic: () => Effect.succeed(traffic),
+        },
+        alerts: AlertRules.memory({
+          rules: [
+            rule('a1', { state: 'alarm' }),
+            // Disabled, so not firing whatever it last said.
+            rule('a2', { state: 'alarm', enabled: false }),
+            rule('a3', { state: 'no_data', stage: 'dev' }),
+            rule('a4', { app: 'blog', state: 'alarm' }),
+          ],
+        }),
+      });
+      const list = (yield* json(yield* request('/v1/apps', { headers: bob }))) as AppSummary[];
+      assert.deepStrictEqual(
+        list.map((s) => [s.app.name, s.traffic?.length, s.traffic?.[23], s.alerts]),
+        [['shop', 24, 23, { total: 3, alarm: 1 }]],
+      );
+      const one = (yield* json(yield* request('/v1/apps/shop', { headers: bob }))) as AppSummary;
+      assert.deepStrictEqual([one.traffic, one.alerts], [traffic, { total: 3, alarm: 1 }]);
+    }),
+  );
+
+  effect.effect('leave traffic out without a prod stage, and delete the app’s rules with it', () =>
+    Effect.gen(function* () {
+      const alerts = AlertRules.memory({ rules: [rule('a1', {}), rule('b1', { app: 'blog' })] });
+      const { request, bob } = yield* setup({
+        store: memoryStore({ apps: [shop], stages: [stage('prod', { status: 'destroyed' })] }),
+        alerts,
+      });
+      const summary = (yield* json(yield* request('/v1/apps/shop', { headers: bob }))) as AppSummary;
+      assert.deepStrictEqual([summary.traffic, summary.alerts], [undefined, { total: 1, alarm: 0 }]);
+      const removed = yield* request('/v1/apps/shop', { method: 'DELETE', headers: bob });
+      assert.strictEqual(removed.status, 204);
+      const left = yield* AlertRules.use((r) => r.listAll).pipe(Effect.provide(alerts));
+      assert.deepStrictEqual(
+        left.map((r) => r.id),
+        ['b1'],
+      );
     }),
   );
 });

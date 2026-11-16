@@ -13,6 +13,7 @@ import {
 import { createPlatformFetch } from '@ericminassian/platform/testing';
 import { DateTime, Effect, Layer, Option, Ref } from 'effect';
 import { decodeJwt, SignJWT } from 'jose';
+import { AlertRules } from '../src/alerts/rules.ts';
 import { HttpLive } from '../src/api/http.ts';
 import { Artifacts } from '../src/artifacts.ts';
 import { Tokens } from '../src/auth.ts';
@@ -266,6 +267,8 @@ export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => 
 export interface TestServices {
   readonly settings?: Partial<Settings['Service']>;
   readonly store?: Layer.Layer<Store>;
+  /** Alert rules and their history (in memory, empty, unless a test gives its own). */
+  readonly alerts?: Layer.Layer<AlertRules>;
   readonly github?: Partial<GitHub['Service']>;
   readonly telemetry?: Partial<TelemetryQuery['Service']>;
   readonly logs?: Partial<Logs['Service']>;
@@ -295,6 +298,7 @@ export const testServices = (options: TestServices = {}) => {
   const telemetry = Layer.mock(TelemetryQuery, options.telemetry ?? {});
   return Layer.mergeAll(
     options.store ?? memoryStore(),
+    options.alerts ?? AlertRules.memory(),
     tokensLayer,
     Layer.mock(GitHub, {
       login: (token) => Effect.succeed(token),
