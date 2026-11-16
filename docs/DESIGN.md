@@ -152,6 +152,9 @@ declare module '@ericminassian/platform/config' {
   See [Realtime](#realtime).
 - **Email**: the server and worker send with the `Email` service. See
   [Email](#email).
+- **Rate limits**: `RateLimits` checks limits in the server and worker, and
+  `RateLimits.middleware` puts one in front of `HttpApi` endpoints. See
+  [Rate limits](#rate-limits).
 - **Unit tests**: `Platform.layerMemory()` runs every resource in memory. Its
   `Db` stores items exactly as DynamoDB holds them, and one test scenario runs
   against both it and DynamoDB in the emulator.
@@ -348,6 +351,59 @@ control plane   reads them on demand: console Email page, `plat email`; the ping
   removing `db` keeps the table; the role loses its grant. Destroy deletes
   them. Rollback needs nothing.
 
+## Rate limits
+
+Abuse limits for public and no-auth endpoints (signups per network, writes
+per client per minute, sends per user per day), counted in the stage's own
+table: one conditional write per check, $0 at rest.
+
+```
+server, worker  RateLimits.check(name, { max, per, cost?, key? })    key: the client's network by default
+                1. what this instance last saw is already over the limit → refused, no call
+                2. the previous window's count: one consistent read per key and window, then cached
+                3. UpdateItem ADD n :cost IF n <= max − cost − previous × overlap → fits, or the count that refused it
+HttpApi         RateLimits.middleware(WriteLimit, policy) → RateLimited: 429 + Retry-After, before the handler
+telemetry       a `limit` line per check (name, ok) → l#<app>#<stage>#<res> rollups → console Overview, plat metrics
+```
+
+- **A sliding window.** A limit allows `max` uses in any span of `per`
+  (1 second to 30 days). The count is the current window's plus the previous
+  window's, weighted by the share of it still within `per`, as if its uses
+  were spread evenly (Cloudflare's approximation). Fixed windows let 2×
+  through around each boundary, which hurts most for small limits such as 5
+  signups an hour; this costs the same writes.
+- **One item per limit, key and window**: `pk` `_rl#<name>#<key>`, `sk`
+  `<per in ms>#<window number>`, `n`, and `_ttl` when the next window ends
+  (until then it is the previous window). The app pays for its own checks,
+  and needs `db: true`. Collection names start with a letter, so no document
+  shares the prefix; the data browser leaves these items out.
+- **Exact under concurrency.** The write adds only while the count leaves
+  room, so racing checks never let more than `max` through (an emulator test
+  races 64 checks against `max: 10`). A use that doesn't fit isn't counted, so
+  a client that waits `retryAfter` gets back in instead of staying locked out
+  while it retries.
+- **Floods add no writes.** Each instance remembers the counts it last saw,
+  for up to 10,000 counters. Counts only grow within a window, so when those
+  alone are over the limit the check is refused without a call: a client
+  hammering one Web Function environment costs one write, not one per
+  request. This replaces the in-memory block lists apps wrote themselves.
+- **Keys.** The default is `clientInfo`'s network (the IPv4 address or the
+  IPv6 /64), from the edge's address header, which clients can't forge.
+  `key` counts by anything else, such as a user id. The worker has no request,
+  so it must pass one; the types say so. Telemetry carries the limit's name,
+  never its key: keys are often client addresses.
+- **Errors.** `enforce` and the middleware fail with `RateLimited` (in
+  `@ericminassian/platform/api`): a 429 with `Retry-After` in whole seconds and
+  `retryAfter` in the body, decoded by the generated web client. The header
+  rides on the error class itself, as `HttpApiSchema.encodeToWithHeaders`
+  would attach it, so apps declare and fail with one class. A `cost` above
+  `max`, a bad name or `per`, and a missing `db` are defects naming the fix.
+- **No platform-wide floor yet.** An AWS WAF web ACL with a rate-based rule
+  on the router would cover every app, static files included, but costs about
+  $6 a month fixed (roughly three times the platform's baseline) plus $0.60
+  per million requests, and counts per IP over 1–10 minute windows: too coarse
+  to replace per-app limits. Revisit if a flood hits static files.
+
 ## Deploy flow
 
 ```
@@ -451,14 +507,16 @@ writing any instrumentation:
   - `job`: every queue, event, cron or invoke run
   - `span`: SDK calls (including `realtime.publish` and `email.send`) and outgoing `fetch`
   - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
+  - `limit`: every `RateLimits` check, with the limit's name and whether it fit
   - All carry `trace`. Traces propagate through queue message attributes and
     event detail.
 - **Pipeline.** One account-level CloudWatch Logs subscription filter (one per
   account and region; destination is the control plane worker) forwards
-  `req|err|job|metric|env` lines to the telemetry processor. It writes:
+  `req|err|job|metric|limit|env` lines to the telemetry processor. It writes:
   - per-minute, per-hour and per-day rollups to `platform-telemetry`: request
     counts by status class, a fixed-bucket latency histogram (so DynamoDB
-    `ADD` works), per-route, per-job and custom-metric series, with TTL;
+    `ADD` works), per-route, per-job, custom-metric and rate-limit series,
+    with TTL;
   - Sentry-style error groups. A new group sends an alert and can open a
     GitHub issue in the app repo.
 - **No CloudWatch custom metrics, alarms or dashboards per app.** These are
@@ -467,7 +525,8 @@ writing any instrumentation:
 - **Console** (`platform.ericminassian.com`):
   - **Home:** every app with status, traffic, error rate, p95, cost and last deploy.
   - **Per app:**
-    - Overview graphs and per-route stats.
+    - Overview graphs and per-route stats, and rate limits (allowed and
+      denied checks per limit) for stages that checked any.
     - Logs search plus live tail (CloudWatch Live Tail over SSE).
     - Trace waterfalls; grouped errors.
     - Jobs: queue depth, DLQ redrive, cron run-now.
@@ -549,6 +608,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Cognito                                             | free ≤ 10k MAU                                                                                                               |
 | Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50)                                      |
 | Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
+| Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
 Baseline is about $1–3 a month. `eric-minassian/aws` already puts a budget on
@@ -647,6 +707,9 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     gets with the foundation deploy. Until AWS grants it, apps can only mail
     verified addresses and the user pool keeps Cognito's sender. See
     `docs/SETUP.md` step 11.
+- **Rate limits have no platform-wide floor.** Per-app limits run in the
+  Web Function, so a flood still reaches it (and static files aren't
+  covered). The WAF option is in [Rate limits](#rate-limits).
 - **Custom domains** (non-`ericminassian.com`) need their own certificate.
   The plan is a second, multi-tenant (SaaS Manager) distribution reusing the
   same function and KVS.
@@ -675,4 +738,5 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                    |
 | One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                   |
 | The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                     |
+| Rate limits: a sliding window in the stage's table, no WAF                            | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically. WAF would triple the fixed cost for coarse per-IP counts.       |
 | us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |

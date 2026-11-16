@@ -78,11 +78,12 @@ import {
   Metrics,
   Platform,
   Queues,
+  RateLimits,
   Realtime,
   Secrets,
   Storage,
 } from '@ericminassian/platform';
-import { Authentication, User, loginUrl, logoutUrl } from '@ericminassian/platform/api'; // browser-safe
+import { Authentication, RateLimited, User, loginUrl, logoutUrl } from '@ericminassian/platform/api'; // browser-safe
 import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 ```
 
@@ -108,6 +109,8 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
 | `loginUrl/logoutUrl`             | `loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                          |
 | `clientInfo`                     | `const client = yield* clientInfo`: `client.network` to rate-limit by, `client.ip`, `client.country`      |
+| `RateLimits`                     | `yield* limits.enforce('signups', { max: 5, per: '1 hour' })`: per client network; fails `RateLimited`    |
+| `RateLimits.middleware`          | `RateLimits.middleware(WriteLimit, { max: 120, per: '1 minute' })`: 429 for every request behind it       |
 | `Jobs`                           | `yield* jobs.invoke('reindex', { id })`: runs the worker's `invoke.reindex` handler asynchronously        |
 | `Metrics`                        | `yield* metrics.count('signups')`, `metrics.value('cart.total', 42.5, 'usd')`: free, shown in the console |
 | `Effect.log*`                    | `Effect.logInfo('charged').pipe(Effect.annotateLogs({ orderId }))`: structured, traced, searchable        |
@@ -177,7 +180,28 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   4. Read it in a layer or handler: `Redacted.value(yield* secrets.get('STRIPE_KEY'))`.
 - **Protected endpoints.** Add `.middleware(Authentication)` to the group and read `yield* CurrentUser`.
   To require sign-in for everything, including pages, set `auth: { required: true }`.
-- **Rate limits and dedupe.** Key abuse controls (rate limits, one vote per client, signup throttles) by
+- **Rate limits.** Limit public and no-auth endpoints: signups per network, writes per client per
+  minute, sends per user per day. Counts live in the stage's table, so `db: true` must be set.
+  - Whole endpoints, per client: declare a middleware in `src/api.ts`,
+    `class WriteLimit extends HttpApiMiddleware.Service<WriteLimit>()('WriteLimit', { error: RateLimited }) {}`,
+    and add `.middleware(WriteLimit)` to the group or endpoint. Provide its limit in `src/http.ts`, next to
+    the handlers: `Layer.provide(RateLimits.middleware(WriteLimit, { max: 120, per: '1 minute' }))`. A
+    client over the limit gets a 429 with `Retry-After` before the handler runs. Endpoints behind one
+    middleware share its count.
+  - In a handler or a worker job: take `const limits = yield* RateLimits` in the group's setup, then
+    `yield* limits.enforce('signups', { max: 5, per: '1 hour' })`, which fails with `RateLimited`; list
+    `RateLimited` in the endpoint's `error`. `limits.check(...)` returns `{ ok, remaining, retryAfter }`
+    instead of failing.
+  - The key defaults to the client's network. Pass `key: user.id` to count per user; the worker has no
+    request, so it always passes one. `cost: stroke.points.length` counts one use as several; bound it in
+    the payload's schema, since a cost above `max` is a defect.
+  - A limit allows `max` uses in any span of `per` (1 second to 30 days): the previous window counts in
+    proportion to how much of it is still inside `per`. A use that doesn't fit isn't counted, so a client
+    that waits `retryAfter` gets back in. Use one `max` per name.
+  - The web client gets `RateLimited` with `retryAfter` (whole seconds) as a typed error.
+  - The console's Overview and `plat metrics` show allowed and denied checks per limit.
+  - Unit tests count in memory: `Platform.Memory`'s `rateLimits` lists every check with its key.
+- **Client keys and dedupe.** Key abuse controls (one vote per client, signup throttles) by
   `client.network` from `yield* clientInfo`: the IPv4 address, or the IPv6 /64, since one IPv6 client
   rotates through the addresses in its /64. The edge sets the client address and replaces any copy a
   client sends, so trust it, and never read `X-Forwarded-For` or other headers yourself. `client.country`
@@ -185,7 +209,8 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   - One per client: `votes.insert({ pollId, network: client.network })` fails `DocumentExists` the second
     time; add `ttl` to let it lapse.
   - Unit test requests need the address: `headers: clientHeaders('203.0.113.7')` from
-    `@ericminassian/platform/testing`. Without it, `clientInfo` is a defect (500).
+    `@ericminassian/platform/testing`. Without it, `clientInfo` (and a rate limit keyed by it) is a defect
+    (500).
 - **Plain config.** Use `env: { FEATURE_X: 'on' }` and read it with `yield* Config.String('FEATURE_X')`.
   Not for secrets.
 - **Custom metric.** `yield* metrics.count('name')` or `metrics.value('name', n)`. It appears in the
@@ -307,7 +332,7 @@ Browser tests need Chromium once: `pnpm exec playwright install chromium`.
 plat logs --since 30m [--stage pr-12] [--filter "error"] [--follow]
 plat errors                         # grouped errors with sample stack + trace id
 plat traces <traceId>               # one request across server → queue → worker
-plat metrics --since 6h             # requests, 5xx, p95, cold starts, per-route and per-job stats
+plat metrics --since 6h             # requests, 5xx, p95, cold starts, per-route, per-job and rate-limit stats
 plat data todos --partition userId=<id>
 plat deployments / plat stages / plat rollback
 ```
