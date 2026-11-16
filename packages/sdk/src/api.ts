@@ -11,7 +11,7 @@
  * session and provides `CurrentUser` to every endpoint behind the middleware.
  */
 import { loginPath, logoutPath, UNAUTHORIZED_BODY } from '@ericminassian/platform-core/auth';
-import { Context, Schema } from 'effect';
+import { Context, Duration, Schema } from 'effect';
 import { HttpApiMiddleware } from 'effect/http-api';
 
 /** A signed-in user. `id` is stable and shared across all platform apps. */
@@ -49,6 +49,64 @@ export class InvalidCursor extends Schema.TaggedError<InvalidCursor, { readonly 
   { message: Schema.String },
   { httpApiStatus: 400 },
 ) {}
+
+/** The body of a `RateLimited` 429. */
+const RateLimitedBody = Schema.TaggedStruct('RateLimited', {
+  message: Schema.String,
+  retryAfter: Schema.Int,
+}).annotate({ httpApiStatus: 429 });
+
+/** Optional when decoding, so a proxy that drops the header can't turn a 429 into a decode error. */
+const RetryAfterHeader = Schema.Struct({ 'retry-after': Schema.optionalKey(Schema.String) });
+
+/**
+ * 429 for a request over a rate limit (`RateLimits`), with a `Retry-After`
+ * header. List it in an endpoint's `error` to answer with it, or declare a
+ * middleware with it for `RateLimits.middleware`:
+ *
+ *   class WriteLimit extends HttpApiMiddleware.Service<WriteLimit>()('WriteLimit', { error: RateLimited }) {}
+ */
+export class RateLimited extends Schema.TaggedError<RateLimited, { readonly brand: unique symbol }>()(
+  'RateLimited',
+  {
+    message: Schema.String,
+    /** Whole seconds until a retry can succeed, as in the `Retry-After` header. */
+    retryAfter: Schema.Int,
+  },
+  {
+    httpApiStatus: 429,
+    // What HttpApiSchema.encodeToWithHeaders would attach, on the class itself, so the one
+    // class both is the error handlers fail with and carries the header on the wire.
+    '~httpApiWithHeaders': {
+      body: RateLimitedBody,
+      headers: RetryAfterHeader,
+      bodyCodec: RateLimitedBody,
+      headersCodec: RetryAfterHeader,
+      transformation: {
+        decode: ({ body }: { readonly body: unknown }) => {
+          const { message, retryAfter } = body as typeof RateLimitedBody.Type;
+          return new RateLimited({ message, retryAfter });
+        },
+        encode: (value: unknown) => {
+          const { message, retryAfter } = value as RateLimited;
+          return {
+            body: { _tag: 'RateLimited', message, retryAfter },
+            headers: { 'retry-after': String(retryAfter) },
+          };
+        },
+      },
+    },
+  },
+) {
+  /** A `RateLimited` asking the client to wait `retryAfter`, rounded up to whole seconds (at least 1). */
+  static readonly after = (retryAfter: Duration.Input): RateLimited => {
+    const seconds = Math.max(1, Math.ceil(Duration.toSeconds(retryAfter)));
+    return new RateLimited({
+      message: `Too many requests. Try again in ${seconds} second${seconds === 1 ? '' : 's'}.`,
+      retryAfter: seconds,
+    });
+  };
+}
 
 /**
  * Requires a signed-in user (the platform session cookie, or a bearer ID token)

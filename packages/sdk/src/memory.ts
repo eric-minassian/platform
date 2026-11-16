@@ -4,6 +4,7 @@ import { Clock, Context, Effect, Layer, Option, Redacted } from 'effect';
 import { HttpServerRequest } from 'effect/http';
 import type { User } from './api.ts';
 import { Db } from './db.ts';
+import { makeRateLimits, memoryCounters, type RateLimitCheck, RateLimits } from './rate-limit.ts';
 import { emailRefusals } from './runtime/email.ts';
 import { encodeRealtimeEvents, realtimeChannelError } from './runtime/realtime.ts';
 import { objectKey, type StoredObject } from './runtime/storage.ts';
@@ -71,6 +72,8 @@ export class PlatformMemory extends Context.Service<
     /** Messages `Email.send` accepted, oldest first. */
     readonly emails: Effect.Effect<ReadonlyArray<SentEmail>>;
     readonly metrics: Effect.Effect<ReadonlyArray<RecordedMetric>>;
+    /** Every `RateLimits` check, oldest first, with the key it counted and whether it fit. */
+    readonly rateLimits: Effect.Effect<ReadonlyArray<RateLimitCheck>>;
     /** Jobs invoked with `Jobs.invoke`; nothing runs them. */
     readonly invoked: Effect.Effect<ReadonlyArray<InvokedJob>>;
   }
@@ -110,6 +113,7 @@ export const layerMemory = (
   | Jobs
   | Metrics
   | Queues
+  | RateLimits
   | Realtime
   | Secrets
   | Storage
@@ -132,6 +136,7 @@ export const layerMemory = (
           });
         const recorded: RecordedMetric[] = [];
         const invoked: InvokedJob[] = [];
+        const limitChecks: RateLimitCheck[] = [];
         const users = new Map((options.users ?? []).map((u) => [u.id, u]));
         const secrets = new Map(Object.entries(options.secrets ?? {}));
         const appInfo = AppInfo.of({
@@ -221,6 +226,10 @@ export const layerMemory = (
             }),
           ),
           Context.add(Email, Email.of({ send: sendEmail })),
+          Context.add(
+            RateLimits,
+            makeRateLimits(memoryCounters(), (check) => void limitChecks.push(check)),
+          ),
           Context.add(Storage, Storage.of({ store: memoryStores() })),
           Context.add(
             Secrets,
@@ -259,6 +268,7 @@ export const layerMemory = (
               realtime: Effect.sync(() => [...realtimeEvents]),
               emails: Effect.sync(() => [...emails]),
               metrics: Effect.sync(() => [...recorded]),
+              rateLimits: Effect.sync(() => [...limitChecks]),
               invoked: Effect.sync(() => [...invoked]),
             }),
           ),

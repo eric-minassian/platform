@@ -25,6 +25,7 @@ export {
   InvalidCursor,
   loginUrl,
   logoutUrl,
+  RateLimited,
   Unauthorized,
   User,
 } from './api.ts';
@@ -50,6 +51,14 @@ export {
 export { AuthenticationLayer, toFetchHandler } from './http.ts';
 export { observability } from './observability.ts';
 export * as Platform from './platform.ts';
+export {
+  type RateLimitCheck,
+  type RateLimitMiddleware,
+  type RateLimitOptions,
+  type RateLimitPolicy,
+  type RateLimitResult,
+  RateLimits,
+} from './rate-limit.ts';
 export type {
   ChannelEvent,
   ChannelName,

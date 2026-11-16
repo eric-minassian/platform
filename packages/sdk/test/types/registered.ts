@@ -12,12 +12,17 @@ import {
   Platform,
   type QueueMessage,
   Queues,
+  RateLimited,
+  type RateLimitResult,
+  RateLimits,
   Realtime,
   Secrets,
   Storage,
 } from '@ericminassian/platform';
 import { RealtimeClient, type RealtimeStatus } from '@ericminassian/platform/client';
-import { Context, Effect, Schema, Stream } from 'effect';
+import { Context, Effect, Layer, Schema, Stream } from 'effect';
+import type { HttpServerRequest } from 'effect/http';
+import { HttpApiMiddleware } from 'effect/http-api';
 import type { BoardEvent, Cursor, EmailJob, Notice } from './plat.config.ts';
 
 export const usage = Effect.gen(function* () {
@@ -260,4 +265,38 @@ export const counters = Effect.gen(function* () {
   // @ts-expect-error conditions name the document's fields, with their types
   yield* posts.update({ id: 'p' }, {}, { if: { likes: 'zero' } });
   return [created, liked, unchecked, plain, guarded, unguarded];
+});
+
+class WriteLimit extends HttpApiMiddleware.Service<WriteLimit>()('WriteLimit', { error: RateLimited }) {}
+class OtherMiddleware extends HttpApiMiddleware.Service<OtherMiddleware>()('OtherMiddleware') {}
+
+export const rateLimits = Effect.gen(function* () {
+  const limits = yield* RateLimits;
+  // With a key, a check runs anywhere (a worker job): it needs no request.
+  const keyed: Effect.Effect<RateLimitResult> = limits.check('sends', { key: 'u1', max: 3, per: '1 day' });
+  // @ts-expect-error without a key, the check counts the client's network, from the request
+  const unkeyed: Effect.Effect<RateLimitResult> = limits.check('signups', { max: 5, per: '1 hour' });
+  const fromRequest: Effect.Effect<RateLimitResult, never, HttpServerRequest.HttpServerRequest> =
+    limits.check('signups', { max: 5, per: '1 hour' });
+  const enforced: Effect.Effect<RateLimitResult, RateLimited> = limits.enforce('sends', {
+    key: 'u1',
+    max: 3,
+    per: '1 day',
+  });
+  // @ts-expect-error enforce fails with RateLimited
+  const unenforced: Effect.Effect<RateLimitResult> = limits.enforce('sends', {
+    key: 'u1',
+    max: 3,
+    per: '1 day',
+  });
+  // @ts-expect-error `per` is a duration
+  yield* limits.check('sends', { key: 'u1', max: 3, per: 'daily' });
+
+  const layer: Layer.Layer<WriteLimit, never, RateLimits> = RateLimits.middleware(WriteLimit, {
+    max: 120,
+    per: '1 minute',
+  });
+  // @ts-expect-error the middleware must be declared with `{ error: RateLimited }`
+  RateLimits.middleware(OtherMiddleware, { max: 120, per: '1 minute' });
+  return [keyed, unkeyed, fromRequest, enforced, unenforced, layer];
 });

@@ -79,7 +79,8 @@
               "dbContract",
               "batchContract",
               "transactContract",
-              "countersContract"
+              "countersContract",
+              "rateLimitContract"
             ]
           }
         ],

@@ -253,6 +253,8 @@ function pretty(e: TelemetryEvent): string {
     }
     case 'metric':
       return c('dim', `${time} metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`);
+    case 'limit':
+      return e.ok ? c('dim', `${time} limit ${e.name} ok`) : c('yellow', `${time} limit ${e.name} over`);
     case 'env':
       return c('dim', `${time} ${e.runtime} ${e.event}${e.initMs !== undefined ? ` (${e.initMs}ms)` : ''}`);
     default:

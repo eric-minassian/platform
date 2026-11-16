@@ -37,6 +37,7 @@ import {
   Events,
   Platform,
   Queues,
+  RateLimits,
   Secrets,
   Storage,
   toFetchHandler,
@@ -45,6 +46,7 @@ import {
 import { setBindings } from '../../src/runtime/bindings.ts';
 import { captureTelemetry, createPlatformFetch, resetPlatform } from '../../src/testing.ts';
 import { batchContract, countersContract, dbContract, transactContract } from '../effect-db-contract.ts';
+import { rateLimitContract } from '../rate-limit-contract.ts';
 
 const region = process.env.AWS_REGION ?? 'us-east-1';
 const endpoint = process.env.AWS_ENDPOINT_URL;
@@ -239,6 +241,20 @@ describe('against the AWS Emulator', () => {
       _ttl: { N: '120' },
       gsi1pk: { S: 'ctr-usage#byPlan#pro' },
       gsi1sk: { S: 'c1' },
+    });
+  });
+
+  it('rate limits: count like the in-memory counters, with exactly max of 64 racing checks', async () => {
+    await Effect.runPromise(rateLimitContract('rl').pipe(Effect.provide(RateLimits.layer)));
+    // The counter as stored: the window's count, and an expiry once the next window ends.
+    const per = 30 * 86_400_000;
+    const window = Math.floor(Date.now() / per);
+    const ddb = new DynamoDBClient(cfg);
+    const key = { pk: { S: '_rl#rl-cost#k' }, sk: { S: `${per}#${window}` } };
+    expect((await ddb.send(new GetItemCommand({ TableName: base, Key: key }))).Item).toEqual({
+      ...key,
+      n: { N: '100' },
+      _ttl: { N: String(Math.ceil(((window + 2) * per) / 1000)) },
     });
   });
 
