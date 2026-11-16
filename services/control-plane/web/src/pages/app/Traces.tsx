@@ -1,5 +1,5 @@
 import { useAtomValue } from '@effect/atom-react';
-import type { TelemetryEvent } from '@ericminassian/platform-core';
+import { SLOW_TRACE_MS, type TelemetryEvent, TRACE_SAMPLE_RATE } from '@ericminassian/platform-core';
 import { Atom } from 'effect/reactivity';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
@@ -11,12 +11,23 @@ import { useApp } from '../AppLayout.tsx';
 interface Row {
   e: TelemetryEvent;
   label: string;
+  /** The calls of a request or job whose spans weren't written. */
+  unrecorded?: string;
   start: number;
   dur: number;
   tone: Tone;
 }
 
 const durOf = (e: TelemetryEvent): number => ('dur' in e && typeof e.dur === 'number' ? e.dur : 0);
+
+const UNRECORDED_HINT = `Calls are recorded for requests and jobs that fail or take ${SLOW_TRACE_MS / 1_000}s or longer, and for 1 in ${Math.round(1 / TRACE_SAMPLE_RATE)} traces.`;
+
+/** `12 calls, 34ms, not recorded`; `more calls` when the others were (a request past the cap). */
+function unrecorded(e: TelemetryEvent): string | undefined {
+  if ((e.t !== 'req' && e.t !== 'job') || !e.calls) return undefined;
+  const calls = `${e.calls} ${e.span ? 'more ' : ''}${e.calls === 1 ? 'call' : 'calls'}`;
+  return `${calls}, ${fmtMs(e.callMs ?? 0)}, not recorded`;
+}
 
 /** Lays events out on one timeline. Events log at their end, so start = ts - dur unless a start offset is given. */
 export function layout(events: readonly TelemetryEvent[]): { rows: Row[]; total: number } {
@@ -38,6 +49,7 @@ export function layout(events: readonly TelemetryEvent[]): { rows: Row[]; total:
               : e.t === 'log'
                 ? e.msg
                 : e.t;
+    const note = unrecorded(e);
     const failed = (e.t === 'span' || e.t === 'job') && e.status === 'error';
     const tone: Tone =
       e.t === 'err' || failed || (e.t === 'req' && e.status >= 500)
@@ -45,7 +57,7 @@ export function layout(events: readonly TelemetryEvent[]): { rows: Row[]; total:
         : e.t === 'log'
           ? 'muted'
           : 'info';
-    return { e, label, start, dur, tone };
+    return { e, label, ...(note ? { unrecorded: note } : {}), start, dur, tone };
   });
   const total = Math.max(1, ...rows.map((r) => r.start + r.dur));
   return { rows: rows.toSorted((a, b) => a.start - b.start), total };
@@ -74,11 +86,18 @@ function Waterfall({ events }: { events: readonly TelemetryEvent[] }) {
           key={i}
           className="grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-center gap-3 py-0.5 text-[12px]"
         >
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-baseline gap-2">
             <Badge tone={r.tone}>{r.e.t}</Badge>
-            <span className="truncate" title={r.label}>
-              {r.label}
-            </span>
+            <div className="min-w-0">
+              <div className="truncate" title={r.label}>
+                {r.label}
+              </div>
+              {r.unrecorded && (
+                <div className="truncate text-[11px] text-muted" title={UNRECORDED_HINT}>
+                  {r.unrecorded}
+                </div>
+              )}
+            </div>
           </div>
           <div className="relative h-4 rounded bg-panel-2">
             <div

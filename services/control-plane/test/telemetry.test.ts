@@ -5,6 +5,7 @@ import type { TelemetryEvent } from '@ericminassian/platform-core';
 import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { GitHub } from '../src/github.ts';
+import { toLogLine } from '../src/logs.ts';
 import { aggregate, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
 import {
   parseRange,
@@ -43,6 +44,32 @@ describe('parseLogMessage', () => {
     expect(parseLogMessage(JSON.stringify({ level: 'INFO', message: line }))?.t).toBe('req');
     expect(parseLogMessage('START RequestId: abc')).toBeNull();
     expect(parseLogMessage('{"not":"platform"}')).toBeNull();
+  });
+
+  it('reads compact lines: no path when it is the route, spans counted, no first attempt', () => {
+    const { path, ...compact } = req({ calls: 3, callMs: 12 }) as Extract<TelemetryEvent, { t: 'req' }>;
+    expect(path).toBe('/api/todos');
+    const line = JSON.stringify(compact);
+    expect(parseLogMessage(line)).toEqual(compact);
+    expect(toLogLine('web', T, line)).toMatchObject({ message: 'GET /api/todos 200 42ms', event: compact });
+    const job = {
+      ...base,
+      t: 'job',
+      ts: T,
+      kind: 'queue',
+      name: 'emails',
+      status: 'ok',
+      dur: 7,
+      calls: 1,
+      callMs: 3,
+    };
+    expect(parseLogMessage(JSON.stringify(job))).toEqual(job);
+    const { rollups } = aggregate([compact, req({ route: '/api/todos/:id', path: '/api/todos/7' })]);
+    const routes = rollups.filter((r) => r.pk === 'r#todo#prod#1h').map((r) => [r.sk, r.add.req]);
+    expect(routes).toEqual([
+      ['2026-11-14T10:00:00.000Z#GET /api/todos', 1],
+      ['2026-11-14T10:00:00.000Z#GET /api/todos/:id', 1],
+    ]);
   });
 });
 
