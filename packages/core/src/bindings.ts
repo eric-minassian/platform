@@ -7,7 +7,8 @@
 export const BINDINGS_ENV = 'PLATFORM_BINDINGS';
 
 export interface Bindings {
-  v: 1;
+  /** 2 since jobs were pushed (SDK 0.4.0): `queues` gave way to `jobs`. */
+  v: 2;
   app: string;
   stage: string;
   /** Public hostname, e.g. `foo.ericminassian.com` or `foo.localhost:3000`. */
@@ -17,16 +18,19 @@ export interface Bindings {
   /** Deployment id currently running. */
   revision: string;
   region: string;
+  /** Account id, so the SDK can build ARNs from the names below. */
+  account: string;
   /** DynamoDB table backing `db` (present when `db: true`). */
   table?: string;
-  queues: Record<string, { url: string; arn: string }>;
+  /** Queues, events and crons (present when the stage has a worker). */
+  jobs?: JobBindings;
   bus?: { name: string; arn: string };
   storage?: StorageBindings;
   secrets: { path: string; sharedPath: string; names: readonly string[] };
   auth?: AuthBindings;
   realtime?: RealtimeBindings;
   email?: EmailBindings;
-  /** Worker function name, for direct `invoke` jobs. */
+  /** Worker function name: direct `invoke` jobs, and every handler not in `jobs.fns`. */
   worker?: string;
   /**
    * The stage's secret (32 random bytes, base64url), kept in SSM at
@@ -34,6 +38,26 @@ export interface Bindings {
    * to seal `db` query cursors. Absent on stages deployed before it existed.
    */
   stageKey?: string;
+}
+
+/**
+ * Where jobs go and how often they're tried. Handlers are keyed `kind:name`
+ * (`handlerKey`); only what differs from the default is listed, since Lambda
+ * caps a function's environment at 4 KB.
+ */
+export interface JobBindings {
+  /** Declared queues. */
+  queues: readonly string[];
+  /** Handlers that run in a function of their own, by key: its name. The rest run on `worker`. */
+  fns: Record<string, string>;
+  /** Handlers whose attempts aren't their kind's `DEFAULT_ATTEMPTS`, by key. */
+  attempts: Record<string, number>;
+  /** The stage's dead-letter queue's URL (`names.deadLetters`). */
+  dead: string;
+  /** The stage's schedule group, where retries and delayed sends are one-shot schedules. */
+  group: string;
+  /** The role Scheduler invokes them as: the stage's own. */
+  role: string;
 }
 
 export interface AuthBindings {
@@ -97,6 +121,6 @@ export function decodeBindings(raw: string | undefined): Bindings {
     );
   }
   const b = JSON.parse(raw) as Bindings;
-  if (b.v !== 1) throw new Error(`Unsupported ${BINDINGS_ENV} version ${String((b as { v?: unknown }).v)}`);
+  if (b.v !== 2) throw new Error(`Unsupported ${BINDINGS_ENV} version ${String((b as { v?: unknown }).v)}`);
   return b;
 }

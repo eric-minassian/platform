@@ -116,8 +116,15 @@ export const names = {
   },
   /** IAM role name; created under {@link IAM_APP_PATH}. */
   role: (app: string, stage: string) => `${app}--${stage}`,
-  queue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}`,
-  deadLetterQueue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}--dlq`,
+  /**
+   * The stage's dead-letter queue (SQS, never polled): every job that failed
+   * its last attempt. Queue keys can't contain `--` and the old dead-letter
+   * queues end in `--dlq`, so this can't be a pre-0.4.0 queue's name.
+   */
+  deadLetters: (app: string, stage: string) => `${app}--${stage}--jobs--dead`,
+  /** A queue's SQS queue and its dead-letter queue, before queues were pushed (0.4.0). */
+  legacyQueue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}`,
+  legacyDeadLetterQueue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}--dlq`,
   eventBus: (app: string, stage: string) => `${app}--${stage}`,
   /** EventBridge rule names are ≤ 64 chars; long event types are hashed. */
   eventRule: (app: string, stage: string, eventType: string) =>

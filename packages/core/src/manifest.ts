@@ -2,6 +2,7 @@ import { Effect, Schema } from 'effect';
 import { FARGATE_CPUS, type FargateCpu, fargateSizeIssue } from './compute.ts';
 import { validateCron } from './cron.ts';
 import { EMAIL_DEFAULT_DAILY_LIMIT, EMAIL_NAME_MESSAGE, EMAIL_NAME_PATTERN } from './email.ts';
+import { DEFAULT_ATTEMPTS, MAX_ATTEMPTS } from './jobs.ts';
 import {
   APP_NAME_PATTERN,
   ENV_NAME_PATTERN,
@@ -87,19 +88,31 @@ const HandlerFields = {
   timeoutSeconds: Schema.optional(timeoutSeconds),
   memoryMb: Schema.optional(memoryMb),
 };
-const HandlerSchema = Schema.Struct(HandlerFields);
+const attempts = intBetween(1, MAX_ATTEMPTS);
+/** An event handler's settings. Unset attempts are `DEFAULT_ATTEMPTS.event`. */
+const HandlerSchema = Schema.Struct({ ...HandlerFields, maxAttempts: Schema.optional(attempts) });
 
-const QueueSchema = Schema.Struct({
-  batchSize: intBetween(1, 10).pipe(orElse(10)),
-  visibilityTimeoutSeconds: Schema.optional(intBetween(0, 43200)),
-  maxReceiveCount: intBetween(1, 1000).pipe(orElse(5)),
-  concurrency: Schema.optional(intBetween(2, 1000)),
+const QueueFields = {
+  maxAttempts: attempts.pipe(orElse(DEFAULT_ATTEMPTS.queue)),
+  concurrency: Schema.optional(intBetween(1, 1000)),
   ...HandlerFields,
+};
+
+/** A field that was removed: present at all, it fails with `message`. */
+const removed = (message: string) => Schema.optional(Schema.Unknown.check(Schema.makeFilter(() => message)));
+
+// Queues were SQS queues polled by Lambda until 0.4.0; these settings had no meaning after.
+const QueueSchema = Schema.Struct({
+  ...QueueFields,
+  batchSize: removed('removed in 0.4.0: a queue delivers one message per run'),
+  visibilityTimeoutSeconds: removed("removed in 0.4.0: a run has its handler's timeoutSeconds"),
+  maxReceiveCount: removed('renamed to maxAttempts in 0.4.0'),
 });
 
 const CronScheduleSchema = Schema.Struct({
   schedule: Schema.String,
   timezone: Schema.optional(Schema.String),
+  maxAttempts: Schema.optional(attempts),
   ...HandlerFields,
 });
 
@@ -249,20 +262,34 @@ export interface HandlerConfig {
   memoryMb?: number;
 }
 
-/** Declare one with `queue<Body>({ ... })` to type what is sent and received. */
-export interface QueueConfig<Body = unknown> extends Payload<Body>, HandlerConfig {
-  /** Messages per worker invocation, 1-10. Default 10. */
-  batchSize?: number;
-  /** Defaults to 6x the handler's timeout, as AWS recommends for Lambda consumers. */
-  visibilityTimeoutSeconds?: number;
-  /** Deliveries before a message moves to the dead-letter queue, 1-1000. Default 5. */
-  maxReceiveCount?: number;
-  /** Max concurrent worker invocations draining this queue, 2-1000. */
+/** How often a failed run is tried again, for every kind of handler. */
+export interface RetryConfig {
+  /**
+   * Runs before the job goes to the stage's dead-letter queue, 1-100: the
+   * first, then retries 1, 2, 4 … minutes apart (at most an hour). Default 5
+   * for queues, 3 for events and crons.
+   */
+  maxAttempts?: number;
+}
+
+/**
+ * Declare one with `queue<Body>({ ... })` to type what is sent and received.
+ * Each message is one run of its handler, at least once and in no set order.
+ */
+export interface QueueConfig<Body = unknown> extends Payload<Body>, HandlerConfig, RetryConfig {
+  /**
+   * At most this many runs at once, 1-1000. Setting it runs the handler in a
+   * function of its own with that much reserved Lambda concurrency; messages
+   * past it wait (up to six hours) instead of failing.
+   */
   concurrency?: number;
 }
 
+/** Event handler options. */
+export type EventOptions = HandlerConfig & RetryConfig;
+
 /** Declare one with `event<Detail>()` to type what is published and handled. */
-export type EventConfig<Detail = unknown> = Payload<Detail> & HandlerConfig;
+export type EventConfig<Detail = unknown> = Payload<Detail> & EventOptions;
 
 /**
  * 5-field cron in UTC (`0 3 * * *`) or `rate(5 minutes)`; the object form adds
@@ -270,7 +297,7 @@ export type EventConfig<Detail = unknown> = Payload<Detail> & HandlerConfig;
  */
 export type CronConfig = string | CronSchedule;
 
-export interface CronSchedule extends HandlerConfig {
+export interface CronSchedule extends HandlerConfig, RetryConfig {
   schedule: string;
   /** IANA name, e.g. `America/Los_Angeles`. Default UTC. */
   timezone?: string;
@@ -414,13 +441,13 @@ export function defineApp<const T extends AppConfig>(config: T & Exact<T, AppCon
   return config;
 }
 
-/** A queue whose messages are `Body`: `queues: { emails: queue<EmailJob>({ batchSize: 5 }) }`. */
+/** A queue whose messages are `Body`: `queues: { emails: queue<EmailJob>({ maxAttempts: 3 }) }`. */
 export function queue<Body>(options: QueueConfig = {}): QueueConfig<Body> {
   return options as QueueConfig<Body>;
 }
 
 /** An event subscription whose detail is `Detail`: `events: { 'todo.created': event<TodoCreated>() }`. */
-export function event<Detail>(options: HandlerConfig = {}): EventConfig<Detail> {
+export function event<Detail>(options: EventOptions = {}): EventConfig<Detail> {
   return options;
 }
 
@@ -444,10 +471,7 @@ export const ResolvedManifest = Schema.Struct({
   worker: Schema.optional(WorkerSchema),
   auth: Schema.Struct({ enabled: Schema.Boolean, required: Schema.Boolean }),
   db: Schema.Boolean,
-  queues: Schema.Record(
-    Schema.String,
-    Schema.Struct({ ...QueueSchema.fields, visibilityTimeoutSeconds: Schema.Finite }),
-  ),
+  queues: Schema.Record(Schema.String, Schema.Struct(QueueFields)),
   events: Schema.Array(Schema.String),
   /**
    * Each event handler's own settings, by type. Absent from deployments
@@ -519,14 +543,15 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     typeof m.auth === 'boolean'
       ? { enabled: m.auth, required: false }
       : { enabled: true, required: m.auth.required };
+  // Validation refused the removed queue settings, so only the current ones remain.
   const queues: ResolvedManifest['queues'] = Object.fromEntries(
     Object.entries(m.queues).map(([key, q]) => [
       key,
       {
-        ...q,
-        visibilityTimeoutSeconds:
-          q.visibilityTimeoutSeconds ??
-          (q.timeoutSeconds ?? worker?.timeoutSeconds ?? WORKER_TIMEOUT_SECONDS) * 6,
+        maxAttempts: q.maxAttempts,
+        ...(q.concurrency !== undefined ? { concurrency: q.concurrency } : {}),
+        ...(q.timeoutSeconds !== undefined ? { timeoutSeconds: q.timeoutSeconds } : {}),
+        ...(q.memoryMb !== undefined ? { memoryMb: q.memoryMb } : {}),
       },
     ]),
   );
@@ -587,7 +612,14 @@ export interface HandlerSettings {
   name: string;
   timeoutSeconds: number;
   memoryMb: number;
-  /** It sets its own memory or timeout, so it runs in a function of its own (`names.handlerFunction`). */
+  /** Runs before its job is dead-lettered. */
+  maxAttempts: number;
+  /** Reserved concurrency of its function (queues that set `concurrency`). */
+  concurrency?: number;
+  /**
+   * It sets its own memory, timeout or (a queue) concurrency, so it runs in a
+   * function of its own (`names.handlerFunction`).
+   */
   own: boolean;
 }
 
@@ -596,7 +628,10 @@ type WorkerManifest = Pick<ResolvedManifest, 'worker' | 'queues' | 'eventOptions
 /** Each kind's handlers, by name, with what they set. */
 const declaredHandlers = (
   m: WorkerManifest,
-): Record<HandlerKind, { readonly [name: string]: HandlerConfig }> => ({
+): Record<
+  HandlerKind,
+  { readonly [name: string]: HandlerConfig & { maxAttempts?: number; concurrency?: number } }
+> => ({
   queue: m.queues,
   event: m.eventOptions,
   cron: m.crons,
@@ -605,12 +640,16 @@ const declaredHandlers = (
 /** A handler's settings: its own, and the worker's for any it doesn't set. */
 export function handlerSettings(m: WorkerManifest, kind: HandlerKind, name: string): HandlerSettings {
   const own = declaredHandlers(m)[kind][name] ?? {};
+  // Reserved concurrency is per function, so a queue that caps it needs one to itself.
+  const concurrency = kind === 'queue' ? own.concurrency : undefined;
   return {
     kind,
     name,
     timeoutSeconds: own.timeoutSeconds ?? m.worker?.timeoutSeconds ?? WORKER_TIMEOUT_SECONDS,
     memoryMb: own.memoryMb ?? m.worker?.memoryMb ?? WORKER_MEMORY_MB,
-    own: own.timeoutSeconds !== undefined || own.memoryMb !== undefined,
+    maxAttempts: own.maxAttempts ?? DEFAULT_ATTEMPTS[kind],
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    own: own.timeoutSeconds !== undefined || own.memoryMb !== undefined || concurrency !== undefined,
   };
 }
 
