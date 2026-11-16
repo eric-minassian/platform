@@ -101,10 +101,12 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `Events`                         | `yield* events.publish('todo.created', { userId, id, title })`                                            |
 | `Storage`                        | `const uploads = storage.store('uploads')`: `put`, `get`, `getText` (`Option`), `list(prefix)`, `delete`  |
 |                                  | `yield* uploads.uploadUrl(key, { contentType })`: browser-direct upload URL (HTTP PUT); `downloadUrl`     |
+|                                  | `put(key, body, { cacheControl })`; a public store's `yield* store.publicUrl(key)` → its edge URL         |
 | `Secrets`                        | `yield* secrets.get('STRIPE_KEY')` → `Redacted` (a defect naming the fix if unset), `getOptional`         |
 | `Realtime`                       | `yield* realtime.publish('boards/b1', event)`, `publishMany`: to browsers subscribed right now            |
 | `Email`                          | `yield* email.send({ to, subject, text, html, replyTo })` → `{ id }`; fails `EmailNotSent`                |
 | `RealtimeClient` (browser)       | `RealtimeClient.subscribe('boards/b1')` → `Stream` of events; `.status` → `Stream` of connection states   |
+| `storageUrl` (browser)           | `fetch(storageUrl('exports', 'fires/latest.json'))`: a public store's file, from the edge                 |
 | `Authentication`, `CurrentUser`  | `.middleware(Authentication)` on a group, then `yield* CurrentUser` in its handlers; signed out → 401     |
 | `Auth`                           | `yield* auth.currentUser` → `Option<User>` for endpoints that work signed in or out                       |
 | `loginUrl/logoutUrl`             | `loginUrl('/dashboard')` → `/__platform/auth/login?redirect=...`                                          |
@@ -171,8 +173,24 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
 - **Cron.** Add `digest: '0 8 * * 1-5'` under `crons` (5-field cron, UTC; or
   `{ schedule: '...', timezone: 'America/Los_Angeles' }`, or `'rate(15 minutes)'`), then a `crons.digest`
   handler.
-- **File store.** Add `'avatars'` to `storage`, then use `storage.store('avatars')`. For browser uploads,
-  return `uploadUrl(...)` from an endpoint and `PUT` the file to it.
+- **File store.** Add `avatars: {}` under `storage` (or `'avatars'` to a list), then use
+  `storage.store('avatars')`. For browser uploads, return `uploadUrl(...)` from an endpoint and `PUT` the
+  file to it.
+- **Public files.** For large, read-mostly files browsers fetch (feed snapshots, exports, images), declare
+  `exports: { public: true }` under `storage`. The edge serves them at
+  `/__platform/storage/exports/<key>` on the app's host, to anyone with the URL, with no server in the
+  path:
+  - Write from the worker or server with `put(key, body, { cacheControl })`. Give a key that never
+    changes (`fires/2026-11-15T10-05.json`) `public, max-age=31536000, immutable`; a key you overwrite
+    (`fires/latest.json`) a short `max-age`, or none to have browsers revalidate each time.
+  - In the browser, `fetch(storageUrl('exports', key))` from `@ericminassian/platform/client`; on the
+    server, `yield* storage.store('exports').publicUrl(key)` gives the absolute URL.
+  - Query strings are ignored, so put versions in the key. Script never runs from these files.
+  - Reads skip the server, so rate limits don't apply to them. If browsers upload into a public store,
+    rate-limit the endpoint that returns `uploadUrl` (per user, `key: user.id`): anything uploaded is
+    served to anyone.
+  - `expireAfterDays: 7` (any store) deletes files not written for 7 days, checked daily.
+  - A store with files can't switch between public and private; declare a new store instead.
 - **Secret.**
   1. Add `'STRIPE_KEY'` to `secrets` in `plat.config.ts`.
   2. Set it: `plat secrets set STRIPE_KEY --stage prod`, or `--shared` for all stages.
