@@ -25,6 +25,7 @@ import {
   NODE_RUNTIME,
   names,
   newId,
+  originSecret,
   ownFunctionHandlers,
   type PlatformRuntimeConfig,
   PROD_STAGE,
@@ -39,6 +40,7 @@ import {
   toSchedulerExpression,
   validateStageName,
   workerHandlers,
+  webMaxEnvironments,
 } from '@ericminassian/platform-core';
 import {
   deleteChannelNamespace,
@@ -67,6 +69,12 @@ import {
   removePermission,
 } from './drivers/lambda.ts';
 import { deleteLogGroup, ensureLogGroup, listLogGroups } from './drivers/logs.ts';
+import {
+  aliasForVersion,
+  getVersionState,
+  publishRequestFunction,
+  pruneVersions,
+} from './drivers/request-function.ts';
 import {
   deleteObjectsOlderThan,
   deletePrefix,
@@ -160,8 +168,8 @@ function statementId(prefix: string, name: string): string {
 /**
  * Reconcile one stage with its manifest, then flip the route. Ordering keeps
  * the old deployment serving until everything for the new one is ready:
- * data/messaging → role → worker → services (started) → static → web
- * revision → services (running) → route (last) → GC.
+ * data/messaging → role → worker → services (started) → static → server
+ * build → services (running) → route (last) → GC.
  */
 export async function deployStage(ctx: EngineContext, input: DeployStageInput): Promise<DeployStageResult> {
   const { manifest: m, stage, platform, deploymentId } = input;
@@ -506,9 +514,36 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     resources.push({ type: 'static', name: staticPrefix });
   }
 
-  // 11. Web Function revision → an endpoint the live route doesn't use.
+  // 11. The server, in its compute mode, on the endpoint or function URL the live route doesn't
+  // use. The other mode's server stays as it is (both cost nothing idle), so switching back or
+  // rolling back to a deployment in the other mode finds it.
+  const compute = input.webCompute ?? 'instance';
   let webFunction: DeployStageResult['webFunction'];
-  if (hasWeb && m.web && input.artifacts.server) {
+  let requestFunction: DeployStageResult['requestFunction'];
+  if (hasWeb && m.web && input.artifacts.server && compute === 'request') {
+    const fnName = names.requestFunction(app, stage);
+    const fn = await publishRequestFunction(ctx, {
+      name: fnName,
+      roleArn,
+      code: input.artifacts.server,
+      env,
+      memoryMb: m.web.memoryMb,
+      timeoutSeconds: m.web.timeoutSeconds,
+      logGroup: webLogGroup,
+      deploymentId,
+      description: `${app}/${stage} server (${deploymentId})`,
+      tags,
+    });
+    const alias = await aliasForVersion(ctx, {
+      functionName: fnName,
+      aliasNames: names.webEndpoints(),
+      version: fn.version,
+      ...(liveRoute?.c === 'r' && liveRoute.o ? { liveDomain: liveRoute.o } : {}),
+    });
+    await pruneVersions(ctx, fnName, { keepNewest: DEPLOYMENTS_KEPT, keep: alias.pinned });
+    requestFunction = { name: fnName, urlDomain: alias.domainName, version: fn.version };
+    resources.push({ type: 'function', name: fnName, arn: fn.arn });
+  } else if (hasWeb && m.web && input.artifacts.server) {
     const fnName = names.webFunction(app, stage);
     const revision = {
       functionName: fnName,
@@ -521,10 +556,11 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       logGroup: webLogGroup,
       description: deploymentId,
     };
+    const maxEnvironments = webMaxEnvironments(m.web, stage);
     const fn = await ensureWebFunction(ctx, {
       name: fnName,
       tags,
-      initial: { revision, endpointName: names.webEndpoints()[0] },
+      initial: { revision, endpointName: names.webEndpoints()[0], maxEnvironments },
     });
     const fnArn = fn.arn;
     const revisionId = fn.initialRevisionId ?? (await createRevision(ctx, revision));
@@ -533,7 +569,8 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       functionArn: fnArn,
       endpointNames: names.webEndpoints(),
       revisionId,
-      ...(liveRoute?.o ? { liveDomain: liveRoute.o } : {}),
+      maxEnvironments,
+      ...(liveRoute?.o && liveRoute.c !== 'r' ? { liveDomain: liveRoute.o } : {}),
       ...(platform.distributionArn ? { distributionArn: platform.distributionArn } : {}),
     });
     await pruneRevisions(ctx, fnName, { keepNewest: DEPLOYMENTS_KEPT, keep: endpoint.pinned });
@@ -541,7 +578,13 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     resources.push({ type: 'web-function', name: fnName, arn: fnArn });
   } else if (webMode === 'function') {
     await deleteWebFunction(ctx, names.webFunction(app, stage));
+    await deleteFunction(ctx, names.requestFunction(app, stage));
   }
+  const server = webFunction
+    ? { o: webFunction.endpointDomain }
+    : requestFunction
+      ? { o: requestFunction.urlDomain, c: 'r' as const, k: await originSecret(stageKey) }
+      : undefined;
 
   // 11b. Every service that should run is running (a failed rollout fails the deploy here).
   if (platform.containers && rollouts.length)
@@ -550,15 +593,15 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   // 12. Route flip — the only step that changes what users see. A stage with public stores is
   // routed even without web, so its files have a host.
   let route: RouteRecord | undefined;
-  if (webMode === 'function' && (webFunction || staticPrefix || servedStores.length)) {
+  if (webMode === 'function' && (server || staticPrefix || servedStores.length)) {
     route = {
       v: 1,
       app,
       stage,
       d: deploymentId,
-      ...(webFunction ? { o: webFunction.endpointDomain } : {}),
+      ...server,
       ...(staticPrefix ? { s: staticPrefix } : {}),
-      ...(webFunction && staticPrefix ? { r: m.web?.serverRoutes ?? ['/api/'] } : {}),
+      ...(server && staticPrefix ? { r: m.web?.serverRoutes ?? ['/api/'] } : {}),
       ...(staticPrefix ? { spa: m.web?.spa === false ? (0 as const) : (1 as const) } : {}),
       ...(realtime
         ? {
@@ -619,7 +662,9 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     host,
     url,
     ...(route ? { route } : {}),
+    ...(server ? { compute } : {}),
     ...(webFunction ? { webFunction } : {}),
+    ...(requestFunction ? { requestFunction } : {}),
     ...(workerFunction ? { workerFunction } : {}),
     ...(services ? { services } : {}),
     resources,
@@ -782,8 +827,7 @@ async function reconcileWorkerTriggers(
     const fn = handlerFunctionName(app, stage, m, kind, name);
     return { name: fn, arn: arns.get(fn)! };
   };
-  // Every function under the stage's base is the worker's or a handler's.
-  const stale = (await listFunctions(ctx, `${base}--`)).filter((f) => !arns.has(f.name));
+  const stale = (await listWorkerFunctions(ctx, app, stage)).filter((f) => !arns.has(f.name));
 
   // Pre-0.4.0 queue → function mappings, while their queues drain.
   const wantedMappings = new Set<string>();
@@ -880,8 +924,16 @@ async function removeWorker(ctx: EngineContext, app: string, stage: string): Pro
   const bus = names.eventBus(app, stage);
   for (const rule of await listRules(ctx, bus, `${names.base(app, stage)}--`))
     await deleteRule(ctx, bus, rule);
-  for (const fn of await listFunctions(ctx, `${names.base(app, stage)}--`))
-    await deleteWorkerFunction(ctx, fn.name);
+  for (const fn of await listWorkerFunctions(ctx, app, stage)) await deleteWorkerFunction(ctx, fn.name);
+}
+
+/**
+ * The worker's function and its handlers' own: every function under the
+ * stage's base but the request-mode server (`names.requestFunction`).
+ */
+async function listWorkerFunctions(ctx: EngineContext, app: string, stage: string) {
+  const server = names.requestFunction(app, stage);
+  return (await listFunctions(ctx, `${names.base(app, stage)}--`)).filter((f) => f.name !== server);
 }
 
 /**
@@ -1055,7 +1107,12 @@ async function assertCanRollBack(
   if (route.s && !(await hasObjects(ctx, platform.sitesBucket, `${route.s}/`))) {
     throw gone('its static files have been cleaned up');
   }
-  if (input.revisionId) {
+  if (route.o && route.c === 'r') {
+    if (!input.version) throw gone('its server version was not recorded');
+    const state = await getVersionState(ctx, names.requestFunction(app, stage), input.version);
+    if (!state) throw gone('its server version has been cleaned up');
+    if (state !== 'Active') throw gone(`its server version is ${state}`);
+  } else if (input.revisionId) {
     const state = await getRevisionState(ctx, names.webFunction(app, stage), input.revisionId);
     if (!state) throw gone('its server revision has been cleaned up');
     if (state !== 'Active') throw gone(`its server revision is ${state}`);
@@ -1064,11 +1121,12 @@ async function assertCanRollBack(
 }
 
 /**
- * Point the stage back at an earlier deployment. Its revision usually still
- * has an endpoint pinned to it (always for the previous deployment), so the
- * route write is the whole switch; otherwise the endpoint the live route
- * doesn't use is pointed at it first. Returns the route written: its
- * endpoint can differ from the one recorded at deploy time.
+ * Point the stage back at an earlier deployment, in the compute mode it ran
+ * in. Its server build usually still has an endpoint or alias pinned to it
+ * (always for the previous deployment in the same mode), so the route write
+ * is the whole switch; otherwise the one the live route doesn't use is
+ * pointed at it first. Returns the route written: its endpoint or function
+ * URL can differ from the one recorded at deploy time.
  */
 export async function rollbackStage(ctx: EngineContext, input: RollbackStageInput): Promise<RouteRecord> {
   const { app, stage, platform } = input;
@@ -1076,16 +1134,24 @@ export async function rollbackStage(ctx: EngineContext, input: RollbackStageInpu
   await applyServicesRollback(ctx, services);
   const host = hostFor(platform, app, stage);
   let route = input.route;
-  if (input.revisionId && route.o) {
+  const live = route.o && platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
+  if (route.o && route.c === 'r' && input.version) {
+    const url = await aliasForVersion(ctx, {
+      functionName: names.requestFunction(app, stage),
+      aliasNames: names.webEndpoints(),
+      version: input.version,
+      ...(live?.c === 'r' && live.o ? { liveDomain: live.o } : {}),
+    });
+    route = { ...route, o: url.domainName };
+  } else if (route.o && input.revisionId) {
     const functionName = names.webFunction(app, stage);
     const fn = await ctx.clients.lambdaWeb.send(new GetWebFunctionCommand({ functionName }));
-    const live = platform.kvsArn ? await getRoute(ctx, platform.kvsArn, host) : undefined;
     const endpoint = await endpointForRevision(ctx, {
       functionName,
       functionArn: fn.functionArn!,
       endpointNames: names.webEndpoints(),
       revisionId: input.revisionId,
-      ...(live?.o ? { liveDomain: live.o } : {}),
+      ...(live?.o && live.c !== 'r' ? { liveDomain: live.o } : {}),
       ...(platform.distributionArn ? { distributionArn: platform.distributionArn } : {}),
     });
     route = { ...route, o: endpoint.domainName };
@@ -1104,6 +1170,8 @@ export async function destroyStage(ctx: EngineContext, input: DestroyStageInput)
   if (platform.kvsArn) await ignoreNotFound(deleteRoute(ctx, platform.kvsArn, host));
   await removeWorker(ctx, app, stage);
   await deleteWebFunction(ctx, names.webFunction(app, stage));
+  // Its versions, aliases and function URLs go with it.
+  await deleteFunction(ctx, names.requestFunction(app, stage));
   if (platform.containers) await destroyServices(ctx, { app, stage, containers: platform.containers });
   await deleteScheduleGroup(ctx, names.scheduleGroup(app, stage));
   for (const q of await listQueues(ctx, `${names.base(app, stage)}--`)) await deleteQueue(ctx, q.name);
@@ -1140,7 +1208,7 @@ export async function listStageResources(
   if (role?.Role) out.push({ type: 'role', name: role.Role.RoleName!, arn: role.Role.Arn! });
   const table = await describeTable(ctx, names.table(app, stage));
   if (table) out.push({ type: 'table', name: table.TableName!, arn: table.TableArn! });
-  // The worker's function and its handlers' own.
+  // The worker's function, its handlers' own and the request-mode server.
   for (const fn of await listFunctions(ctx, `${names.base(app, stage)}--`))
     out.push({ type: 'function', name: fn.name, arn: fn.arn });
   const web = await ignoreNotFound(
