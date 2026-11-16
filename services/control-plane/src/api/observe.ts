@@ -97,6 +97,9 @@ export const ObserveLive = HttpApiBuilder.group(
           return yield* telemetry.metrics(app, stage, yield* rangeOf(query));
         }),
 
+      // Placeholder until the explorer's series reader lands (this branch is being built in parts).
+      series: () => Effect.die(new Error('series: not implemented yet')),
+
       routes: ({ params, query }) =>
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
@@ -253,6 +256,13 @@ export const ObserveLive = HttpApiBuilder.group(
           });
           return { trace: params.trace, events };
         }),
+
+      // Placeholders until the log, trace and Insights readers land (this branch is being built in parts).
+      traces: () => Effect.die(new Error('traces: not implemented yet')),
+      logStats: () => Effect.die(new Error('logStats: not implemented yet')),
+      logContext: () => Effect.die(new Error('logContext: not implemented yet')),
+      insights: () => Effect.die(new Error('insights: not implemented yet')),
+      errorOccurrences: () => Effect.die(new Error('errorOccurrences: not implemented yet')),
     });
   }),
 );
