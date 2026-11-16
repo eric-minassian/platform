@@ -97,7 +97,7 @@ import { RealtimeClient } from '@ericminassian/platform/client'; // browser only
 | `.queryAll`                      | `yield* todos.queryAll({ userId })` → every matching document, across all pages                           |
 | `.putMany/.deleteMany`           | `yield* tiles.putMany(copies)`, `yield* tiles.deleteMany(keys)`: batches of 25, not atomic                |
 | `db.transact`                    | `yield* db.transact([tiles.tx.put(t), feed.tx.insert(e)])`: all or none; fails `TransactionCanceled`      |
-| `Queues`                         | `yield* queues.send('emails', { to, subject, body }, { delay: '1 minute' })`, `sendBatch`                 |
+| `Queues`                         | `yield* queues.send('emails', { to, subject, body }, { delay: '10 minutes' })`, `sendBatch`               |
 | `Events`                         | `yield* events.publish('todo.created', { userId, id, title })`                                            |
 | `Storage`                        | `const uploads = storage.store('uploads')`: `put`, `get`, `getText` (`Option`), `list(prefix)`, `delete`  |
 |                                  | `yield* uploads.uploadUrl(key, { contentType })`: browser-direct upload URL (HTTP PUT); `downloadUrl`     |
@@ -162,13 +162,17 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
     another query fails with `InvalidCursor`; list it in the endpoint's `error` to answer with a 400.
   - On the server, `queryAll` follows the pages for you.
 - **Queue.**
-  1. Add `thumbnails: queue<ThumbnailJob>({ batchSize: 5 })` under `queues` in `plat.config.ts`, with the
-     `ThumbnailJob` schema and type in `src/domain.ts`.
+  1. Add `thumbnails: queue<ThumbnailJob>()` under `queues` in `plat.config.ts`, with the `ThumbnailJob`
+     schema and type in `src/domain.ts`.
   2. Add a `queues.thumbnails` handler in `src/worker.ts` that decodes `message.body` with the schema.
   3. Send with `queues.send('thumbnails', job)`.
 
-  A failed handler retries the message; after `maxReceiveCount` (default 5) it goes to the dead-letter
-  queue, which you can inspect and redrive from the console.
+  Each message is one run of its handler, at least once and in no set order, so handlers must be safe to
+  run twice. A failed run is tried again 1, 2, 4 … minutes later, up to `maxAttempts` (default 5; events
+  and crons take it too, default 3), then the message goes to the stage's dead letters: `plat jobs dead`,
+  `plat jobs redrive`, or the console's Jobs tab. A message is at most 240 KB of JSON; put anything bigger
+  in a store and send its key. `delay` is kept to the minute (up to a year). `concurrency: n` caps the
+  handler's runs at once; leave it out unless something downstream needs the cap.
 
 - **Event subscription.** Add `'order.paid': event<OrderPaid>()` under `events`, then an
   `events['order.paid']` handler. Publish with `events.publish('order.paid', detail)`.
@@ -357,8 +361,9 @@ queue send and `fetch` is traced automatically. Don't add your own tracing or me
   and counted. `layerMemory({ email: { dailyLimit: 1 } })` or `{ email: { paused: true } }` makes
   `Email.send` fail as a deployed stage would. The in-memory `Db` follows DynamoDB's key, index, ordering
   and cursor rules.
-- **Worker tests** run the handlers as Lambda does (`createWorkerHandler`); `captureEmails()` from
-  `@ericminassian/platform/testing` records what they send (see `test/worker.test.ts`).
+- **Worker tests** run the handlers as Lambda does (`createWorkerHandler`), fed `queueJob('emails', body)`.
+  From `@ericminassian/platform/testing`, `captureEmails()` records what they send and `captureJobs()` what
+  a failed run retries (`scheduled`) or dead-letters (`dead`) (see `test/worker.test.ts`).
 - **Integration tests** (`test/*.integration.test.ts`, `plat test`) use `Platform.layer` against the AWS
   Emulator with a provisioned `test` stage. Mail goes to `plat test`'s inbox: `waitForEmail((m) => …)`
   from `@ericminassian/platform/testing` waits for a message the worker sends.
@@ -410,6 +415,8 @@ plat logs --since 30m [--stage pr-12] [--filter "error"] [--follow]
 plat errors                         # grouped errors with sample stack + trace id
 plat traces <traceId>               # one request across server → queue → worker
 plat metrics --since 6h             # requests, 5xx, p95, cold starts, per-route, per-job and rate-limit stats
+plat jobs dead                      # queue messages, events and cron runs that failed every attempt
+plat jobs redrive <id>... | --all   # run them again from the first attempt; `plat jobs discard` drops them
 plat services [--stage pr-12]       # long-running services: state, restarts, failed runs, cost
 plat services restart <name>        # also: start [--minutes 60], stop
 plat data todos --partition userId=<id>

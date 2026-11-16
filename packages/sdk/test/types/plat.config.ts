@@ -19,7 +19,7 @@ export interface Notice {
 
 const app = defineApp({
   name: 'todo',
-  queues: { emails: queue<EmailJob>({ batchSize: 5 }), plain: {} },
+  queues: { emails: queue<EmailJob>({ maxAttempts: 2 }), plain: {} },
   events: { 'todo.created': event<TodoCreated>() },
   crons: { cleanup: '0 3 * * *' },
   storage: { uploads: {}, snapshots: { public: true, expireAfterDays: 7 } },

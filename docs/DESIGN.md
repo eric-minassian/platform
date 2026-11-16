@@ -47,8 +47,8 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
          S3 sites bucket (per deploy)   Lambda Web Function  <app>--<stage>  a namespace per stage)
                                             │  (fetch handler, SDK wrapper)          ▲ publish (IAM)
      ┌──────────────────────────────────────┼─────────────────────────────────────┐  │
-     │ per stage:  DynamoDB table · SQS queues+DLQs · EventBridge bus · Scheduler  ├─┘
-     │             group · worker Lambda (queues/events/crons) · Cognito client ·  │
+     │ per stage:  DynamoDB table · SQS dead-letter queue · EventBridge bus ·      ├─┘
+     │             Scheduler group · worker Lambda (queues/events/crons) · Cognito │
      │             channel namespace · SES tenant · IAM role (scoped, boundary) ·  ├──► SES (mail.platform…,
      │             log groups · ECS services (Fargate, opt-in) ──► WebSocket/SSE   │     a tenant per stage)
      └──────────────────────────────────────┬─────────────────────────────────────┘
@@ -92,7 +92,7 @@ const app = defineApp({
   auth: true, // or { required: true }
   db: true, // one document DB per stage; collections are declared in code
   worker: { timeoutSeconds: 120, memoryMb: 1024 }, // every handler's, unless it sets its own
-  queues: { emails: queue<EmailJob>({ batchSize: 10 }) },
+  queues: { emails: queue<EmailJob>({ maxAttempts: 3 }) },
   events: { 'todo.created': event<TodoCreated>() }, // event types the worker subscribes to
   crons: {
     cleanup: '0 3 * * *', // 5-field UTC cron or rate(...)
@@ -145,16 +145,16 @@ declare module '@ericminassian/platform/config' {
   platform routes and request telemetry around it.
 - **Worker**: `export default defineWorker({ layer, queues, events, crons })`.
   One bundle per stage handles all of them; the wrapper dispatches on event
-  shape and reports partial SQS batch failures. Handlers get the payload types
-  declared in `plat.config.ts` and run on `layer`.
+  shape, and retries or dead-letters a failed run (see [Jobs](#jobs)).
+  Handlers get the payload types declared in `plat.config.ts` and run on
+  `layer`.
   - The worker's Lambda runs every handler with `worker.memoryMb` and
     `worker.timeoutSeconds`.
   - A queue, event or cron that sets its own `memoryMb` or `timeoutSeconds`
     (`queue<T>({ memoryMb })`, `event<T>({ timeoutSeconds })`, a cron's
-    object form) runs in a Lambda of its own: the same bundle, environment
-    and log group, with its triggers pointed there. A setting it leaves out
-    is the worker's, and its queue's visibility timeout follows its own
-    timeout.
+    object form), or a queue that sets `concurrency`, runs in a Lambda of
+    its own: the same bundle, environment and log group, with its triggers
+    pointed there. A setting it leaves out is the worker's.
 - **Resources**: only through `@ericminassian/platform`, as Effect services.
   `Db.collection()` maps collections onto the stage's single table
   (partition/sort keys, up to three pinned index slots, TTL), so adding a
@@ -184,8 +184,10 @@ declare module '@ericminassian/platform/config' {
 ### Bindings
 
 The engine passes resource names to the runtime in one environment variable,
-`PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): table, queue URLs,
-bus, storage prefix, secrets paths, auth settings, realtime namespace and
+`PLATFORM_BINDINGS` (JSON, `packages/core/src/bindings.ts`): account, table,
+jobs (declared queues, handlers' own functions and attempts, the dead-letter
+queue, the schedule group and role), bus, storage prefix, secrets paths, auth
+settings, realtime namespace and
 publish endpoint, email sender and tenant, worker name, public URL, and the
 stage key. The stage key is
 a random secret the engine creates once per stage in SSM. The SDK seals `db`
@@ -205,9 +207,9 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Web Function | `todo--prod` (endpoints `live`, `live-b`)                                                                                                                             |
 | Worker       | `todo--prod--worker`; a handler's own `…--worker--<queue\|event\|cron>-<name>` (`.` and `:` in event types become `_`; hashed past 64)                                |
 | Table        | `todo--prod`                                                                                                                                                          |
-| Queue / DLQ  | `todo--prod--emails` / `…--dlq`                                                                                                                                       |
+| Dead letters | SQS `todo--prod--jobs--dead` (queues from before 0.4.0 were `todo--prod--emails` / `…--dlq`)                                                                          |
 | Bus / rules  | `todo--prod` / `todo--prod--<event>`                                                                                                                                  |
-| Schedules    | group `todo--prod` (crons; `<service>--stop` for preview services)                                                                                                    |
+| Schedules    | group `todo--prod` (crons; jobs' retries and delayed sends `_q-<queue>-<id>`, `_c-…`, `_e-<hash>-…`; `<service>--stop` for preview services)                          |
 | Services     | ECS service and task definition family `todo--prod--<service>`                                                                                                        |
 | Images       | `platform-containers:todo--prod--<service>--<deploymentId>`                                                                                                           |
 | Channels     | namespace `todo--prod` in `platform-realtime` (hashed past 50)                                                                                                        |
@@ -331,6 +333,74 @@ browser  GET /__platform/storage/exports/fires/1105.json              (storageUr
   rate-limited, since whatever is uploaded is served to anyone.
 - **`plat dev`** serves public stores from the emulator's bucket with the same
   headers, `Range` and `If-None-Match`.
+
+## Jobs
+
+Queue messages, events and cron runs are pushed, never polled, so a stage
+with ten queues costs nothing until a message arrives. (An SQS queue with a
+Lambda event source mapping costs ~$0.26 a month in empty receives: about
+890 an hour, measured on a production queue in November 2026.)
+
+```
+queues.send(body)          → lambda:Invoke (Event) on the function the queue's handler runs in
+queues.send(body, {delay}) → one-shot Scheduler schedule `_q-<queue>-<id>` → that function, at the time
+EventBridge rule / Scheduler cron → the event's or cron's function (async)
+worker wrapper  run the handler ─ ok ─────────────────────────────► done
+                                └ failed, attempts left ─► schedule attempt n+1 (1, 2, 4 … min, ≤ 1 h)
+                                └ failed, last attempt ──► SQS `<app>--<stage>--jobs--dead`
+Lambda          crash / timeout ─► 2 retries ─► on-failure destination ─► the same queue
+Scheduler, EventBridge  couldn't deliver ─► their dead-letter config ─► the same queue
+console, plat jobs      list · redrive (from attempt 1, to the handler's function now) · discard
+```
+
+- **One payload** (core `jobs.ts`): `{ __platform: 'job', kind, name, id,
+  attempt, sentAt, body | detail, trace }`. The wrapper turns EventBridge
+  events and cron firings into it on arrival, so retries, dead letters and
+  redrive treat all three alike. Delivery is at least once, in no set order,
+  as with SQS.
+- **Retries are the SDK's.** A failed run schedules the next attempt and the
+  invocation succeeds, so Lambda doesn't retry it as well; `maxAttempts`
+  (queues 5, events and crons 3, which is what Lambda's two retries gave them
+  before) decides. Lambda's own retries are left for crashes and timeouts,
+  where the wrapper never got to decide. If scheduling the next attempt
+  fails, the invocation fails, and Lambda retries it.
+- **Dead letters** live in one SQS queue per stage that nothing polls ($0 at
+  rest, 14 days). Four writers share it and `readDeadLetter` reads them all:
+  the SDK (its own record, with the error), Lambda's on-failure destination
+  (crashes, timeouts, and events throttled for over six hours), Scheduler's
+  dead-letter config (a retry, delayed send or cron firing it couldn't
+  deliver) and EventBridge's (an event it couldn't deliver after a day). The
+  queue's policy lets only this stage's rules send to it; the rest send as
+  the stage role. Events and crons had no dead-letter destination before:
+  failed ones were dropped after Lambda's two retries.
+- **Delays and retries are one-shot schedules** in the stage's group
+  (`ActionAfterCompletion: DELETE`), invoking the function as the stage role.
+  Scheduler fires within about a minute and refuses past times, so a delay
+  shorter than a minute waits about a minute. Their names lead with `_` and
+  the queue or cron, so the console counts what's waiting per queue by
+  prefix, and cron schedules (a cron key starts with a letter) and services'
+  stop schedules never collide with them.
+- **Limits.** A payload is at most 240 KB of JSON: Scheduler caps a
+  schedule's input at 256 KB, and a dead letter wraps the payload with its
+  error. `queue({ concurrency })` is the queue's function's reserved
+  concurrency (which needs the account's quota to spare it); messages past it
+  wait in Lambda's async queue for up to six hours, then dead-letter. There's
+  no batching: each message is one invocation, which costs less than SQS's
+  send, receive and delete did ($0.20 a million against $1.20).
+- **Queues from before 0.4.0** drain: the engine keeps a queue's event source
+  mapping while it holds messages (the wrapper still reads SQS batches),
+  deletes it once empty, and moves its old dead-letter queue's messages into
+  the stage's. Deployments built with an older SDK are refused
+  (`MIN_SDK_VERSION`): their workers can't read pushed jobs.
+- **The control plane** runs deploys and destroys on a `stages` queue with a
+  1 GB function of its own and one attempt (the watchdog fails a deploy whose
+  run died; a deploy is retried by deploying again), so its worker, which
+  also runs the telemetry processor, needs 512 MB instead of 1 GB.
+- **Local.** The emulator's Lambda can't run the worker and its Scheduler
+  never fires, so the SDK hands jobs to a dispatcher in the CLI process
+  (`PLATFORM_LOCAL_WORKER_URL`), which runs them in the local worker now or
+  when they come due. Waiting jobs survive the worker's restarts on edits. A
+  crash lands in the emulator's dead-letter queue as Lambda's record would.
 
 ## Realtime
 
@@ -592,9 +662,10 @@ Fargate      one task per stage, public subnet + public IPv4, no inbound; stdout
 app CI ── plat build ──► server.zip, worker.zip, static.zip, services.zip, manifest.json
        ── plat deploy ─► POST /v1/apps/:app/deployments   (GitHub Actions OIDC token)
                          ◄─ presigned POSTs → upload → POST /v1/deployments/:id/start
-control plane ─ worker job "deploy" ─ engine.deployStage():
-   role → log groups → table → queues/DLQs → bus/rules → Cognito client → channel namespace
-   → SES tenant → worker Lambda → ESMs/rules targets/schedules → service images, task
+control plane ─ `stages` queue job "deploy" ─ engine.deployStage():
+   role → log groups → table → dead-letter queue → bus/rules → Cognito client → channel namespace
+   → SES tenant → worker Lambdas (async config, reserved concurrency) → rule targets/schedules
+   → old queues retired → service images, task
    definitions, ECS rollouts → static files → Web Function revision → the endpoint the live
    route doesn't use → resource policy → services running → KVS route (last step) → old builds cleaned up
 CI polls, streams events, waits until its nearest edge serves the deployment,
@@ -602,7 +673,9 @@ comments the URL on the PR.
 ```
 
 - The API accepts a deploy from CI only if the token's `repository` matches
-  the registered app's repo and its owner is a member.
+  the registered app's repo and its owner is a member, and only of bundles
+  built with `@ericminassian/platform` ≥ `MIN_SDK_VERSION` (`plat deploy`
+  sends the app's version).
 - `prod` deploys only from `refs/heads/main`; `pr-N` only from that PR. A
   merged PR's `closed` run carries the base branch as its ref, so it may
   destroy previews but never deploy one.
@@ -651,15 +724,17 @@ comments the URL on the PR.
 5. The worker and each service run as local Node processes with hot reload.
    The engine deploys with `servicesMode: 'external'`, so no image is built;
    a service process that exits is restarted with a backoff, as ECS would.
-   - The engine still creates the real worker Lambda, queues, event source
-     mappings and rules in the emulator, so provisioning is exercised.
+   - The engine still creates the real worker Lambdas, their async-invoke
+     configs, the dead-letter queue, rules and schedules in the emulator, so
+     provisioning is exercised.
    - The emulator's `nodejs24.x` Lambda is a restricted JS sandbox (no
      `node:http`, `https`, `net`, `tls`, `async_hooks` or `fetch`), so a
      worker that calls AWS can't run inside it.
-   - `plat dev` therefore disables the emulator's mappings, polls the SQS
-     queues itself and redirects event rules to a queue it polls.
-   - Crons run from a local scheduler. `invokeJob` posts to the local worker
-     (`PLATFORM_LOCAL_WORKER_URL`).
+   - `plat dev` therefore runs jobs itself: the SDK hands queue sends,
+     retries, delayed sends and `invokeJob` to a dispatcher in the CLI
+     (`PLATFORM_LOCAL_WORKER_URL`), which waits out their time, and event
+     rules are redirected to a queue it polls. See [Jobs](#jobs).
+   - Crons run from a local scheduler.
 
 `plat test` does the same with a throwaway stage and runs vitest, locally and
 in CI.
@@ -670,8 +745,8 @@ Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
 | Works                                                                               | Missing, so the wrapper fills in                                                                    |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
 | DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server   |
-| SQS + DLQ; SQS → Lambda ESM (checks role permissions)                               | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally  |
-| EventBridge → SQS/Lambda (checks resource policies)                                 | Scheduler never fires: local cron runner                                                            |
+| SQS; SQS → Lambda ESM (checks role permissions); async invoke configs, destinations | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally  |
+| EventBridge → SQS/Lambda (checks resource policies), rule targets' DLQs             | Scheduler never fires: local cron runner, and the CLI's dispatcher waits out jobs' delays           |
 | Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                        |
 | S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                       |
 | Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                    |
@@ -696,8 +771,8 @@ writing any instrumentation:
   - `span`: SDK calls (including `realtime.publish` and `email.send`) and outgoing `fetch`
   - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
   - `limit`: every `RateLimits` check, with the limit's name and whether it fit
-  - All carry `trace`. Traces propagate through queue message attributes and
-    event detail.
+  - All carry `trace`. Traces propagate through job payloads (queue
+    messages, retries) and event detail.
 - **Pipeline.** One account-level CloudWatch Logs subscription filter (one per
   account and region; destination is the control plane worker) forwards
   `req|err|job|metric|limit|env` lines to the telemetry processor. It writes:
@@ -718,7 +793,8 @@ writing any instrumentation:
       checks per limit) for stages that recorded any.
     - Logs search plus live tail (CloudWatch Live Tail over SSE).
     - Trace waterfalls; grouped errors.
-    - Jobs: queue depth, DLQ redrive, cron run-now.
+    - Jobs: each queue's scheduled retries and delayed sends, the stage's
+      dead letters with redrive and discard, cron run-now.
     - Services: state from ECS, container starts and failed runs (telemetry),
       CPU and memory (ECS's free per-service metrics), recent ECS events and
       the last stop reason; restart, start and stop.
@@ -762,8 +838,11 @@ writing any instrumentation:
 - Service tasks accept no inbound traffic (a security group with no ingress).
 - Each stage's runtime role:
   - lives under `/platform/apps/` with the platform permission boundary;
-  - is scoped to that stage's table, queues, bus, storage prefix and secrets
-    paths, and its own worker functions (Scheduler invokes crons as the role);
+  - is scoped to that stage's table, dead-letter queue, bus, storage prefix
+    and secrets paths, and its own worker functions (the SDK invokes them,
+    and Scheduler invokes crons, retries and delayed sends as the role);
+  - creates only `_`-prefixed one-shot schedules in its own group, and passes
+    only itself to Scheduler;
   - can't create log groups. The engine creates them, so logs still in
     flight when a stage is destroyed can't bring its groups back;
   - publishes only to its own channel namespace. Browsers never publish;
@@ -804,7 +883,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Hosted zone (delegated)                             | $0.50                                                                                                                        |
 | CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                                                         |
 | Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                                                          |
-| Queue with a Lambda consumer                        | ~$0.25 (Lambda long-polling)                                                                                                 |
+| Queues, events, crons (jobs)                        | $0 at rest; $0.20 per million messages (async invokes), retries and delays $1/M schedules after 14M free; dead letters ~$0   |
 | Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle                                          |
 | Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                                                                     |
 | Cognito                                             | free ≤ 10k MAU                                                                                                               |
@@ -956,30 +1035,34 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 ## Decision log
 
-| Decision                                                                              | Why                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                                                                  |
-| App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories.                                              |
-| Apps are written with Effect v4 (the template, the SDK's Effect API)                  | Eric's call (2026-11-15). One `HttpApi` definition gives the server, the typed web client and OpenAPI. Services and layers make every resource swappable, so unit tests run the whole app on an in-memory platform, and failures are typed instead of thrown `Response`s. The SDK is Effect-only, and so is every app (the control plane included).                                                                           |
-| Foundation is one CDK stack; stages stay on the engine                                | Eric's call (2026-11-15). The shared resources are one fixed set that rarely changes and serves every app, which suits CloudFormation: `cdk diff`, rollback on failure, removal of resources dropped from code, drift-aware deploys. Stages keep the engine: many, short-lived, deployed in seconds. The engine's resources were imported into the stack, not recreated.                                                      |
-| Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                                                                    |
-| One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                                                                     |
-| AWS Emulator for local dev (Eric's call)                                              | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                                                                                                                                                                                                                                    |
-| Moving an app out is a runbook, not tooling (Eric's call)                             | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                                                                                                                                                                                                                                              |
-| No MCP; CLI only                                                                      | Eric's call. Agents use `plat … --json`.                                                                                                                                                                                                                                                                                                                                                                                      |
-| Members = GitHub usernames in config                                                  | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                                                                                                                                                                                                                                     |
-| Shared Cognito pool for app users                                                     | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                                                                                                                                                                                                                                        |
-| `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                                                                    |
-| Realtime on AppSync Events, same-origin through the router                            | Managed WebSocket pub/sub at $0 at rest, with no connection table or fan-out to run. API Gateway WebSocket APIs cost ~5× as much for always-on users and need a connection table and one PostToConnection per subscriber; SSE from Web Functions bills held memory and needs a backplane; IoT Core fits auth and naming poorly. Routing `/__platform/realtime` through the existing router avoids DNS, certificates and CORS. |
-| Browsers subscribe with platform tokens, never publish                                | The session cookie is HttpOnly and AppSync can't see it; exposing Cognito tokens to page JavaScript would let XSS steal sessions. AppSync can't rate-limit a client, so browser publishing could run up the fan-out bill. Channels under `user/<id>` are private to that user; finer access rules belong in the app's API.                                                                                                    |
-| Email on SES with a tenant per stage                                                  | Tenants give each stage its own suppression list, metrics and reputation pause, so one app can't spoil mail for the rest, with nothing for the platform to process: no bounce notifications, no suppression table. The issue's first plan (SNS notifications into a control-plane suppression list) predates tenant-level suppression lists (June 2026).                                                                      |
-| The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                    |
-| One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                   |
-| The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                     |
-| Rate limits: a sliding window in the stage's table                                    | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically.                                                                 |
-| An edge floor on AWS WAF, per client and host                                         | Eric's call (2026-11-16), after rate limits shipped without it. Floods of static files never reach a function, so only the edge can stop them. Keyed per host so one app's busy client or a shared CI runner doesn't lose the others.                                                                                                                                                                                         |
-| Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                   |
-| Store expiry is a daily control-plane sweep, not S3 lifecycle rules                   | One lifecycle document per bucket, shared by every app, can't be updated safely by concurrent deploys, and the foundation stack owns that bucket's configuration. The sweep touches only the stores that ask for it, for a LIST per 1,000 files a day.                                                                                                                                                                        |
-| A store with files can't switch between public and private                            | Its files would have to move while the live deployment keeps writing to the old place until every edge switches, so some writes could be lost. A new store name is a one-line change.                                                                                                                                                                                                                                         |
-| A handler with its own memory or timeout gets its own Lambda                          | Lambda sets both per function, so a handler idling 45 s on a socket paid for the 1 GB a snapshot parse needs. Same bundle, environment and log group: `defineWorker`, bindings, logs and telemetry don't change. One function per handler, not per setting, so changing one handler never moves another; setting either opts in. Stage roles may invoke `*--*--*`: a hashed name keeps only `<app>--<stage>--`.               |
-| us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                               |
+| Decision                                                                              | Why                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Control plane provisions with direct AWS SDK calls; apps ship code + `plat.config.ts` | Eric rejected app-owned CDK stacks: they couple apps to AWS and to CloudFormation. Direct calls deploy in seconds, and the platform owns a small, fixed resource vocabulary.                                                                                                                                                                                                                                                                                                                                                                             |
+| App config is TypeScript (`plat.config.ts`), evaluated by the CLI                     | Eric's call. The config is type-checked with editor docs, and the SDK checks resource names and payload types against it, so a misspelled queue or a missing worker handler fails `tsc`. The CLI sends the evaluated JSON, so the control plane never runs app code. Not `platform.config.ts`: that's this repo's own settings, and the CLI looks up through parent directories.                                                                                                                                                                         |
+| Apps are written with Effect v4 (the template, the SDK's Effect API)                  | Eric's call (2026-11-15). One `HttpApi` definition gives the server, the typed web client and OpenAPI. Services and layers make every resource swappable, so unit tests run the whole app on an in-memory platform, and failures are typed instead of thrown `Response`s. The SDK is Effect-only, and so is every app (the control plane included).                                                                                                                                                                                                      |
+| Foundation is one CDK stack; stages stay on the engine                                | Eric's call (2026-11-15). The shared resources are one fixed set that rarely changes and serves every app, which suits CloudFormation: `cdk diff`, rollback on failure, removal of resources dropped from code, drift-aware deploys. Stages keep the engine: many, short-lived, deployed in seconds. The engine's resources were imported into the stack, not recreated.                                                                                                                                                                                 |
+| Lambda Web Functions for HTTP                                                         | A normal HTTP server, multi-concurrency per environment, scale to zero, and OAC with unsigned bodies. GA Oct 12, 2026 in 5 regions including us-east-1. CDK 2.277 has L1s only, which doesn't matter here.                                                                                                                                                                                                                                                                                                                                               |
+| One router distribution + KVS                                                         | Zero per-app DNS, certificate or distribution work, and instant rollbacks. CloudFront flat-rate plans stay an upgrade path for a big app (only 3 free plans per account).                                                                                                                                                                                                                                                                                                                                                                                |
+| AWS Emulator for local dev (Eric's call)                                              | One code path (AWS adapters everywhere), and the real engine runs locally.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Moving an app out is a runbook, not tooling (Eric's call)                             | It should almost never happen, so a manual, documented process beats code that would rot unused.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| No MCP; CLI only                                                                      | Eric's call. Agents use `plat … --json`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Members = GitHub usernames in config                                                  | Invite-only with a code-reviewed change, and no emails in a public repo. GitHub is already the identity for repos and CI.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Shared Cognito pool for app users                                                     | SSO across apps, no per-app OAuth setup, 10k MAU free.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `<app>--<stage>` hosts                                                                | Stays one DNS label under the single wildcard certificate.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Realtime on AppSync Events, same-origin through the router                            | Managed WebSocket pub/sub at $0 at rest, with no connection table or fan-out to run. API Gateway WebSocket APIs cost ~5× as much for always-on users and need a connection table and one PostToConnection per subscriber; SSE from Web Functions bills held memory and needs a backplane; IoT Core fits auth and naming poorly. Routing `/__platform/realtime` through the existing router avoids DNS, certificates and CORS.                                                                                                                            |
+| Browsers subscribe with platform tokens, never publish                                | The session cookie is HttpOnly and AppSync can't see it; exposing Cognito tokens to page JavaScript would let XSS steal sessions. AppSync can't rate-limit a client, so browser publishing could run up the fan-out bill. Channels under `user/<id>` are private to that user; finer access rules belong in the app's API.                                                                                                                                                                                                                               |
+| Email on SES with a tenant per stage                                                  | Tenants give each stage its own suppression list, metrics and reputation pause, so one app can't spoil mail for the rest, with nothing for the platform to process: no bounce notifications, no suppression table. The issue's first plan (SNS notifications into a control-plane suppression list) predates tenant-level suppression lists (June 2026).                                                                                                                                                                                                 |
+| The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                                                                                                                                               |
+| One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                                                                                                                                              |
+| The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                                                                                                                                                |
+| Rate limits: a sliding window in the stage's table                                    | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically.                                                                                                                                                                                            |
+| An edge floor on AWS WAF, per client and host                                         | Eric's call (2026-11-16), after rate limits shipped without it. Floods of static files never reach a function, so only the edge can stop them. Keyed per host so one app's busy client or a shared CI runner doesn't lose the others.                                                                                                                                                                                                                                                                                                                    |
+| Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                                                                                                                                              |
+| Store expiry is a daily control-plane sweep, not S3 lifecycle rules                   | One lifecycle document per bucket, shared by every app, can't be updated safely by concurrent deploys, and the foundation stack owns that bucket's configuration. The sweep touches only the stores that ask for it, for a LIST per 1,000 files a day.                                                                                                                                                                                                                                                                                                   |
+| A store with files can't switch between public and private                            | Its files would have to move while the live deployment keeps writing to the old place until every edge switches, so some writes could be lost. A new store name is a one-line change.                                                                                                                                                                                                                                                                                                                                                                    |
+| A handler with its own memory or timeout gets its own Lambda                          | Lambda sets both per function, so a handler idling 45 s on a socket paid for the 1 GB a snapshot parse needs. Same bundle, environment and log group: `defineWorker`, bindings, logs and telemetry don't change. One function per handler, not per setting, so changing one handler never moves another; setting either opts in. Stage roles may invoke `*--*--*`: a hashed name keeps only `<app>--<stage>--`.                                                                                                                                          |
+| us-east-1                                                                             | Web Functions are available there, CloudFront certificates must live there anyway, and new features land first.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Jobs are pushed: queue sends are async Lambda invokes, retries one-shot schedules     | Eric's call (2026-11-16, the scale-to-zero review). A Lambda event source mapping polls an idle SQS queue ~890 times an hour (~$0.26 a month per queue, more with previews); an async invoke costs nothing until a message exists, and $0.20 per million against SQS's $1.20 (send, receive, delete). The SDK owns retries so `maxAttempts` means the same for queues, events and crons, and Lambda's retries cover only what the SDK can't see (crashes, timeouts). Lost: batching, messages over 240 KB (Scheduler's input cap) and sub-minute delays. |
+| One unpolled dead-letter queue per stage, for every writer                            | Failed events and crons were dropped after Lambda's two retries. An SQS queue nothing polls is free at rest and keeps letters 14 days; the SDK, Lambda's on-failure destination, Scheduler and EventBridge all write to it, and redrive re-invokes from the first attempt on the function the handler runs in now.                                                                                                                                                                                                                                       |
+| Deployments built with an SDK older than 0.4.0 are refused                            | Bindings (v2) and job payloads changed with pushed jobs, and an old worker can't read them. Live stages keep running what they run until they deploy again; their old queues drain, and their old dead letters move into the stage's queue.                                                                                                                                                                                                                                                                                                              |
+| The control plane's deploys run on a queue with a function of its own                 | The worker also processes every app's telemetry, and was 1 GB only because deploys ran there. Deploys and destroys get 1 GB and 15 minutes on a `stages` queue run once; the worker drops to 512 MB.                                                                                                                                                                                                                                                                                                                                                     |
