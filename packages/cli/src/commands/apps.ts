@@ -1,4 +1,4 @@
-import { type StageRecord, validateAppName } from '@ericminassian/platform-core';
+import { PROD_STAGE, type StageRecord, validateAppName } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
 import { CliError, EXIT, result, table } from '../util/output.ts';
@@ -70,6 +70,7 @@ export function registerApps(program: Command): void {
             'req/min': s.health?.reqPerMin ?? '-',
             p95: s.health?.p95 != null ? `${s.health.p95}ms` : '-',
             'cost MTD': s.costMonthToDateUsd != null ? `$${s.costMonthToDateUsd.toFixed(2)}` : '-',
+            compute: s.stages.find((st) => st.stage === PROD_STAGE)?.compute ?? '-',
           })),
         ),
       );
