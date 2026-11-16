@@ -965,29 +965,55 @@ writing any instrumentation:
 - **No CloudWatch custom metrics, alarms or dashboards per app.** These are
   the costs that scale with app count. Infrastructure metrics (Web Function
   environments and throttles, queue age) are read from CloudWatch on demand.
-- **Console** (`platform.ericminassian.com`):
-  - **Home:** every app with status, traffic, error rate, p95, cost and last deploy.
-  - **Per app:**
-    - Overview graphs and per-route stats; custom metrics (`Metrics.count` by
-      total, `Metrics.value` by average) and rate limits (allowed and denied
-      checks per limit) for stages that recorded any.
-    - Logs search plus live tail (CloudWatch Live Tail over SSE).
-    - Trace waterfalls; grouped errors.
-    - Jobs: each queue's scheduled retries and delayed sends, the stage's
-      dead letters with redrive and discard, cron run-now.
-    - Services: state from ECS, container starts and failed runs (telemetry),
-      CPU and memory (ECS's free per-service metrics), recent ECS events and
-      the last stop reason; restart, start and stop.
-    - Realtime (stages that declare it): publishes, subscribes and errors,
-      from AppSync's per-namespace CloudWatch metrics. Deliveries and
-      connections are only reported for the whole API, so they aren't shown
-      per app.
-    - Email (stages that declare it): sending status, today's recipients
-      against the limit, SES's per-tenant sends, deliveries, bounces and
-      complaints, and the suppression list.
-    - Data browser for collections and files.
-    - Deployments with rollback; secrets; settings; cost.
-  - **Admin:** members, platform cost, and the edge floor's state and blocked requests.
+- **Console** (`platform.ericminassian.com`, `services/control-plane/web`):
+  dark only, React on TanStack Router, Charts and Table with shadcn/ui.
+  - **Layout:** one sidebar. At the top level: Apps, Dashboards (all,
+    including those that span apps) and Platform. In an app, its pages grouped
+    as Observe (Overview, Logs, Traces, Metrics, Errors, Alerts, Dashboards),
+    Run (Jobs, and Services, Email and Realtime when a stage declares them),
+    Data (Database, Storage), Ship (Deployments) and Configure (Secrets, Cost,
+    Settings). The scope switcher picks the app and stage; ⌘K jumps to an app,
+    a page or a trace id.
+  - **Everything is in the URL:** the time window, stage, filters, queries and
+    chart choices are typed search params, so any view is a link and the
+    window follows you between pages. Dragging across a chart zooms every
+    chart on the page; charts on a page share a cursor and mark deployments.
+  - **Home:** every app with status, its prod traffic over 24 hours, error
+    rate, p95, firing alerts, cost and last deploy, trouble first.
+  - **Metrics:** the explorer. Up to 8 queries (metric, statistic, filters,
+    group by) over the rollups, expressions over them (`100 * b / a`), as a
+    line, area, bar, heatmap, number or table. Each unit gets its own chart,
+    never a second axis. The bucket size follows the window (about 150
+    points; minute rollups for the last 3 days, hourly after). Expressions
+    run in the browser on the series the API returns.
+  - **Logs:** search (text or a filter pattern) with facets for level,
+    stream, route, status class and deployment, a volume chart by level, and
+    a line's neighbours in its stream; Live tail; Logs Insights over the
+    stage's own log groups, charting `stats … by bin()` results.
+  - **Traces:** recent traces with filters and a duration scatter; a trace
+    as a waterfall with its logs. **Errors:** groups with occurrences by
+    deployment and the stack.
+  - **Saved views** on Logs, Traces and Metrics belong to the app and are
+    shared by its members (up to 100 per app).
+  - **Dashboards** belong to an app or span apps. Widgets are explorer charts
+    or log searches on a 12-column grid, placed by dragging and resizing; a
+    dashboard opens on its own time window. Any chart's menu can open it in
+    the explorer, add it to a dashboard or start an alert rule from it.
+  - **Run, Data, Ship, Configure:** jobs (each queue's scheduled retries and
+    delayed sends, the stage's dead letters with redrive and discard, cron
+    run-now); services (state from ECS, container starts and failed runs from
+    telemetry, CPU and memory from ECS's free per-service metrics, recent ECS
+    events and the last stop reason; restart, start and stop); realtime
+    (publishes, subscribes and errors from AppSync's per-namespace metrics;
+    deliveries and connections are only reported for the whole API, so they
+    aren't shown per app); email (sending status, today's recipients against
+    the limit, SES's per-tenant sends, deliveries, bounces and complaints,
+    and the suppression list); collections and files; deployments with
+    rollback; secrets; cost; settings.
+  - **Platform:** members, platform cost, and the edge floor's state and
+    blocked requests.
+  - **Demo:** `pnpm web:demo` in `services/control-plane` serves the API
+    from generated data (`src/demo`), for working on the console without AWS.
 - **Uptime.** Every 5 minutes the pinger
   (`services/control-plane/src/jobs/pinger.ts`) gives each prod stage a
   result without waking servers that have nothing to do:

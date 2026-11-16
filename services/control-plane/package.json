@@ -15,7 +15,8 @@
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "vite build --config web/vite.config.ts",
     "api:dev": "node src/dev.ts",
-    "web:demo": "node src/demo/server.ts"
+    "web:demo": "node src/demo/server.ts",
+    "web:shots": "node web/shots.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudfront": "^3.1169.0",
@@ -66,6 +67,7 @@
     "cn": "^0.5.2",
     "d3-scale": "^4.0.3",
     "lucide-react": "^1.73.0",
+    "playwright": "^1.65.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "react-grid-layout": "^2.3.0",
