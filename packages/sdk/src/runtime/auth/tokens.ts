@@ -19,9 +19,21 @@ function jwks(uri: string) {
   return set;
 }
 
+/**
+ * The issuers a token may name. Cognito's keys live at
+ * `<issuer>/.well-known/jwks.json`, so in AWS the two agree. Locally the keys
+ * are the emulator's: AWS Emulator 1.0.471 and later name its own endpoint
+ * as the issuer, earlier releases Cognito's, so a local stage takes either.
+ */
+export function acceptedIssuers(auth: Pick<AuthBindings, 'mode' | 'issuer' | 'jwksUri'>): string | string[] {
+  if (auth.mode !== 'local') return auth.issuer;
+  const ofKeys = auth.jwksUri.replace(/\/\.well-known\/jwks\.json$/, '');
+  return ofKeys === auth.issuer || ofKeys === auth.jwksUri ? auth.issuer : [auth.issuer, ofKeys];
+}
+
 /** Verify a Cognito ID (or access) token for this app's client and map it to a user. */
 export async function verifyToken(auth: AuthBindings, token: string): Promise<PlatformUser> {
-  const { payload } = await jwtVerify(token, jwks(auth.jwksUri), { issuer: auth.issuer });
+  const { payload } = await jwtVerify(token, jwks(auth.jwksUri), { issuer: acceptedIssuers(auth) });
   const use = payload.token_use;
   if (use === 'id') {
     const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
