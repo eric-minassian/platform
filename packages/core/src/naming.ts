@@ -1,5 +1,6 @@
 import { PROD_STAGE } from './constants.ts';
 import { fingerprint } from './fingerprint.ts';
+import { PUBLIC_STORAGE_ROOT } from './storage.ts';
 
 /**
  * App names: 3-30 chars, lowercase letters/digits/single hyphens, starting with
@@ -128,9 +129,12 @@ export const names = {
   sharedSecretsPath: (app: string) => `/platform/apps/${app}/_shared/secrets/`,
   /** SSM SecureString holding the stage key (see `Bindings.stageKey`); outside the secrets path. */
   stageKeyParameter: (app: string, stage: string) => `/platform/apps/${app}/${stage}/stage-key`,
-  /** Prefix inside the shared storage bucket: `<app>/<stage>/<bucket>/`. */
-  storagePrefix: (app: string, stage: string, bucket?: string) =>
-    bucket ? `${app}/${stage}/${bucket}/` : `${app}/${stage}/`,
+  /** A private store's prefix in the shared storage bucket: `<app>/<stage>/<store>/`. */
+  storagePrefix: (app: string, stage: string, store?: string) =>
+    store ? `${app}/${stage}/${store}/` : `${app}/${stage}/`,
+  /** A public store's prefix in the shared storage bucket: `_public/<app>/<stage>/<store>/` (see `storage.ts`). */
+  publicStoragePrefix: (app: string, stage: string, store?: string) =>
+    `${PUBLIC_STORAGE_ROOT}${names.storagePrefix(app, stage, store)}`,
   /** Prefix inside the shared sites bucket for one deployment's static files. */
   sitePrefix: (app: string, stage: string, deploymentId: string) => `${app}/${stage}/${deploymentId}`,
   artifactKey: (app: string, stage: string, deploymentId: string, file: string) =>
