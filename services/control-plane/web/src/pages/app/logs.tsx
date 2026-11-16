@@ -42,6 +42,15 @@ interface LogsKey {
 const hasFilters = (f: LogFilters | undefined) =>
   !!f && Object.values(f).some((v) => (Array.isArray(v) ? v.length > 0 : !!v));
 
+/**
+ * A CloudWatch filter pattern (`{ $.status >= 500 }`, `?a ?b`) rather than
+ * text. Only the line search reads one: facets, volume and structured
+ * filters run on Logs Insights, which can't.
+ */
+const isPattern = (q: string | undefined) => /^\s*[{?]/.test(q ?? '');
+
+const PATTERN_NOTE = 'Counts need plain text: a filter pattern only lists the lines it matches.';
+
 const statsAtom = family((k: LogsKey) =>
   fresh(
     ApiClient.query('observe', 'logStats', {
@@ -284,40 +293,44 @@ export function LogsPage() {
   );
 }
 
-function FacetsPanel({
+type StatsProps = {
+  app: string;
+  stage: string;
+  time: TimeSearch;
+  q: string | undefined;
+  filters: LogFilters;
+};
+
+function FacetsPanel(props: StatsProps & { onChange: (f: LogFilters) => void }) {
+  if (!isPattern(props.q)) return <CountedFacets {...props} />;
+  return (
+    <>
+      <p className="px-4 pt-3 text-xs text-muted-foreground">No facets for a filter pattern.</p>
+      <Facets stats={undefined} filters={props.filters} onChange={props.onChange} />
+    </>
+  );
+}
+
+function CountedFacets({
   app,
   stage,
   time,
   q,
   filters,
   onChange,
-}: {
-  app: string;
-  stage: string;
-  time: TimeSearch;
-  q: string | undefined;
-  filters: LogFilters;
-  onChange: (f: LogFilters) => void;
-}) {
+}: StatsProps & { onChange: (f: LogFilters) => void }) {
   const stats = Option.getOrUndefined(
     AsyncResult.value(useSticky(useAtomValue(statsAtom({ app, stage, time, q, f: filters })))),
   );
   return <Facets stats={stats} filters={filters} onChange={onChange} />;
 }
 
-function Volume({
-  app,
-  stage,
-  time,
-  q,
-  filters,
-}: {
-  app: string;
-  stage: string;
-  time: TimeSearch;
-  q: string | undefined;
-  filters: LogFilters;
-}) {
+function Volume(props: StatsProps) {
+  if (!isPattern(props.q)) return <CountedVolume {...props} />;
+  return <p className="border-b px-4 py-3 text-xs text-muted-foreground">{PATTERN_NOTE}</p>;
+}
+
+function CountedVolume({ app, stage, time, q, filters }: StatsProps) {
   const atom = statsAtom({ app, stage, time, q, f: filters });
   useAutoRefresh(atom, time.from === undefined);
   const result = useSticky(useAtomValue(atom));

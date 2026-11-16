@@ -57,7 +57,8 @@ export function Facets({
           facet.key === 'levels'
             ? values.toSorted((a, b) => LEVEL_ORDER.indexOf(a.value) - LEVEL_ORDER.indexOf(b.value))
             : values;
-        if (ordered.length === 0 && facet.key !== 'levels') return null;
+        // Without counts (loading, or a filter pattern search) only picked values are listed.
+        if (ordered.length === 0 && (facet.key !== 'levels' || !stats)) return null;
         return (
           <fieldset key={facet.key} className="min-w-0">
             <legend className="mb-1.5 text-xs font-medium text-muted-foreground">{facet.title}</legend>
