@@ -268,18 +268,25 @@ describe('runService', () => {
 });
 
 describe('traced', () => {
-  const QUEUE_ARN = 'arn:aws:sqs:us-east-1:000000000000:atlas--test--positions';
   const sent: Array<{ trace?: string }> = [];
   beforeEach(() => {
     sent.length = 0;
     useTestBindings({
       app: 'atlas',
-      queues: { positions: { url: 'https://sqs/positions', arn: QUEUE_ARN } },
+      worker: 'atlas--test--worker',
+      jobs: {
+        queues: ['positions'],
+        fns: {},
+        attempts: {},
+        dead: 'https://sqs/atlas--test--jobs--dead',
+        group: 'atlas--test',
+        role: 'arn:role',
+      },
     });
-    mockClient('sqs', (cmd) => {
-      const attrs = cmd.input.MessageAttributes as { trace?: { StringValue?: string } } | undefined;
-      sent.push({ trace: attrs?.trace?.StringValue });
-      return {};
+    mockClient('lambda', (cmd) => {
+      const job = JSON.parse(new TextDecoder().decode(cmd.input.Payload as Uint8Array)) as { trace?: string };
+      sent.push({ trace: job.trace });
+      return { StatusCode: 202 };
     });
   });
 

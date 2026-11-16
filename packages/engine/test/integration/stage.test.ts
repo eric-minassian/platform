@@ -6,9 +6,19 @@ import {
 import { DescribeTableCommand, DescribeTimeToLiveCommand } from '@aws-sdk/client-dynamodb';
 import { ListTargetsByRuleCommand, PutEventsCommand } from '@aws-sdk/client-eventbridge';
 import { GetRoleCommand, GetRolePolicyCommand } from '@aws-sdk/client-iam';
-import { GetFunctionConfigurationCommand } from '@aws-sdk/client-lambda';
+import {
+  GetFunctionConfigurationCommand,
+  GetFunctionEventInvokeConfigCommand,
+  InvokeCommand,
+} from '@aws-sdk/client-lambda';
 import { GetScheduleCommand } from '@aws-sdk/client-scheduler';
-import { GetQueueAttributesCommand, GetQueueUrlCommand, SendMessageCommand } from '@aws-sdk/client-sqs';
+import {
+  CreateQueueCommand,
+  GetQueueAttributesCommand,
+  GetQueueUrlCommand,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+} from '@aws-sdk/client-sqs';
 import { GetParameterCommand } from '@aws-sdk/client-ssm';
 import {
   names,
@@ -16,6 +26,7 @@ import {
   type PlatformRuntimeConfig,
   parseManifest,
   type ResolvedManifest,
+  readDeadLetter,
 } from '@ericminassian/platform-core';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -37,6 +48,10 @@ export const handler = async (event) => {
     for (const r of event.Records) console.log('PLATFORM_TEST queue ' + r.body);
     return { batchItemFailures: [] };
   }
+  if (event.__platform === 'job') {
+    console.log('PLATFORM_TEST job ' + event.kind + ' ' + JSON.stringify(event.body));
+    return;
+  }
   if (event['detail-type']) {
     console.log('PLATFORM_TEST event ' + event['detail-type'] + ' ' + JSON.stringify(event.detail));
     return;
@@ -50,7 +65,7 @@ const manifest = parseManifest({
   name: 'itest',
   db: true,
   auth: true,
-  queues: { jobs: { batchSize: 5 } },
+  queues: { jobs: { maxAttempts: 2 } },
   events: ['thing.happened'],
   crons: { tick: '*/5 * * * *' },
   storage: ['files'],
@@ -64,7 +79,7 @@ const ownFunctions = parseManifest({
   name: 'itest',
   db: true,
   auth: true,
-  queues: { jobs: { batchSize: 5, memoryMb: 256, timeoutSeconds: 20 } },
+  queues: { jobs: { memoryMb: 256, timeoutSeconds: 20 } },
   events: { 'thing.happened': { memoryMb: 256 } },
   crons: { tick: { schedule: '*/5 * * * *', timeoutSeconds: 30 } },
   storage: ['files'],
@@ -170,7 +185,15 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       expect(result.host).toBe('itest--itest1.localhost');
       expect(result.url).toBe('http://itest--itest1.localhost:3000');
       expect(result.bindings.table).toBe('itest--itest1');
-      expect(Object.keys(result.bindings.queues)).toEqual(['jobs']);
+      const jobs = result.bindings.jobs!;
+      expect([jobs.queues, jobs.fns, jobs.attempts, jobs.group]).toEqual([
+        ['jobs'],
+        {},
+        { 'queue:jobs': 2 },
+        'itest--itest1',
+      ]);
+      expect(jobs.dead).toMatch(/itest--itest1--jobs--dead$/);
+      expect(jobs.role).toMatch(/:role\/platform\/apps\/itest--itest1$/);
       expect(result.bindings.auth?.mode).toBe('local');
       expect(result.bindings.auth?.jwksUri).toBe(
         `${conn.endpoint}/${platform.userPoolId}/.well-known/jwks.json`,
@@ -201,18 +224,30 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       expect(role.Role?.Path).toBe('/platform/apps/');
     });
 
-    it('delivers queue messages to the worker', async () => {
+    it('runs queue messages invoked the way the SDK sends them', async () => {
       const ctx = engineContext(engine);
-      const queueUrl = (await engine.listStageResources('itest', stage)).find(
-        (r) => r.name === 'itest--itest1--jobs',
+      const resources = await engine.listStageResources('itest', stage);
+      expect(resources.filter((r) => r.type === 'queue').map((r) => r.name)).toEqual([
+        names.deadLetters('itest', stage),
+      ]);
+      await ctx.clients.lambda.send(
+        new InvokeCommand({
+          FunctionName: names.workerFunction('itest', stage),
+          InvocationType: 'Event',
+          Payload: new TextEncoder().encode(
+            JSON.stringify({
+              __platform: 'job',
+              kind: 'queue',
+              name: 'jobs',
+              id: 'm1',
+              attempt: 1,
+              sentAt: 1,
+              body: { n: 42 },
+            }),
+          ),
+        }),
       );
-      expect(queueUrl).toBeDefined();
-      const deployed = await deploy();
-      await ctx.clients.sqs.send(
-        new SendMessageCommand({ QueueUrl: deployed.bindings.queues.jobs!.url, MessageBody: '{"n":42}' }),
-      );
-      const line = await waitForLine('queue {"n":42}');
-      expect(line).toContain('PLATFORM_TEST queue');
+      expect(await waitForLine('job queue {"n":42}')).toContain('PLATFORM_TEST job');
     });
 
     it('delivers published events to the worker', async () => {
@@ -261,13 +296,11 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       const schedule = await ctx.clients.scheduler.send(
         new GetScheduleCommand({ GroupName: names.scheduleGroup('itest', stage), Name: 'tick' }),
       );
-      const queue = await ctx.clients.sqs.send(
-        new GetQueueUrlCommand({ QueueName: names.queue('itest', stage, 'jobs') }),
-      );
-      const visibility = await ctx.clients.sqs.send(
-        new GetQueueAttributesCommand({ QueueUrl: queue.QueueUrl, AttributeNames: ['VisibilityTimeout'] }),
-      );
       const worker = names.workerFunction('itest', stage);
+      const failures = await ctx.clients.lambda.send(
+        new GetFunctionEventInvokeConfigCommand({ FunctionName: worker }),
+      );
+      const dead = names.deadLetters('itest', stage);
       return {
         workerMappings: await mappings(worker),
         queueFunctionMappings: await mappings(handlerFunctions.queue),
@@ -275,7 +308,12 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         eventFunctionGrants: await grants(handlerFunctions.event),
         ruleTargets: rule.Targets?.map((t) => t.Arn!.split(':').pop()),
         scheduleTarget: schedule.Target?.Arn?.split(':').pop(),
-        visibility: Number(visibility.Attributes?.VisibilityTimeout),
+        // Everything that gives up on a job sends it to the stage's dead-letter queue.
+        deadLetters: [
+          failures.DestinationConfig?.OnFailure?.Destination,
+          rule.Targets?.[0]?.DeadLetterConfig?.Arn,
+          schedule.Target?.DeadLetterConfig?.Arn,
+        ].map((arn) => arn?.split(':').pop() === dead),
       };
     }
 
@@ -304,24 +342,23 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
 
       expect(await triggers()).toEqual({
         workerMappings: [],
-        queueFunctionMappings: [names.queue('itest', stage, 'jobs')],
+        queueFunctionMappings: [],
         workerGrants: [],
         eventFunctionGrants: ['events-itest--itest1--thing_happened'],
         ruleTargets: [handlerFunctions.event],
         scheduleTarget: handlerFunctions.cron,
-        // 6× the queue handler's timeout, lowered from the worker's 6× 60 s once nothing longer receives.
-        visibility: 120,
+        deadLetters: [true, true, true],
+      });
+      expect(deployed.bindings.jobs?.fns).toEqual({
+        'queue:jobs': handlerFunctions.queue,
+        'event:thing.happened': handlerFunctions.event,
+        'cron:tick': handlerFunctions.cron,
       });
 
       const role = await ctx.clients.iam.send(
         new GetRolePolicyCommand({ RoleName: names.role('itest', stage), PolicyName: 'runtime' }),
       );
-      expect(decodeURIComponent(role.PolicyDocument!)).toContain(`function:${handlerFunctions.cron}"`);
-
-      await ctx.clients.sqs.send(
-        new SendMessageCommand({ QueueUrl: deployed.bindings.queues.jobs!.url, MessageBody: '{"n":43}' }),
-      );
-      expect(await waitForLine('queue {"n":43}')).toContain('PLATFORM_TEST queue');
+      expect(decodeURIComponent(role.PolicyDocument!)).toContain(`function:${handlerFunctions.queue}"`);
     });
 
     it('moves them back to the worker when their settings go, and removes their functions', async () => {
@@ -332,14 +369,71 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       expect(functions.map((r) => r.name)).toEqual([names.workerFunction('itest', stage)]);
       const worker = names.workerFunction('itest', stage);
       expect(await triggers()).toEqual({
-        workerMappings: [names.queue('itest', stage, 'jobs')],
+        workerMappings: [],
         queueFunctionMappings: [],
         workerGrants: ['events-itest--itest1--thing_happened'],
         eventFunctionGrants: [],
         ruleTargets: [worker],
         scheduleTarget: worker,
-        visibility: 360,
+        deadLetters: [true, true, true],
       });
+    });
+
+    it('drains a queue from before 0.4.0 and moves its dead letters into the stage’s', async () => {
+      const ctx = engineContext(engine);
+      const legacy = (
+        await ctx.clients.sqs.send(
+          new CreateQueueCommand({ QueueName: names.legacyQueue('itest', stage, 'jobs') }),
+        )
+      ).QueueUrl!;
+      const legacyDlq = (
+        await ctx.clients.sqs.send(
+          new CreateQueueCommand({ QueueName: names.legacyDeadLetterQueue('itest', stage, 'jobs') }),
+        )
+      ).QueueUrl!;
+      await ctx.clients.sqs.send(new SendMessageCommand({ QueueUrl: legacy, MessageBody: '{"n":44}' }));
+      await ctx.clients.sqs.send(new SendMessageCommand({ QueueUrl: legacyDlq, MessageBody: '{"n":45}' }));
+
+      const deployed = await deploy();
+      // The queue still held a message, so its mapping drains it into the worker.
+      expect(await triggers()).toMatchObject({ workerMappings: [names.legacyQueue('itest', stage, 'jobs')] });
+      expect(await waitForLine('queue {"n":44}')).toContain('PLATFORM_TEST queue');
+      const moved = await ctx.clients.sqs.send(
+        new ReceiveMessageCommand({ QueueUrl: deployed.bindings.jobs!.dead, WaitTimeSeconds: 2 }),
+      );
+      expect(readDeadLetter(moved.Messages![0]!.Body!)).toMatchObject({
+        kind: 'queue',
+        name: 'jobs',
+        redrive: { body: { n: 45 } },
+      });
+      const gone = await ctx.clients.sqs
+        .send(new GetQueueUrlCommand({ QueueName: names.legacyDeadLetterQueue('itest', stage, 'jobs') }))
+        .then(
+          () => undefined,
+          (e: unknown) => (e as Error).name,
+        );
+      expect(gone).toMatch(/NonExistentQueue|QueueDoesNotExist/);
+
+      // Once drained, the next deploy deletes it and its mapping.
+      for (let i = 0; i < 30; i++) {
+        const left = await ctx.clients.sqs.send(
+          new GetQueueAttributesCommand({
+            QueueUrl: legacy,
+            AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'],
+          }),
+        );
+        if (
+          Number(left.Attributes?.ApproximateNumberOfMessages) +
+            Number(left.Attributes?.ApproximateNumberOfMessagesNotVisible) ===
+          0
+        )
+          break;
+        await new Promise((r) => setTimeout(r, 1_000));
+      }
+      await deploy();
+      expect(await triggers()).toMatchObject({ workerMappings: [] });
+      const queues = (await engine.listStageResources('itest', stage)).filter((r) => r.type === 'queue');
+      expect(queues.map((r) => r.name)).toEqual([names.deadLetters('itest', stage)]);
     });
 
     it('destroys everything for the stage, handlers’ own functions included', async () => {

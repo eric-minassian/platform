@@ -4,10 +4,14 @@ import {
   CreateFunctionCommand,
   DeleteEventSourceMappingCommand,
   DeleteFunctionCommand,
+  DeleteFunctionConcurrencyCommand,
+  GetFunctionConcurrencyCommand,
   GetFunctionConfigurationCommand,
   GetPolicyCommand,
   ListEventSourceMappingsCommand,
   ListFunctionsCommand,
+  PutFunctionConcurrencyCommand,
+  PutFunctionEventInvokeConfigCommand,
   RemovePermissionCommand,
   TagResourceCommand,
   UpdateEventSourceMappingCommand,
@@ -56,7 +60,11 @@ export async function ensureFunction(ctx: EngineContext, spec: FunctionSpec): Pr
     Timeout: spec.timeoutSeconds,
     Description: spec.description,
     Environment: { Variables: spec.env },
-    LoggingConfig: spec.logGroup ? { LogFormat: 'JSON' as const, LogGroup: spec.logGroup } : undefined,
+    // WARN drops Lambda's own START/END/REPORT lines: the SDK's `job` and `env` lines carry the same
+    // facts, and every line is ingestion billed per GB.
+    LoggingConfig: spec.logGroup
+      ? { LogFormat: 'JSON' as const, LogGroup: spec.logGroup, SystemLogLevel: 'WARN' as const }
+      : undefined,
   };
 
   if (!existing) {
@@ -145,6 +153,78 @@ export async function listFunctions(
     Marker = res.NextMarker;
   } while (Marker);
   return out;
+}
+
+// ------------------------------------------------------------------ async invocations
+
+/**
+ * How Lambda treats an async invocation whose run crashed or timed out (a
+ * handler's own failure never reaches Lambda: the SDK retries or
+ * dead-letters it): two more tries, events kept up to six hours while the
+ * function is throttled, then the record goes to `deadLetterArn`.
+ */
+export async function ensureAsyncConfig(
+  ctx: EngineContext,
+  spec: { functionName: string; deadLetterArn: string },
+): Promise<void> {
+  // A destination is checked against the role's sqs:SendMessage grant, which IAM may still be
+  // propagating for a new role.
+  await retry(
+    () =>
+      ctx.clients.lambda.send(
+        new PutFunctionEventInvokeConfigCommand({
+          FunctionName: spec.functionName,
+          MaximumRetryAttempts: 2,
+          MaximumEventAgeInSeconds: 21_600,
+          DestinationConfig: { OnFailure: { Destination: spec.deadLetterArn } },
+        }),
+      ),
+    {
+      when: (e) =>
+        isUpdateInProgress(e) ||
+        (errorName(e) === 'InvalidParameterValueException' &&
+          /permission|role|destination/i.test(errorMessage(e))),
+      attempts: 15,
+      delayMs: 2_000,
+    },
+  );
+}
+
+/**
+ * Cap a function's concurrent runs (`undefined` removes the cap). Reserved
+ * concurrency comes out of the account's pool, which must keep 100 (or, on a
+ * new account, all of its 10) unreserved, so Lambda may refuse it.
+ */
+export async function ensureReservedConcurrency(
+  ctx: EngineContext,
+  functionName: string,
+  concurrency: number | undefined,
+): Promise<void> {
+  const lambda = ctx.clients.lambda;
+  const current = (await lambda.send(new GetFunctionConcurrencyCommand({ FunctionName: functionName })))
+    .ReservedConcurrentExecutions;
+  if (current === concurrency) return;
+  if (concurrency === undefined) {
+    await lambda.send(new DeleteFunctionConcurrencyCommand({ FunctionName: functionName }));
+    return;
+  }
+  try {
+    await lambda.send(
+      new PutFunctionConcurrencyCommand({
+        FunctionName: functionName,
+        ReservedConcurrentExecutions: concurrency,
+      }),
+    );
+  } catch (e) {
+    if (errorName(e) === 'InvalidParameterValueException' && /unreserved/i.test(errorMessage(e)))
+      throw new Error(
+        `a queue's concurrency (${concurrency}) needs that much of the account's Lambda concurrency reserved, ` +
+          `and the account doesn't have it to spare (${errorMessage(e)}). Raise the account's ` +
+          '"Concurrent executions" quota, or lower or remove `concurrency`.',
+        { cause: e },
+      );
+    throw e;
+  }
 }
 
 // ------------------------------------------------------------------ event source mappings

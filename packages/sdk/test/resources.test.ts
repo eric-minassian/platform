@@ -12,7 +12,15 @@ describe('queue / events / storage / secrets', () => {
   beforeEach(() => {
     useTestBindings({
       app: 'todo',
-      queues: { emails: { url: 'https://sqs/emails', arn: 'arn:q' } },
+      worker: 'todo--test--worker',
+      jobs: {
+        queues: ['emails', 'slow'],
+        fns: { 'queue:slow': 'todo--test--worker--queue-slow' },
+        attempts: {},
+        dead: 'https://sqs.us-east-1.amazonaws.com/000000000000/todo--test--jobs--dead',
+        group: 'todo--test',
+        role: 'arn:aws:iam::000000000000:role/platform/apps/todo--test',
+      },
       bus: { name: 'todo--test', arn: 'arn:bus' },
       storage: { bucket: 'storage-bucket', prefix: 'todo/test/', stores: ['uploads'] },
     });
@@ -23,24 +31,70 @@ describe('queue / events / storage / secrets', () => {
     resetPlatform();
   });
 
-  it('sends queue messages with a trace attribute and batches by 10', async () => {
-    const calls: Array<{ name: string; input: Record<string, unknown> }> = [];
-    mockClient('sqs', (cmd) => {
-      calls.push({ name: cmd.constructor.name, input: cmd.input });
+  it('sends a queue message as an async invoke of the function its handler runs in', async () => {
+    const invokes: Record<string, unknown>[] = [];
+    mockClient('lambda', (cmd) => {
+      invokes.push(cmd.input);
+      return { StatusCode: 202 };
+    });
+    await queue('emails').send({ to: 'a' });
+    expect(invokes[0]).toMatchObject({ FunctionName: 'todo--test--worker', InvocationType: 'Event' });
+    const job = JSON.parse(new TextDecoder().decode(invokes[0]!.Payload as Uint8Array)) as Record<
+      string,
+      unknown
+    >;
+    expect(job).toMatchObject({
+      __platform: 'job',
+      kind: 'queue',
+      name: 'emails',
+      attempt: 1,
+      body: { to: 'a' },
+    });
+    expect(job.trace).toMatch(/^[0-9a-f]{32}$/);
+    expect(job.id).toMatch(/^m[0-9a-z]{26}$/);
+
+    await queue('slow').sendBatch(Array.from({ length: 23 }, (_, i) => i));
+    expect(invokes.slice(1).map((i) => i.FunctionName)).toEqual(
+      Array(23).fill('todo--test--worker--queue-slow'),
+    );
+
+    await expect(queue('nope').send(1)).rejects.toThrow(/Declared queues: emails, slow/);
+    await expect(queue('emails').send('x'.repeat(250 * 1024))).rejects.toThrow(/over the 240 KB limit/);
+  });
+
+  it('sends a delayed message as a one-shot schedule, at least a minute out', async () => {
+    const schedules: Record<string, unknown>[] = [];
+    mockClient('scheduler', (cmd) => {
+      schedules.push(cmd.input);
       return {};
     });
-    await queue('emails').send({ to: 'a' }, { delaySeconds: 5 });
-    expect(calls[0]!.input).toMatchObject({
-      QueueUrl: 'https://sqs/emails',
-      MessageBody: '{"to":"a"}',
-      DelaySeconds: 5,
+    const before = Date.now();
+    await queue('emails').send({ to: 'a' }, { delaySeconds: 3600 });
+    await queue('emails').send({ to: 'b' }, { delaySeconds: 5 });
+    const [hour, soon] = schedules as Array<{
+      Name: string;
+      GroupName: string;
+      ScheduleExpression: string;
+      ActionAfterCompletion: string;
+      Target: { Arn: string; RoleArn: string; Input: string; DeadLetterConfig: { Arn: string } };
+    }>;
+    expect(hour!.Name).toMatch(/^_q-emails-[0-9a-z]{26}$/);
+    expect(hour).toMatchObject({ GroupName: 'todo--test', ActionAfterCompletion: 'DELETE' });
+    expect(hour!.Target).toMatchObject({
+      Arn: 'arn:aws:lambda:us-east-1:000000000000:function:todo--test--worker',
+      RoleArn: 'arn:aws:iam::000000000000:role/platform/apps/todo--test',
+      DeadLetterConfig: { Arn: 'arn:aws:sqs:us-east-1:000000000000:todo--test--jobs--dead' },
     });
-    expect(
-      (calls[0]!.input.MessageAttributes as { trace: { StringValue: string } }).trace.StringValue,
-    ).toMatch(/^[0-9a-f]{32}$/);
-    await queue('emails').sendBatch(Array.from({ length: 23 }, (_, i) => i));
-    expect(calls.slice(1).map((c) => (c.input.Entries as unknown[]).length)).toEqual([10, 10, 3]);
-    await expect(queue('nope').send(1)).rejects.toThrow(/Declared queues: emails/);
+    expect(JSON.parse(hour!.Target.Input)).toMatchObject({
+      kind: 'queue',
+      name: 'emails',
+      body: { to: 'a' },
+    });
+    const at = (expr: string) => Date.parse(`${expr.slice(3, -1)}Z`);
+    expect(at(hour!.ScheduleExpression)).toBeGreaterThanOrEqual(before + 3_599_000);
+    // Scheduler fires within about a minute and refuses past times: short delays wait a minute.
+    expect(at(soon!.ScheduleExpression)).toBeGreaterThanOrEqual(before + 59_000);
+    await expect(queue('emails').send({}, { delaySeconds: -1 })).rejects.toThrow(/delaySeconds/);
   });
 
   it('publishes events in an envelope and surfaces failures', async () => {

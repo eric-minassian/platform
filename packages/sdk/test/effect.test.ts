@@ -22,6 +22,7 @@ import {
   captureTelemetry,
   createPlatformFetch,
   createWorkerHandler,
+  mockClient,
   resetPlatform,
   useTestBindings,
 } from '../src/testing.ts';
@@ -216,20 +217,35 @@ describe('defineWorker', () => {
   class Bounced extends Schema.TaggedError<Bounced, { readonly brand: unique symbol }>()('Bounced', {
     message: Schema.String,
   }) {}
-  const ARN = 'arn:aws:sqs:us-east-1:000000000000:todo--test--emails';
-  const record = (id: string, body: unknown) => ({
-    messageId: id,
-    body: JSON.stringify(body),
-    eventSource: 'aws:sqs',
-    eventSourceARN: ARN,
-    attributes: { ApproximateReceiveCount: '3' },
+  const job = (id: string, body: unknown, attempt: number) => ({
+    __platform: 'job',
+    kind: 'queue',
+    name: 'emails',
+    id,
+    attempt,
+    sentAt: 1_700_000_000_000,
+    body,
   });
+  const scheduled: Array<Record<string, unknown>> = [];
 
   beforeEach(() => {
-    useTestBindings({ app: 'todo', queues: { emails: { url: 'https://sqs/emails', arn: ARN } } });
+    scheduled.length = 0;
+    useTestBindings({
+      app: 'todo',
+      worker: 'todo--test--worker',
+      jobs: {
+        queues: ['emails'],
+        fns: {},
+        attempts: {},
+        dead: 'https://sqs/todo--test--jobs--dead',
+        group: 'todo--test',
+        role: 'arn:role',
+      },
+    });
+    mockClient('scheduler', (cmd) => void scheduled.push(cmd.input));
   });
 
-  it('runs handlers on one runtime and fails the jobs whose effect fails', async () => {
+  it('runs handlers on one runtime and retries the jobs whose effect fails', async () => {
     let builds = 0;
     const seen: unknown[] = [];
     const handler = createWorkerHandler(
@@ -249,13 +265,17 @@ describe('defineWorker', () => {
       }),
     );
 
-    expect(await handler({ Records: [record('a', { to: 'x' }), record('b', { fail: true })] }, {})).toEqual({
-      batchItemFailures: [{ itemIdentifier: 'b' }],
-    });
+    expect(await handler(job('a', { to: 'x' }, 3), {})).toBeUndefined();
+    // A failed run isn't the invocation's failure: its next attempt is scheduled instead.
+    expect(await handler(job('b', { fail: true }, 3), {})).toBeUndefined();
     expect(await handler({ __platform: 'invoke', name: 'double', payload: 21 }, {})).toBe(42);
     expect(seen).toEqual([{ body: { to: 'x' }, attempt: 3, trace: 32 }]);
     expect(builds).toBe(1);
     expect(ofType('err')).toMatchObject([{ source: 'job', message: 'bounced', job: 'queue:emails' }]);
+    expect(JSON.parse((scheduled[0]!.Target as { Input: string }).Input)).toMatchObject({
+      id: 'b',
+      attempt: 4,
+    });
   });
 
   it('hands CloudWatch Logs batches to the logs handler, failing the delivery when it fails', async () => {

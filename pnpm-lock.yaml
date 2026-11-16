@@ -381,6 +381,9 @@ importers:
       '@aws-sdk/client-s3':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/client-scheduler':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-sesv2':
         specifier: ^3.1169.0
         version: 3.1169.0

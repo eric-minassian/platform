@@ -122,6 +122,8 @@ export const names = {
    * queues end in `--dlq`, so this can't be a pre-0.4.0 queue's name.
    */
   deadLetters: (app: string, stage: string) => `${app}--${stage}--jobs--dead`,
+  /** The SQS queue `plat dev` points the stage's event rules at, to run events in the local worker. */
+  devEventTap: (app: string, stage: string) => `${app}--${stage}--plat-dev-events`,
   /** A queue's SQS queue and its dead-letter queue, before queues were pushed (0.4.0). */
   legacyQueue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}`,
   legacyDeadLetterQueue: (app: string, stage: string, key: string) => `${app}--${stage}--${key}--dlq`,

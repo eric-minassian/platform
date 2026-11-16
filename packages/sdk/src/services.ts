@@ -72,11 +72,19 @@ export class Auth extends Context.Service<
 }
 
 export interface SendOptions {
-  /** Hold the message before it becomes visible (up to 15 minutes). */
+  /**
+   * Run it no sooner than this, up to a year. Delays are kept to the minute:
+   * one shorter than a minute waits about a minute.
+   */
   readonly delay?: Duration.Input;
 }
 
-/** Queues declared under `queues` in `plat.config.ts`; bodies have the declared types. */
+/**
+ * Queues declared under `queues` in `plat.config.ts`; bodies have the
+ * declared types. Each message is one run of the queue's handler, at least
+ * once, in no set order; a failed run is retried (`maxAttempts`) and then
+ * kept in the stage's dead-letter queue. Messages are at most 240 KB of JSON.
+ */
 export class Queues extends Context.Service<
   Queues,
   {

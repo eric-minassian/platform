@@ -8,29 +8,37 @@ import {
   type Bindings,
   cognitoIssuer,
   cognitoJwksUri,
+  DEFAULT_ATTEMPTS,
+  type DeadLetter,
   type EmailBindings,
   emailDailyLimit,
   emailFromAddress,
   encodeBindings,
   type HandlerKind,
   handlerFunctionName,
+  handlerKey,
   handlerSettings,
   IAM_APP_PATH,
+  isJobSchedule,
+  JOB_MARKER,
   LOCAL_STAGE,
   NODE_RUNTIME,
   names,
+  newId,
   ownFunctionHandlers,
   type PlatformRuntimeConfig,
   PROD_STAGE,
   platformNames,
   publicStores,
   publicUrl,
+  RESOURCE_KEY_PATTERN,
   type ResolvedManifest,
   type RouteRecord,
   realtimeEndpoints,
   stageHost,
   toSchedulerExpression,
   validateStageName,
+  workerHandlers,
 } from '@ericminassian/platform-core';
 import {
   deleteChannelNamespace,
@@ -47,12 +55,14 @@ import { deleteRoute, getRoute, putRoute } from './drivers/kvs.ts';
 import {
   deleteEventSourceMapping,
   deleteFunction,
+  ensureAsyncConfig,
   ensureEventSourceMapping,
   ensureFunction,
   ensurePermission,
   type FunctionState,
   listEventSourceMappings,
   listFunctions,
+  ensureReservedConcurrency,
   listPermissionIds,
   removePermission,
 } from './drivers/lambda.ts';
@@ -84,8 +94,9 @@ import {
 import {
   deleteQueue,
   ensureQueue,
-  getQueueVisibility,
   listQueues,
+  moveMessages,
+  queueDepth,
   setQueueAttributes,
 } from './drivers/sqs.ts';
 import { deleteParameter, deleteParametersByPath, ensureParameterOnce } from './drivers/ssm.ts';
@@ -126,10 +137,12 @@ import { type EngineContext, ignoreNotFound, stageTags } from './util.ts';
 const DEPLOYMENTS_KEPT = 3;
 
 /**
- * Crons and preview stop schedules share the stage's schedule group. Cron
- * keys can't contain `--`; a service's stop schedule (`<key>--stop`) does.
+ * Crons, jobs' retries and delayed sends, and preview stop schedules share the
+ * stage's schedule group. Cron keys start with a letter and can't contain
+ * `--`; a job's schedule starts with `_` and a service's stop schedule is
+ * `<key>--stop`.
  */
-const isCronSchedule = (name: string) => !name.includes('--');
+const isCronSchedule = (name: string) => !name.includes('--') && !isJobSchedule(name);
 
 /**
  * Public host of a stage. Under `plat dev` the `local` stage is simply
@@ -164,7 +177,6 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   const host = hostFor(platform, app, stage);
   const url = publicUrl(platform, host);
   const retention = input.logRetentionDays ?? (prod ? 30 : 7);
-  const base = names.base(app, stage);
   const hasWeb = Boolean(m.web?.server) && webMode === 'function';
   const hasWorker = Boolean(m.worker);
   const serviceKeys = Object.keys(m.services);
@@ -239,46 +251,13 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     );
   }
 
-  // 3. Queues (dead-letter queue first). A queue's visibility timeout must cover the timeout of
-  // each function receiving from it, and a queue whose handler moves to a function with a shorter
-  // timeout keeps its old one until step 9 moves it. So a timeout is only raised here; one that
-  // comes down is lowered after step 9.
-  const queues: Bindings['queues'] = {};
-  const lowerVisibility: Array<{ url: string; seconds: number }> = [];
-  for (const [key, q] of Object.entries(m.queues)) {
-    const dlq = await ensureQueue(ctx, {
-      name: names.deadLetterQueue(app, stage, key),
-      attributes: { MessageRetentionPeriod: String(14 * 24 * 3600) },
-      tags,
-    });
-    const handlerTimeout = handlerSettings(m, 'queue', key).timeoutSeconds;
-    let visibility = q.visibilityTimeoutSeconds;
-    if (visibility < handlerTimeout) {
-      ctx.log(
-        'warn',
-        `visibility timeout raised to the handler's timeout (${handlerTimeout}s)`,
-        `queue ${key}`,
-      );
-      visibility = handlerTimeout;
-    }
-    const name = names.queue(app, stage, key);
-    const current = await getQueueVisibility(ctx, name);
-    const main = await ensureQueue(ctx, {
-      name,
-      attributes: {
-        VisibilityTimeout: String(Math.max(visibility, current ?? 0)),
-        MessageRetentionPeriod: String(4 * 24 * 3600),
-        RedrivePolicy: JSON.stringify({ deadLetterTargetArn: dlq.arn, maxReceiveCount: q.maxReceiveCount }),
-      },
-      tags,
-    });
-    queues[key] = { url: main.url, arn: main.arn };
-    if (current !== undefined && current > visibility)
-      lowerVisibility.push({ url: main.url, seconds: visibility });
-    resources.push(
-      { type: 'queue', name: main.name, arn: main.arn },
-      { type: 'queue', name: dlq.name, arn: dlq.arn },
-    );
+  // 3. Jobs: the stage's dead-letter queue. Queues have no SQS queue of their own (they're async
+  // invokes, core jobs.ts); queues from before that drain first (step 9).
+  let deadLetters: { url: string; arn: string } | undefined;
+  if (hasWorker) {
+    const dead = await ensureDeadLetterQueue(ctx, { app, stage, region, accountId: acct, tags });
+    deadLetters = { url: dead.url, arn: dead.arn };
+    resources.push({ type: 'queue', name: dead.name, arn: dead.arn });
   }
 
   // 4. Event bus (always: anything may be published, subscriptions are optional).
@@ -367,16 +346,36 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   const email = await reconcileStageEmail(ctx, { app, stage, manifest: m, platform, tags, resources });
 
   // 8. Bindings.
+  const jobs: Bindings['jobs'] = deadLetters
+    ? {
+        queues: Object.keys(m.queues),
+        fns: Object.fromEntries(
+          ownFunctionHandlers(m).map((h) => [
+            handlerKey(h.kind, h.name),
+            names.handlerFunction(app, stage, h.kind, h.name),
+          ]),
+        ),
+        attempts: Object.fromEntries(
+          workerHandlers(m)
+            .filter((h) => h.maxAttempts !== DEFAULT_ATTEMPTS[h.kind])
+            .map((h) => [handlerKey(h.kind, h.name), h.maxAttempts]),
+        ),
+        dead: deadLetters.url,
+        group: names.scheduleGroup(app, stage),
+        role: roleArn,
+      }
+    : undefined;
   const bindings: Bindings = {
-    v: 1,
+    v: 2,
     app,
     stage,
     host,
     url,
     revision: deploymentId,
     region,
+    account: acct,
     ...(table ? { table } : {}),
-    queues,
+    ...(jobs ? { jobs } : {}),
     bus: { name: busName, arn: busArn },
     ...(m.storage.length
       ? {
@@ -408,10 +407,14 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     ...input.extraEnv,
   };
 
-  // 9. Worker + its triggers. A handler that sets its own memory or timeout runs in a function of
-  // its own: same bundle, environment and log group, other settings (Lambda sets them per function).
+  // 9. Worker + its triggers. A handler that sets its own memory, timeout or concurrency runs in a
+  // function of its own: same bundle, environment and log group, other settings (Lambda sets them
+  // per function).
   let workerFunction: DeployStageResult['workerFunction'];
-  if (hasWorker && m.worker && input.artifacts.worker) {
+  // Queues from before jobs were pushed: the ones that still hold messages drain through their
+  // event source mappings (the SDK still reads SQS batches); the rest go after the triggers move.
+  const legacy = await listLegacyQueues(ctx, { app, stage, manifest: m, region, accountId: acct });
+  if (hasWorker && m.worker && input.artifacts.worker && deadLetters) {
     const code = input.artifacts.worker;
     const deployFunction = (
       name: string,
@@ -442,6 +445,17 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     const fn = functions[0]!;
     workerFunction = { name: fn.name, arn: fn.arn };
     for (const f of functions) resources.push({ type: 'function', name: f.name, arn: f.arn });
+    // Crashes and timeouts (Lambda's retries) end in the dead-letter queue too; a queue's
+    // concurrency is its own function's reserved concurrency, and a cap no longer declared goes.
+    const concurrency = new Map(
+      ownFunctionHandlers(m).map((h) => [names.handlerFunction(app, stage, h.kind, h.name), h.concurrency]),
+    );
+    await settleAll(
+      functions.map(async (f) => {
+        await ensureAsyncConfig(ctx, { functionName: f.name, deadLetterArn: deadLetters.arn });
+        await ensureReservedConcurrency(ctx, f.name, concurrency.get(f.name));
+      }),
+    );
     await reconcileWorkerTriggers(ctx, {
       app,
       stage,
@@ -449,16 +463,15 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       functions,
       roleArn,
       busName,
-      queues,
+      deadLetterArn: deadLetters.arn,
+      draining: legacy.draining,
       tags,
       resources,
     });
   } else {
     await removeWorker(ctx, app, stage);
   }
-  // Nothing with a longer timeout receives from these queues any more (step 3).
-  for (const q of lowerVisibility)
-    await setQueueAttributes(ctx, q.url, { VisibilityTimeout: String(q.seconds) });
+  await retireLegacyQueues(ctx, { app, stage, legacy, deadLetters });
 
   // 9b. Services: images, task definitions and ECS services. Their rollouts run while the static
   // files and the web revision go up, and must finish before the route flips.
@@ -590,22 +603,14 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       keepTaskDefinitions: rollouts.flatMap((r) => r.previousTaskDefinition ?? []),
       kept: DEPLOYMENTS_KEPT,
     });
-    if (!hasWorker || !Object.keys(m.crons).length)
-      await deleteScheduleGroupIfEmpty(ctx, names.scheduleGroup(app, stage));
+    // The group holds crons and jobs' retries and delayed sends while there's a worker.
+    if (!hasWorker) await deleteScheduleGroupIfEmpty(ctx, names.scheduleGroup(app, stage));
   }
 
   // 14. Realtime removed from the manifest: the route no longer advertises it, so the namespace
   // can go (open connections to it are dropped by AppSync).
   if (!m.realtime && platform.realtime) {
     await deleteChannelNamespace(ctx, platform.realtime.apiId, names.realtimeNamespace(app, stage));
-  }
-
-  // 15. Queues removed from the manifest.
-  const wantedQueues = new Set(
-    Object.keys(m.queues).flatMap((k) => [names.queue(app, stage, k), names.deadLetterQueue(app, stage, k)]),
-  );
-  for (const q of await listQueues(ctx, `${base}--`)) {
-    if (!wantedQueues.has(q.name)) await deleteQueue(ctx, q.name);
   }
 
   ctx.log('info', `deployed ${app}/${stage} → ${url}`);
@@ -746,9 +751,11 @@ async function settleAll<T>(promises: Array<Promise<T>>): Promise<T[]> {
 }
 
 /**
- * Points each queue, event subscription and cron at the function its handler
- * runs in, then removes handler functions no longer declared. A trigger
- * reaches its new function before it leaves the old one.
+ * Points each event subscription and cron at the function its handler runs
+ * in, keeps draining pre-0.4.0 queues that still hold messages, then removes
+ * handler functions no longer declared. A trigger reaches its new function
+ * before it leaves the old one. Queue messages need no trigger: the SDK
+ * invokes the function directly.
  */
 async function reconcileWorkerTriggers(
   ctx: EngineContext,
@@ -760,7 +767,10 @@ async function reconcileWorkerTriggers(
     functions: FunctionState[];
     roleArn: string;
     busName: string;
-    queues: Bindings['queues'];
+    /** The stage's dead-letter queue: where triggers send what they couldn't deliver. */
+    deadLetterArn: string;
+    /** Pre-0.4.0 queues still holding messages, by key. */
+    draining: ReadonlyArray<{ key: string; url: string; arn: string }>;
     tags: Record<string, string>;
     resources: ResourceRef[];
   },
@@ -775,19 +785,17 @@ async function reconcileWorkerTriggers(
   // Every function under the stage's base is the worker's or a handler's.
   const stale = (await listFunctions(ctx, `${base}--`)).filter((f) => !arns.has(f.name));
 
-  // Queue → function mappings.
+  // Pre-0.4.0 queue → function mappings, while their queues drain.
   const wantedMappings = new Set<string>();
-  for (const [key, q] of Object.entries(m.queues)) {
-    const fn = target('queue', key);
-    const source = p.queues[key]!.arn;
-    wantedMappings.add(`${fn.name} ${source}`);
-    await ensureEventSourceMapping(ctx, {
-      functionName: fn.name,
-      sourceArn: source,
-      batchSize: q.batchSize,
-      ...(q.concurrency ? { maxConcurrency: q.concurrency } : {}),
-    });
-    p.resources.push({ type: 'esm', name: `${key} → ${fn.name}` });
+  for (const q of p.draining) {
+    const fn = target('queue', q.key);
+    wantedMappings.add(`${fn.name} ${q.arn}`);
+    // Lambda refuses a mapping whose queue hides a message for less than the function may run; the
+    // handler's timeout can have grown since the queue was made. 6× is AWS's advice.
+    const timeout = handlerSettings(m, 'queue', q.key).timeoutSeconds;
+    await setQueueAttributes(ctx, q.url, { VisibilityTimeout: String(Math.min(timeout * 6, 43_200)) });
+    await ensureEventSourceMapping(ctx, { functionName: fn.name, sourceArn: q.arn, batchSize: 10 });
+    p.resources.push({ type: 'esm', name: `${q.key} → ${fn.name} (draining)` });
   }
   for (const fn of [...p.functions, ...stale]) {
     for (const esm of await listEventSourceMappings(ctx, fn.name)) {
@@ -808,7 +816,7 @@ async function reconcileWorkerTriggers(
       bus: p.busName,
       name: ruleName,
       pattern: { 'detail-type': [type] },
-      targets: [{ id: 'worker', arn: fn.arn }],
+      targets: [{ id: 'worker', arn: fn.arn, deadLetterArn: p.deadLetterArn }],
       tags: p.tags,
       beforeTargets: (arn) =>
         ensurePermission(ctx, {
@@ -833,9 +841,10 @@ async function reconcileWorkerTriggers(
   }
 
   // Crons → schedules (EventBridge Scheduler invokes the function with the stage role).
+  // The group also holds jobs' retries and delayed sends, so it exists whenever there's a worker.
   const group = names.scheduleGroup(app, stage);
   const cronKeys = Object.keys(m.crons);
-  if (cronKeys.length) await ensureScheduleGroup(ctx, { name: group, tags: p.tags });
+  await ensureScheduleGroup(ctx, { name: group, tags: p.tags });
   for (const [key, cron] of Object.entries(m.crons)) {
     await ensureSchedule(ctx, {
       group,
@@ -847,32 +856,165 @@ async function reconcileWorkerTriggers(
         roleArn: p.roleArn,
         input: JSON.stringify({ __platform: 'cron', name: key }),
       },
+      deadLetterArn: p.deadLetterArn,
     });
     p.resources.push({ type: 'schedule', name: `${group}/${key}` });
   }
-  const existing = await listSchedules(ctx, group);
-  for (const s of existing)
+  for (const s of await listSchedules(ctx, group))
     if (isCronSchedule(s) && !cronKeys.includes(s)) await deleteSchedule(ctx, group, s);
-  if (!cronKeys.length && existing.length) await deleteScheduleGroupIfEmpty(ctx, group);
 
   // Nothing triggers these any more.
   for (const fn of stale) await deleteWorkerFunction(ctx, fn.name);
 }
 
 /**
- * The manifest no longer has a worker: remove its functions and everything
- * that targets them. Services' stop schedules stay (and with them the group).
+ * The manifest no longer has a worker: remove its functions, everything that
+ * targets them, and jobs waiting for them. Services' stop schedules stay (and
+ * with them the group).
  */
 async function removeWorker(ctx: EngineContext, app: string, stage: string): Promise<void> {
   const group = names.scheduleGroup(app, stage);
   const schedules = await listSchedules(ctx, group);
-  for (const s of schedules) if (isCronSchedule(s)) await deleteSchedule(ctx, group, s);
+  for (const s of schedules) if (isCronSchedule(s) || isJobSchedule(s)) await deleteSchedule(ctx, group, s);
   await deleteScheduleGroupIfEmpty(ctx, group);
   const bus = names.eventBus(app, stage);
   for (const rule of await listRules(ctx, bus, `${names.base(app, stage)}--`))
     await deleteRule(ctx, bus, rule);
   for (const fn of await listFunctions(ctx, `${names.base(app, stage)}--`))
     await deleteWorkerFunction(ctx, fn.name);
+}
+
+/**
+ * The stage's dead-letter queue: kept 14 days, never polled. Lambda's
+ * on-failure destination and Scheduler send to it as the stage role;
+ * EventBridge, which has no role here, needs the queue's policy, scoped to
+ * this stage's rules.
+ */
+async function ensureDeadLetterQueue(
+  ctx: EngineContext,
+  p: { app: string; stage: string; region: string; accountId: string; tags: Record<string, string> },
+) {
+  const name = names.deadLetters(p.app, p.stage);
+  const arn = `arn:aws:sqs:${p.region}:${p.accountId}:${name}`;
+  return ensureQueue(ctx, {
+    name,
+    attributes: {
+      MessageRetentionPeriod: String(14 * 24 * 3600),
+      Policy: JSON.stringify({
+        Version: '2012-10-17',
+        Statement: [
+          {
+            Sid: 'StageRules',
+            Effect: 'Allow',
+            Principal: { Service: 'events.amazonaws.com' },
+            Action: 'sqs:SendMessage',
+            Resource: arn,
+            Condition: {
+              ArnLike: {
+                'aws:SourceArn': `arn:aws:events:${p.region}:${p.accountId}:rule/${names.eventBus(p.app, p.stage)}/${names.base(p.app, p.stage)}--*`,
+              },
+            },
+          },
+        ],
+      }),
+    },
+    tags: p.tags,
+  });
+}
+
+interface LegacyQueues {
+  /** Queues whose handler is still declared and that still hold messages: they keep their mapping. */
+  draining: Array<{ key: string; name: string; url: string; arn: string }>;
+  /** Every other pre-0.4.0 queue and dead-letter queue of the stage. */
+  rest: Array<{ name: string; url: string; deadLetters: boolean }>;
+}
+
+/**
+ * The stage's queues from before jobs were pushed (0.4.0): `<base>--<key>`
+ * and `<base>--<key>--dlq`. Everything else under the base is the stage's
+ * dead-letter queue or `plat dev`'s event tap.
+ */
+async function listLegacyQueues(
+  ctx: EngineContext,
+  p: { app: string; stage: string; manifest: ResolvedManifest; region: string; accountId: string },
+): Promise<LegacyQueues> {
+  const { app, stage, manifest: m } = p;
+  const base = names.base(app, stage);
+  const out: LegacyQueues = { draining: [], rest: [] };
+  for (const q of await listQueues(ctx, `${base}--`)) {
+    if (q.name === names.deadLetters(app, stage) || q.name === names.devEventTap(app, stage)) continue;
+    const suffix = q.name.slice(base.length + 2);
+    const deadLetters = suffix.endsWith('--dlq');
+    const key = deadLetters ? suffix.slice(0, -5) : suffix;
+    if (!RESOURCE_KEY_PATTERN.test(key)) continue;
+    if (!deadLetters && m.worker && m.queues[key] && ((await queueDepth(ctx, q.url)) ?? 0) > 0) {
+      const arn = `arn:aws:sqs:${p.region}:${p.accountId}:${q.name}`;
+      out.draining.push({ key, name: q.name, url: q.url, arn });
+      continue;
+    }
+    out.rest.push({ name: q.name, url: q.url, deadLetters });
+  }
+  return out;
+}
+
+/**
+ * After the triggers moved: pre-0.4.0 dead-letter queues' messages move into
+ * the stage's dead-letter queue (where the console redrives them), and every
+ * old queue no longer draining is deleted. Without a worker there's nothing to
+ * redrive to, so the stage's dead-letter queue goes too.
+ */
+async function retireLegacyQueues(
+  ctx: EngineContext,
+  p: {
+    app: string;
+    stage: string;
+    legacy: LegacyQueues;
+    deadLetters: { url: string; arn: string } | undefined;
+  },
+): Promise<void> {
+  for (const q of p.legacy.rest) {
+    if (q.deadLetters && p.deadLetters) {
+      const key = q.name.slice(names.base(p.app, p.stage).length + 2, -5);
+      const moved = await moveMessages(ctx, q.url, p.deadLetters.url, (body, receives) =>
+        legacyDeadLetter(key, body, receives),
+      );
+      if (moved)
+        ctx.log(
+          'info',
+          `moved ${moved} dead letters to ${names.deadLetters(p.app, p.stage)}`,
+          `queue ${q.name}`,
+        );
+      // Messages in flight (someone reading the queue) keep it for the next deploy.
+      if (((await queueDepth(ctx, q.url)) ?? 0) > 0) continue;
+    }
+    await deleteQueue(ctx, q.name);
+  }
+  if (!p.deadLetters) await deleteQueue(ctx, names.deadLetters(p.app, p.stage));
+}
+
+/** A pre-0.4.0 dead-lettered message, as the SDK would have dead-lettered it. */
+export function legacyDeadLetter(queue: string, body: string, receives: number): string {
+  let parsed: unknown = body;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // A body the SDK didn't encode stays a string.
+  }
+  const letter: DeadLetter = {
+    v: 1,
+    job: {
+      __platform: JOB_MARKER,
+      kind: 'queue',
+      name: queue,
+      id: newId('m'),
+      attempt: receives,
+      sentAt: Date.now(),
+      body: parsed,
+    },
+    failedAt: Date.now(),
+    error: { name: 'Unknown', message: 'dead-lettered by the queue this stage had before 0.4.0' },
+  };
+  return JSON.stringify(letter);
 }
 
 /** Lambda keeps a function's event source mappings when it deletes the function, so they go first. */

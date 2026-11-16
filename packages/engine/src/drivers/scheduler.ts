@@ -8,7 +8,10 @@ import {
   ListSchedulesCommand,
   UpdateScheduleCommand,
 } from '@aws-sdk/client-scheduler';
+import { atExpression } from '@ericminassian/platform-core';
 import { type EngineContext, ignoreNotFound, retry, tagList, waitFor } from '../util.ts';
+
+export { atExpression };
 
 export async function ensureScheduleGroup(
   ctx: EngineContext,
@@ -37,6 +40,8 @@ export interface ScheduleSpec {
   expression: string;
   timezone?: string;
   target: { arn: string; roleArn: string; input: string };
+  /** Where a firing Scheduler couldn't deliver goes (the stage's dead-letter queue). */
+  deadLetterArn?: string;
 }
 
 export async function ensureSchedule(ctx: EngineContext, spec: ScheduleSpec): Promise<void> {
@@ -53,6 +58,7 @@ export async function ensureSchedule(ctx: EngineContext, spec: ScheduleSpec): Pr
       RoleArn: spec.target.roleArn,
       Input: spec.target.input,
       RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 3600 },
+      ...(spec.deadLetterArn ? { DeadLetterConfig: { Arn: spec.deadLetterArn } } : {}),
     },
   };
   const existing = await ignoreNotFound(
@@ -75,11 +81,6 @@ export interface OneShotScheduleSpec {
   /** When it fires (to the second, UTC). The schedule deletes itself afterwards. */
   at: Date;
   target: { arn: string; roleArn: string; input: string };
-}
-
-/** `at(2026-11-16T09:30:00)`: Scheduler's one-shot expression, read in the schedule's time zone (UTC here). */
-export function atExpression(at: Date): string {
-  return `at(${at.toISOString().slice(0, 19)})`;
 }
 
 /** Inverse of {@link atExpression}. */
