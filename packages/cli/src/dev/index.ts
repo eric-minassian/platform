@@ -21,6 +21,7 @@ import { createInbox, localMailUrl } from './mail.ts';
 import { formatMail, prefixer } from './pretty.ts';
 import { killTree } from './proc.ts';
 import { type Interceptor, type LocalRouterState, localRouteRecord, startLocalRouter } from './router.ts';
+import { startDevService } from './services.ts';
 import { startWebDev } from './web-dev.ts';
 import { type Dispatcher, startLocalWorker, startWorkerDispatch } from './worker.ts';
 
@@ -29,6 +30,8 @@ export interface DevOptions {
   port: number;
   /** Print SDK trace spans too. */
   spans?: boolean;
+  /** Run the app's long-running services (default true). */
+  services?: boolean;
 }
 
 export const DEV_CONTROL_PREFIX = '/__plat_dev/';
@@ -42,6 +45,7 @@ export const DEV_CONTROL_PREFIX = '/__plat_dev/';
  *  local sign-in page ──────────────────┤
  *  mail inbox (`Email.send` posts here) ┘
  *  worker (real Node, tsx watch) ← dispatcher (emulator SQS + EventBridge tap + local crons)
+ *  services (real Node, tsx watch, restarted when they exit)
  */
 export async function runDev(opts: DevOptions): Promise<void> {
   const { root, manifest } = await loadProject(opts.cwd);
@@ -160,6 +164,20 @@ export async function runDev(opts: DevOptions): Promise<void> {
     : undefined;
   if (crons) cleanups.push(() => crons.stop());
 
+  // ------------------------------------------------------------ services
+  const runServices = opts.services !== false;
+  if (runServices) {
+    const services = Object.keys(manifest.services).map((name) =>
+      startDevService(stage, manifest, root, name, {
+        ...(workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {}),
+        ...(opts.spans ? { spans: true } : {}),
+        write: (s) => process.stdout.write(s),
+        warn,
+      }),
+    );
+    cleanups.push(async () => void (await Promise.all(services.map((s) => s.stop()))));
+  }
+
   // ------------------------------------------------------------ web server
   if (manifest.web?.server) {
     const { child, port: serverPort } = await spawnWebServer(stage, manifest, root, {
@@ -247,7 +265,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
     intercept,
   });
 
-  printBanner(manifest, stage, opts.port, crons, inboxUrl);
+  printBanner(manifest, stage, opts.port, crons, inboxUrl, runServices);
   await new Promise(() => {}); // run until signalled
 }
 
@@ -292,6 +310,7 @@ function printBanner(
   port: number,
   crons: ReturnType<typeof scheduleCrons> | undefined,
   inboxUrl: string,
+  runServices: boolean,
 ): void {
   const b = stage.bindings;
   const lines = [
@@ -326,6 +345,11 @@ function printBanner(
     const next = crons?.next(name);
     lines.push(
       `  ${pc.dim('➜')} Cron:      ${name} ${pc.dim(`next ${next?.toISOString() ?? '?'} · now: plat dev run-cron ${name}`)}`,
+    );
+  }
+  for (const [name, service] of Object.entries(manifest.services)) {
+    lines.push(
+      `  ${pc.dim('➜')} Service:   ${name} ${pc.dim(runServices ? `· ${service.entry}` : '· not running (--no-services)')}`,
     );
   }
   lines.push('', pc.dim('  Ctrl+C to stop. Emulator state lives in memory and is discarded on exit.'), '');

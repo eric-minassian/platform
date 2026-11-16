@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
-import type {
-  CustomMetricsResponse,
-  DataCollections,
-  LimitsResponse,
-  LogLine,
-  TelemetryEvent,
+import {
+  type CustomMetricsResponse,
+  type DataCollections,
+  type LimitsResponse,
+  type LogLine,
+  RESOURCE_KEY_PATTERN,
+  type TelemetryEvent,
 } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
@@ -60,9 +61,10 @@ export function registerObserve(program: Command): void {
   withTarget(
     program
       .command('logs')
-      .description('search recent logs (web + worker); --follow streams live')
+      .description('search recent logs (web, worker and services); --follow streams live')
       .option('--since <duration>', 'how far back', '1h')
       .option('--filter <text>', 'only lines containing this text / CloudWatch filter pattern')
+      .option('--stream <name>', 'only web, worker or one service (by name)')
       .option('--limit <n>', 'max lines', '200')
       .option('-f, --follow', 'stream new lines (live tail)')
       .option('--runtime', "include the Lambda runtime's own records (hidden by default)"),
@@ -72,12 +74,15 @@ export function registerObserve(program: Command): void {
         opts: TargetOpts & {
           since: string;
           filter?: string;
+          stream?: string;
           limit: string;
           follow?: boolean;
           runtime?: boolean;
         },
       ) => {
-        const keep = (l: LogLine) => opts.runtime || l.level !== 'system';
+        const stream = opts.stream === undefined ? undefined : logStream(opts.stream);
+        const keep = (l: LogLine) =>
+          (opts.runtime || l.level !== 'system') && (!stream || l.stream === stream);
         const api = apiFor(opts);
         const app = await appFor(opts);
         if (opts.follow) {
@@ -86,7 +91,11 @@ export function registerObserve(program: Command): void {
           try {
             for await (const line of api.tailLogs(
               app,
-              { stage: opts.stage, ...(opts.filter ? { filter: opts.filter } : {}) },
+              {
+                stage: opts.stage,
+                ...(opts.filter ? { filter: opts.filter } : {}),
+                ...(stream ? { stream } : {}),
+              },
               ac.signal,
             )) {
               if (!keep(line)) continue;
@@ -104,6 +113,7 @@ export function registerObserve(program: Command): void {
           to,
           limit: Number(opts.limit),
           ...(opts.filter ? { filter: opts.filter } : {}),
+          ...(stream ? { stream } : {}),
         });
         const shown = { ...res, lines: res.lines.filter(keep) };
         result(shown, (r) =>
@@ -326,11 +336,32 @@ export function parsePartition(pairs: string[]): string {
   return params.toString();
 }
 
+/**
+ * `--stream` → the API's stream: `web`, `worker`, or a service's name as
+ * `service:<name>` (also accepted as is, for a service named web or worker).
+ */
+export function logStream(name: string): string {
+  if (name === 'web' || name === 'worker') return name;
+  const service = name.startsWith('service:') ? name.slice('service:'.length) : name;
+  if (!RESOURCE_KEY_PATTERN.test(service)) {
+    throw new CliError(`--stream takes web, worker or a service name, got "${name}"`, {
+      exitCode: EXIT.usage,
+    });
+  }
+  return `service:${service}`;
+}
+
 export function formatLogLine(l: LogLine): string {
   const ts = pc.dim(shortTime(l.ts));
-  const stream = l.stream === 'web' ? pc.green('web   ') : pc.yellow('worker');
   const body = l.event ? (formatEvent(l.event, { spans: true }) ?? l.message) : l.message;
-  return `${ts} ${stream} ${body}`;
+  return `${ts} ${streamLabel(l.stream)} ${body}`;
+}
+
+function streamLabel(stream: string): string {
+  if (stream === 'web') return pc.green('web   ');
+  if (stream === 'worker') return pc.yellow('worker');
+  if (stream.startsWith('service:')) return pc.magenta(stream.slice('service:'.length).padEnd(6));
+  return stream.padEnd(6);
 }
 
 export function formatTrace(events: readonly TelemetryEvent[]): string {

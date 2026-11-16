@@ -1,11 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import type {
-  ArtifactFile,
-  DeploymentEventEntry,
-  DeploymentRecord,
-  DeploymentStatus,
-  PresignedPost,
+import {
+  type ArtifactFile,
+  type ContainerCostEstimate,
+  type DeploymentEventEntry,
+  type DeploymentRecord,
+  type DeploymentStatus,
+  describeContainerSize,
+  estimateContainerCost,
+  isPreviewStage,
+  type PresignedPost,
+  type ResolvedManifest,
 } from '@ericminassian/platform-core';
 import pc from 'picocolors';
 import type { ApiClient } from './api.ts';
@@ -30,6 +35,43 @@ export interface DeployOptions {
 export interface DeployResult {
   deployment: DeploymentRecord;
   url?: string;
+  /** The stage's long-running services and what each costs while it runs. */
+  services: ServiceCost[];
+}
+
+export interface ServiceCost {
+  name: string;
+  cpu: number;
+  memoryMb: number;
+  spot: boolean;
+  /** `0.25 vCPU · 512 MB · Spot`. */
+  size: string;
+  /** If it runs all month. */
+  monthly: ContainerCostEstimate;
+  /** On a preview stage: minutes it runs after each deploy (0: not until started). */
+  previewMinutes?: number;
+}
+
+/** What each declared service costs on `stage`: unlike everything else, it's billed while it runs. */
+export function serviceCosts(manifest: ResolvedManifest, stage: string): ServiceCost[] {
+  return Object.entries(manifest.services).map(([name, s]) => ({
+    name,
+    cpu: s.cpu,
+    memoryMb: s.memoryMb,
+    spot: s.spot,
+    size: describeContainerSize(s),
+    monthly: estimateContainerCost(s),
+    ...(isPreviewStage(stage) ? { previewMinutes: s.previewMinutes } : {}),
+  }));
+}
+
+/** `service ais (0.25 vCPU · 512 MB · Spot) ≈ $5.86/month while running; previews run it 30 min after each deploy`. */
+export function formatServiceCost(c: ServiceCost, stage: string): string {
+  const line = `service ${c.name} (${c.size}) ≈ $${c.monthly.totalUsd.toFixed(2)}/month while running`;
+  if (c.previewMinutes === undefined) return line;
+  return c.previewMinutes > 0
+    ? `${line}; previews run it ${c.previewMinutes} min after each deploy`
+    : `${line}; previews run it only after \`plat services start ${c.name} --stage ${stage}\``;
 }
 
 export async function deploy(api: ApiClient, opts: DeployOptions): Promise<DeployResult> {
@@ -50,6 +92,8 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
     ...git,
   });
   const id = created.deployment.id;
+  const services = serviceCosts(project.manifest, stage);
+  for (const c of services) step(formatServiceCost(c, stage));
   const edge = edgeChecksFor({
     root: project.root,
     manifest: project.manifest,
@@ -69,7 +113,7 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
   let deployment = await api.startDeployment(id);
   if (!opts.wait) {
     info(`deployment ${id} is ${deployment.status}; follow with \`plat deployments --stage ${stage}\``);
-    return { deployment, url: deployment.url };
+    return { deployment, url: deployment.url, services };
   }
 
   deployment = await waitForDeployment(api, id, {
@@ -97,7 +141,7 @@ export async function deploy(api: ApiClient, opts: DeployOptions): Promise<Deplo
       `### Deployed \`${app}\` → \`${stage}\`\n\n${url ? `**URL:** ${url}\n\n` : ''}Deployment \`${id}\`${git.commit ? ` at \`${git.commit.slice(0, 7)}\`` : ''}`,
     );
   }
-  return { deployment, url };
+  return { deployment, url, services };
 }
 
 /** Builds the multipart body for an S3 presigned POST (policy fields first, file last). */

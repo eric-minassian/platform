@@ -7,7 +7,7 @@ import { zipFileNames } from '../src/util/zip.ts';
 import { copyFixture, SDK_STUBS } from './helpers.ts';
 
 describe('buildApp', () => {
-  it('produces server, worker, static and manifest artifacts', async () => {
+  it('produces server, worker, services, static and manifest artifacts', async () => {
     const root = copyFixture('basic-app');
     const { manifest, files } = await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true });
 
@@ -15,6 +15,7 @@ describe('buildApp', () => {
     expect(Object.keys(files).toSorted()).toEqual([
       'manifest.json',
       'server.zip',
+      'services.zip',
       'static.zip',
       'worker.zip',
     ]);
@@ -23,6 +24,10 @@ describe('buildApp', () => {
     expect(zipFileNames(readFileSync(files['server.zip']!))).toEqual(['index.mjs', 'index.mjs.map']);
     expect(zipFileNames(readFileSync(files['worker.zip']!))).toEqual(['index.mjs', 'index.mjs.map']);
     expect(zipFileNames(readFileSync(files['static.zip']!))).toEqual(['assets/app.js', 'index.html']);
+    expect(zipFileNames(readFileSync(files['services.zip']!))).toEqual([
+      'ticker/index.mjs',
+      'ticker/index.mjs.map',
+    ]);
 
     const server = readFileSync(join(root, '.plat/build/server/index.mjs'), 'utf8');
     expect(server).toContain('hello from basic-app'); // app code bundled in
@@ -37,7 +42,38 @@ describe('buildApp', () => {
     };
     expect(built.manifest.name).toBe('basic-app');
     expect(built.resolved.worker.entry).toBe('src/worker.ts');
-    expect(built.build.files).toEqual(['server.zip', 'worker.zip', 'static.zip']);
+    expect(built.build.files).toEqual(['server.zip', 'worker.zip', 'services.zip', 'static.zip']);
+  });
+
+  it('each service bundle runs its definition with the SDK service runtime', async () => {
+    const root = copyFixture('basic-app');
+    const { files } = await buildApp({
+      cwd: root,
+      resolveOverrides: SDK_STUBS,
+      quiet: true,
+      minify: false,
+      only: ['services'],
+    });
+    expect(Object.keys(files).toSorted()).toEqual(['manifest.json', 'services.zip']);
+    await import(join(root, '.plat/build/services/ticker/index.mjs'));
+    const program = (globalThis as { __platStubService?: Record<string, unknown> }).__platStubService;
+    expect(Object.keys(program ?? {}).toSorted()).toEqual(['dispose', 'run', 'start']);
+  });
+
+  it('bundles every declared service', async () => {
+    const root = copyFixture('basic-app');
+    writeFileSync(
+      join(root, 'plat.config.ts'),
+      "export default { name: 'basic-app', services: { ais: { entry: 'src/ticker.ts' }, lightning: { entry: 'src/ticker.ts', spot: false } } };\n",
+    );
+    const { files } = await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true });
+    expect(Object.keys(files).toSorted()).toEqual(['manifest.json', 'services.zip']);
+    expect(zipFileNames(readFileSync(files['services.zip']!))).toEqual([
+      'ais/index.mjs',
+      'ais/index.mjs.map',
+      'lightning/index.mjs',
+      'lightning/index.mjs.map',
+    ]);
   });
 
   it('the worker bundle exports a handler that dispatches to the definition', async () => {
@@ -60,9 +96,15 @@ describe('buildApp', () => {
   it('explains missing entries', async () => {
     const root = copyFixture('basic-app');
     rmSync(join(root, 'src/worker.ts'));
-    await expect(buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true })).rejects.toThrow(
+    rmSync(join(root, 'src/ticker.ts'));
+    const err = await buildApp({ cwd: root, resolveOverrides: SDK_STUBS, quiet: true }).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect((err as CliError).message).toMatch(
       /worker entry src\/worker\.ts does not exist \(needed for queue jobs, cron tick\)/,
     );
+    expect((err as CliError).message).toMatch(/service ticker entry src\/ticker\.ts does not exist/);
   });
 
   it('rejects auth without a server', async () => {

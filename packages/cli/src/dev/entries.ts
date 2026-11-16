@@ -11,13 +11,15 @@ export function tsxCli(): string {
   return join(dirname(pkg), rel);
 }
 
+export type DevEntry = 'server-entry' | 'worker-host' | 'service-host';
+
 /** A CLI-owned entry file next to this module (`.ts` in the repo, `.js` when published). */
-export function devEntry(name: 'server-entry' | 'worker-host'): string {
+export function devEntry(name: DevEntry): string {
   const ts = fileURLToPath(new URL(`./${name}.ts`, import.meta.url));
   return existsSync(ts) ? ts : fileURLToPath(new URL(`./${name}.js`, import.meta.url));
 }
 
 /** argv for running an entry under tsx, optionally restarting on edits. */
-export function tsxArgs(name: 'server-entry' | 'worker-host', watch: boolean): string[] {
+export function tsxArgs(name: DevEntry, watch: boolean): string[] {
   return watch ? [tsxCli(), 'watch', '--clear-screen=false', devEntry(name)] : [tsxCli(), devEntry(name)];
 }
