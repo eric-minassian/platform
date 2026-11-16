@@ -11,4 +11,5 @@ export * from './naming.ts';
 export * from './realtime.ts';
 export * from './router.ts';
 export * from './runtime-config.ts';
+export * from './storage.ts';
 export * from './telemetry.ts';

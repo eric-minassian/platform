@@ -89,6 +89,11 @@ const AuthSchema = Schema.Union([
   Schema.Struct({ required: Schema.Boolean.pipe(orElse(false)) }),
 ]);
 
+const StoreSchema = Schema.Struct({
+  public: Schema.Boolean.pipe(orElse(false)),
+  expireAfterDays: Schema.optional(intBetween(1, 3650)),
+});
+
 const RealtimeSubscribeSchema = Schema.Literals(['public', 'signed-in']);
 
 const EmailSchema = Schema.Union([
@@ -125,7 +130,11 @@ export const ManifestSchema = Schema.Struct({
     orElse([]),
   ),
   crons: recordOf(RESOURCE_KEY_PATTERN, CronSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
-  storage: Schema.Array(resourceKey).pipe(orElse([])),
+  // The array form (every store private, kept forever) is still accepted.
+  storage: Schema.Union([
+    Schema.Array(resourceKey),
+    recordOf(RESOURCE_KEY_PATTERN, StoreSchema, RESOURCE_KEY_MESSAGE),
+  ]).pipe(orElse([])),
   secrets: Schema.Array(envName).pipe(orElse([])),
   env: recordOf(ENV_NAME_PATTERN, Schema.String).pipe(orElse({})),
   realtime: Schema.optional(RealtimeSchema),
@@ -212,6 +221,19 @@ export type CronConfig = string | { schedule: string; timezone?: string };
 /** Declare one with `channel<Event>()` to type what is published and received. */
 export type ChannelConfig<Event = unknown> = Payload<Event>;
 
+/** A file store. `{}` is a private store whose files are kept until deleted. */
+export interface StoreConfig {
+  /**
+   * Serve the store's files from the edge at `/__platform/storage/<store>/<key>`
+   * on the app's host, to anyone with the URL (`auth.required` doesn't cover
+   * it), with no server in the path. Files are cached as their `cacheControl`
+   * says; without one, browsers revalidate on each use. Default `false`.
+   */
+  public?: boolean;
+  /** Delete files not written for this many days, 1-3650. Checked daily. Default: kept until deleted. */
+  expireAfterDays?: number;
+}
+
 /**
  * Live updates pushed to browsers. The server and worker publish; browsers
  * subscribe (they never publish). Events aren't stored: a browser that was
@@ -263,8 +285,13 @@ export interface AppConfig {
   events?: readonly string[] | { readonly [type: string]: EventConfig };
   /** Scheduled jobs. Each needs a handler in the worker. */
   crons?: { readonly [name: string]: CronConfig };
-  /** Named file stores. */
-  storage?: readonly string[];
+  /**
+   * Named file stores: `{ uploads: {}, snapshots: { public: true, expireAfterDays: 7 } }`.
+   * A list of names (`['uploads']`) declares private stores. Keys are 1-20
+   * chars of a-z, 0-9 and hyphens. A store can't switch between public and
+   * private once it has files: declare a new one instead.
+   */
+  storage?: readonly string[] | { readonly [name: string]: StoreConfig };
   /** Secret names like `STRIPE_KEY`; values are set with `plat secrets set`. */
   secrets?: readonly string[];
   /** Plain, non-secret configuration exposed as environment variables. */
@@ -338,7 +365,17 @@ export const ResolvedManifest = Schema.Struct({
     Schema.String,
     Schema.Struct({ schedule: Schema.String, timezone: Schema.optional(Schema.String) }),
   ),
+  /** Every store's name. */
   storage: Schema.Array(Schema.String),
+  /**
+   * Each store's options, by name. Absent from deployments recorded before
+   * stores had any: those stores are private and kept until deleted. A field
+   * of its own, so clients that know only `storage` keep decoding manifests.
+   */
+  storageOptions: Schema.Record(
+    Schema.String,
+    Schema.Struct({ public: Schema.Boolean, expireAfterDays: Schema.optional(Schema.Finite) }),
+  ).pipe(orElse({})),
   secrets: Schema.Array(Schema.String),
   env: Schema.Record(Schema.String, Schema.String),
   /** Present when the stage has a channel namespace. `channels` are the declared patterns. */
@@ -402,6 +439,9 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
   const crons: ResolvedManifest['crons'] = Object.fromEntries(
     Object.entries(m.crons).map(([key, c]) => [key, typeof c === 'string' ? { schedule: c } : c]),
   );
+  const stores: Record<string, typeof StoreSchema.Type> = isStoreList(m.storage)
+    ? Object.fromEntries(m.storage.map((name) => [name, { public: false }]))
+    : m.storage;
   return {
     name: m.name,
     ...(m.description ? { description: m.description } : {}),
@@ -412,7 +452,8 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
     queues,
     events: [...new Set(events)],
     crons,
-    storage: [...new Set(m.storage)],
+    storage: Object.keys(stores),
+    storageOptions: stores,
     secrets: [...new Set(m.secrets)],
     env: m.env,
     ...(m.realtime
@@ -420,4 +461,11 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
       : {}),
     ...(email ? { email } : {}),
   };
+}
+
+const isStoreList = (storage: Manifest['storage']): storage is readonly string[] => Array.isArray(storage);
+
+/** The stores the edge serves (`public: true`). */
+export function publicStores(m: Pick<ResolvedManifest, 'storage' | 'storageOptions'>): string[] {
+  return m.storage.filter((name) => m.storageOptions[name]?.public === true);
 }

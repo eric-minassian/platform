@@ -528,9 +528,12 @@ export const StoredObjectInfo = Schema.Struct({
 });
 export type StoredObjectInfo = typeof StoredObjectInfo.Type;
 
-/** `GET /v1/apps/:app/storage`: the declared stores without `?store=`, a listing with it. */
+/**
+ * `GET /v1/apps/:app/storage`: the declared stores (and which of them the
+ * edge serves) without `?store=`, a listing with it.
+ */
 export const StorageResponse = Schema.Union([
-  Schema.Struct({ stores: Schema.Array(Schema.String) }),
+  Schema.Struct({ stores: Schema.Array(Schema.String), public: optional(Schema.Array(Schema.String)) }),
   Schema.Struct({ objects: Schema.Array(StoredObjectInfo), cursor: optional(Schema.String) }),
 ]);
 export type StorageResponse = typeof StorageResponse.Type;

@@ -20,7 +20,8 @@
     "./naming": "./src/naming.ts",
     "./platform-api": "./src/platform-api.ts",
     "./realtime": "./src/realtime.ts",
-    "./router/decide.js": "./src/router/decide.js"
+    "./router/decide.js": "./src/router/decide.js",
+    "./storage": "./src/storage.ts"
   },
   "publishConfig": {
     "exports": {
@@ -48,7 +49,11 @@
         "types": "./dist/realtime.d.ts",
         "default": "./dist/realtime.js"
       },
-      "./router/decide.js": "./dist/router/decide.js"
+      "./router/decide.js": "./dist/router/decide.js",
+      "./storage": {
+        "types": "./dist/storage.d.ts",
+        "default": "./dist/storage.js"
+      }
     },
     "access": "public"
   },

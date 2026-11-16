@@ -5,6 +5,7 @@ export type RouteDecision =
   | { t: 'static'; key: string }
   | { t: 'health' }
   | { t: 'realtime' }
+  | { t: 'storage'; key: string }
   | { t: 'notfound' };
 
 export declare function decide(rec: RouteRecord | null | undefined, uri: string): RouteDecision;

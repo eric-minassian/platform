@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm';
+import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { buildRouterFunctionCode } from '../src/cloudfront-function.ts';
 import {
@@ -12,11 +13,15 @@ import {
   parseManifest,
   parseStageHost,
   percentile,
+  publicStores,
   REALTIME_KVS_KEY,
   REALTIME_PATH,
   REALTIME_TOKEN_PATH,
   type RealtimeEdgeEntry,
+  ResolvedManifest,
   type RouteRecord,
+  STORAGE_CACHE_HOST,
+  STORAGE_PATH,
   stageHost,
   toSchedulerExpression,
   validateAppName,
@@ -82,6 +87,40 @@ describe('manifest', () => {
   it('reports readable errors', () => {
     expect(() => parseManifest({ name: 'x', crons: { nightly: 'nope' } })).toThrow(/name.*crons\.nightly/s);
   });
+
+  it('takes stores as a list or with options', () => {
+    const listed = parseManifest({ name: 'todo', storage: ['uploads', 'uploads', 'avatars'] });
+    expect(listed.storage).toEqual(['uploads', 'avatars']);
+    expect(listed.storageOptions).toEqual({ uploads: { public: false }, avatars: { public: false } });
+    expect(publicStores(listed)).toEqual([]);
+
+    const m = parseManifest({
+      name: 'atlas',
+      storage: { uploads: {}, snapshots: { public: true, expireAfterDays: 7 } },
+    });
+    expect(m.storage).toEqual(['uploads', 'snapshots']);
+    expect(m.storageOptions).toEqual({
+      uploads: { public: false },
+      snapshots: { public: true, expireAfterDays: 7 },
+    });
+    expect(publicStores(m)).toEqual(['snapshots']);
+
+    expect(() => parseManifest({ name: 'atlas', storage: { Snap: {} } })).toThrow(/storage.*Snap/s);
+    expect(() => parseManifest({ name: 'atlas', storage: { snapshots: { expireAfterDays: 0 } } })).toThrow(
+      /storage.*snapshots.*expireAfterDays/s,
+    );
+  });
+
+  it('decodes deployments recorded before stores had options', () => {
+    const stored = {
+      ...parseManifest({ name: 'todo', storage: ['uploads'] }),
+      storageOptions: undefined,
+    };
+    const m = Schema.decodeUnknownSync(ResolvedManifest)(JSON.parse(JSON.stringify(stored)));
+    expect(m.storage).toEqual(['uploads']);
+    expect(m.storageOptions).toEqual({});
+    expect(publicStores(m)).toEqual([]);
+  });
 });
 
 describe('router decide', () => {
@@ -129,6 +168,46 @@ describe('router decide', () => {
     expect(decide(both, REALTIME_PATH)).toEqual({ t: 'server' });
     expect(decide({ v: 1, app: 'a', stage: 'p', d: 'd', s: 'p' }, REALTIME_PATH)).toEqual({ t: 'notfound' });
   });
+  it('serves public stores and keeps the rest of the storage path from the server', () => {
+    const pub: RouteRecord = { ...both, app: 'atlas', p: ['snapshots', 'tiles'] };
+    expect(decide(pub, `${STORAGE_PATH}snapshots/fires/today.json`)).toEqual({
+      t: 'storage',
+      key: '/atlas/prod/snapshots/fires/today.json',
+    });
+    // Encoded as S3 decodes it.
+    expect(decide(pub, `${STORAGE_PATH}tiles/a%20b/c.png`)).toEqual({
+      t: 'storage',
+      key: '/atlas/prod/tiles/a%20b/c.png',
+    });
+    for (const uri of [
+      `${STORAGE_PATH}uploads/a.json`, // not public
+      `${STORAGE_PATH}snapshots/`,
+      `${STORAGE_PATH}snapshots`,
+      `${STORAGE_PATH}/snapshots/a.json`,
+      `${STORAGE_PATH}snapshots/../uploads/a.json`,
+      `${STORAGE_PATH}snapshots/a/./b.json`,
+      `${STORAGE_PATH}snapshots/%2e%2e/uploads/a.json`,
+      `${STORAGE_PATH}snapshots/x%2F..%2F..%2Fother/a.json`,
+      `${STORAGE_PATH}snapshots/.%2E/uploads/a.json`,
+    ]) {
+      expect(decide(pub, uri), uri).toEqual({ t: 'notfound' });
+    }
+    // A stage without public stores doesn't pass the path to its server either.
+    expect(decide(both, `${STORAGE_PATH}snapshots/a.json`)).toEqual({ t: 'notfound' });
+  });
+
+  it('routes a stage that has only public stores', () => {
+    const files: RouteRecord = { v: 1, app: 'feeds', stage: 'prod', d: 'd2', p: ['out'] };
+    expect(decide(files, `${STORAGE_PATH}out/a.json`)).toEqual({
+      t: 'storage',
+      key: '/feeds/prod/out/a.json',
+    });
+    expect(decide(files, HEALTH_PATH)).toEqual({ t: 'health' });
+    expect(decide(files, '/')).toEqual({ t: 'notfound' });
+    expect(decide(files, '/api/x')).toEqual({ t: 'notfound' });
+    expect(decide(files, '/__platform/auth/me')).toEqual({ t: 'notfound' });
+  });
+
   it('builds a CloudFront Function with the decision inlined', () => {
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' });
     expect(code).toContain('cf.kvs("kvs-123")');
@@ -164,10 +243,30 @@ describe('router decide', () => {
       body?: string;
       uri?: string;
     }>;
-    const request = (host: string, uri: string, headers: Record<string, { value: string }> = {}) =>
+    const request = (
+      host: string,
+      uri: string,
+      headers: Record<string, { value: string }> = {},
+      extra: {
+        querystring?: Record<string, { value: string }>;
+        cookies?: Record<string, { value: string }>;
+      } = {},
+    ) =>
       handler({
-        request: { uri, querystring: {}, headers: { host: { value: host }, ...headers }, cookies: {} },
-      });
+        request: {
+          uri,
+          querystring: extra.querystring ?? {},
+          headers: { host: { value: host }, ...headers },
+          cookies: extra.cookies ?? {},
+        },
+      }) as Promise<{
+        statusCode?: number;
+        headers: Record<string, { value: string }>;
+        body?: string;
+        uri?: string;
+        querystring?: Record<string, unknown>;
+        cookies?: Record<string, unknown>;
+      }>;
     return { request, origins, originConfigs };
   }
 
@@ -218,6 +317,47 @@ describe('router decide', () => {
     // No realtime on the stage: the path is the server's like any other platform path.
     await request('shop.example.com', REALTIME_PATH);
     expect(origins).toEqual(['rt.appsync.example', 'fn.example']);
+  });
+
+  it('rewrites public store files into the storage origin without query, cookies or credentials', async () => {
+    const atlas: RouteRecord = { ...both, app: 'atlas', p: ['snapshots'] };
+    const { request, origins } = edge({ 'atlas.example.com': atlas });
+    const res = await request(
+      'atlas.example.com',
+      `${STORAGE_PATH}snapshots/fires.json`,
+      { authorization: { value: 'Bearer x' } },
+      {
+        querystring: { 'response-content-type': { value: 'text/html' } },
+        cookies: { session: { value: 's' } },
+      },
+    );
+    expect(res.statusCode).toBeUndefined();
+    expect(res.uri).toBe('/atlas/prod/snapshots/fires.json');
+    expect(res.querystring).toEqual({});
+    expect(res.cookies).toEqual({});
+    expect(res.headers.authorization).toBeUndefined();
+    // The behavior's own origin: no switch.
+    expect(origins).toEqual([]);
+    // Its own cache key: the server of a server-only app gets the same path unchanged.
+    expect(res.headers['x-platform-host']?.value).toBe(STORAGE_CACHE_HOST);
+    expect((await request('atlas.example.com', `${STORAGE_PATH}uploads/a.json`)).statusCode).toBe(404);
+    expect((await request('atlas.example.com', `${STORAGE_PATH}snapshots/../x`)).statusCode).toBe(404);
+  });
+
+  it('keeps a public file and a server response for the same path apart in the cache', async () => {
+    const feeds: RouteRecord = { v: 1, app: 'feeds', stage: 'prod', d: 'd1', o: 'fn.example', p: ['out'] };
+    const { request } = edge({ 'feeds.example.com': feeds });
+    const file = await request('feeds.example.com', `${STORAGE_PATH}out/a.json`);
+    const server = await request('feeds.example.com', '/feeds/prod/out/a.json');
+    // CloudFront keys its cache on the URI and x-platform-host, not the behavior or origin.
+    expect(file.uri).toBe(server.uri);
+    expect(file.headers['x-platform-host']?.value).toBe(STORAGE_CACHE_HOST);
+    expect(server.headers['x-platform-host']?.value).toBe('feeds.example.com');
+    // A client can't pick the storage key for the server: the router sets the header.
+    const forged = await request('feeds.example.com', '/feeds/prod/out/a.json', {
+      'x-platform-host': { value: STORAGE_CACHE_HOST },
+    });
+    expect(forged.headers['x-platform-host']?.value).toBe('feeds.example.com');
   });
 
   it('answers 404 for realtime until the platform entry exists', async () => {

@@ -21,8 +21,7 @@ export interface Bindings {
   table?: string;
   queues: Record<string, { url: string; arn: string }>;
   bus?: { name: string; arn: string };
-  /** Shared storage bucket; each named store is `prefix + <name>/`. */
-  storage?: { bucket: string; prefix: string; stores: readonly string[] };
+  storage?: StorageBindings;
   secrets: { path: string; sharedPath: string; names: readonly string[] };
   auth?: AuthBindings;
   realtime?: RealtimeBindings;
@@ -49,6 +48,17 @@ export interface AuthBindings {
   /** Hosted login origin, e.g. `https://login.platform.ericminassian.com`. */
   loginUrl: string;
   required: boolean;
+}
+
+/** The shared storage bucket: a private store is `prefix + <name>/`, a public one `publicPrefix + <name>/`. */
+export interface StorageBindings {
+  bucket: string;
+  prefix: string;
+  /** Every store's name. */
+  stores: readonly string[];
+  /** The stores the edge serves at `STORAGE_PATH` (absent on stages deployed before there were any). */
+  public?: readonly string[];
+  publicPrefix?: string;
 }
 
 export interface RealtimeBindings {

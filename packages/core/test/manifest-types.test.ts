@@ -58,7 +58,19 @@ describe('defineApp', () => {
     defineApp({ name: 'todo', queues: { emails: { batchsize: 5 } } });
     // @ts-expect-error misspelled nested field
     defineApp({ name: 'todo', web: { server: 'src/server.ts', dev: { command: 'vite', prot: 5173 } } });
+    // @ts-expect-error misspelled store option
+    defineApp({ name: 'todo', storage: { snapshots: { pubic: true } } });
     expect(true).toBe(true);
+  });
+
+  it('keeps store names and options literal', () => {
+    const files = defineApp({
+      name: 'atlas',
+      storage: { uploads: {}, snapshots: { public: true, expireAfterDays: 7 } },
+    });
+    const isPublic: true = files.storage.snapshots.public;
+    const uploads: Same<typeof files.storage.uploads, {}> = true;
+    expect([isPublic, uploads]).toEqual([true, true]);
   });
 });
 
