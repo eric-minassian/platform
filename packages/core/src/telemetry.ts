@@ -208,9 +208,10 @@ export const telemetryKeys = {
 // Error fingerprinting (Sentry-style grouping)
 // ---------------------------------------------------------------------------
 
-/** Normalize volatile parts (ids, numbers, quoted values) so similar errors group together. */
+/** Normalize volatile parts (ARNs, ids, numbers, quoted values) so similar errors group together. */
 export function normalizeErrorMessage(message: string): string {
   return message
+    .replace(/\barn:aws[\w-]*:[^\s"'`,()]+/g, '<arn>')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/\b[0-9a-f]{16,}\b/gi, '<hex>')
     .replace(/(["'`]).*?\1/g, '<str>')

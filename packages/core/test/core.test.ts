@@ -8,6 +8,7 @@ import {
   latencyBucket,
   names,
   newDeploymentId,
+  normalizeErrorMessage,
   parseManifest,
   parseStageHost,
   percentile,
@@ -254,6 +255,19 @@ describe('telemetry', () => {
     const a = errorFingerprint('Error', 'user 123 not found', 'Error\n    at handler (/app/src/x.ts:1:2)');
     const b = errorFingerprint('Error', 'user 456 not found', 'Error\n    at handler (/app/src/x.ts:9:9)');
     expect(a).toBe(b);
+  });
+  it('groups errors that differ only in the ARNs they name', () => {
+    const denied = (action: string, param: string) =>
+      `User: arn:aws:sts::111122223333:assumed-role/platform-control-plane/platform--prod is not authorized to perform: ${action} on resource: arn:aws:ssm:us-east-1:111122223333:parameter/platform/apps/atlas/${param} because no identity-based policy allows the ${action} action`;
+    const stack = 'AwsError\n    at AppSecrets.put (file:///var/task/index.mjs:131:71414)';
+    const fp = (action: string, param: string) => errorFingerprint('AwsError', denied(action, param), stack);
+    const tagging = fp('ssm:AddTagsToResource', '_shared/secrets/ARCGIS_API_KEY');
+    expect(fp('ssm:AddTagsToResource', 'pr-1/secrets/CESIUM_ION_TOKEN')).toBe(tagging);
+    expect(fp('ssm:AddTagsToResource', 'prod/secrets/ATLAS_PROBE')).toBe(tagging);
+    expect(fp('ssm:PutParameter', 'prod/secrets/ATLAS_PROBE')).not.toBe(tagging);
+    expect(
+      normalizeErrorMessage('Requested resource not found: arn:aws-us-gov:dynamodb:x:1:table/a (retry)'),
+    ).toBe('Requested resource not found: <arn> (retry)');
   });
   it('makes sortable deployment ids', () => {
     const a = newDeploymentId();
