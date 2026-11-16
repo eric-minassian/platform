@@ -1,5 +1,5 @@
 /** Data browser, storage, secrets, job controls (run cron, redrive DLQ), and email's suppression list and pauses. */
-import { ENV_NAME_PATTERN, isEmailAddress } from '@ericminassian/platform-core';
+import { ENV_NAME_PATTERN, isEmailAddress, publicStores } from '@ericminassian/platform-core';
 import { BadRequest, Conflict, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
 import { Effect, Option } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
@@ -70,14 +70,17 @@ export const ManageLive = HttpApiBuilder.group(
       storage: ({ params, query }) =>
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
+          const manifest = yield* access.liveManifest(app, stage);
+          const served = Option.match(manifest, { onNone: (): string[] => [], onSome: publicStores });
           if (!query.store) {
-            const manifest = yield* access.liveManifest(app, stage);
-            return { stores: Option.match(manifest, { onNone: () => [], onSome: (m) => m.storage }) };
+            const stores = Option.match(manifest, { onNone: () => [], onSome: (m) => m.storage });
+            return { stores, public: served };
           }
           return yield* data.storage({
             app,
             stage,
             store: query.store,
+            public: served.includes(query.store),
             prefix: query.prefix,
             cursor: query.cursor,
           });
@@ -87,7 +90,17 @@ export const ManageLive = HttpApiBuilder.group(
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
           if (query.key.includes('..')) return yield* BadRequest.of('invalid key');
-          return { url: yield* data.downloadUrl({ app, stage, store: query.store, key: query.key }) };
+          const manifest = yield* access.liveManifest(app, stage);
+          const served = Option.match(manifest, { onNone: (): string[] => [], onSome: publicStores });
+          return {
+            url: yield* data.downloadUrl({
+              app,
+              stage,
+              store: query.store,
+              public: served.includes(query.store),
+              key: query.key,
+            }),
+          };
         }),
 
       secrets: ({ params, query }) =>

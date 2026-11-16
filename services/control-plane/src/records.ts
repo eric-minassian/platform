@@ -11,20 +11,20 @@
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
  */
-import { type AppRecord, DeploymentRecord, StageRecord } from '@ericminassian/platform-core';
+import {
+  type AppRecord,
+  DeploymentRecord,
+  RouteRecordSchema,
+  StageRecord,
+} from '@ericminassian/platform-core';
 import { Schema } from 'effect';
 
-/** A route record (`RouteRecord` in core) as the store keeps it, for rollbacks. */
-const StoredRoute = Schema.Struct({
-  v: Schema.Literal(1),
-  app: Schema.String,
-  stage: Schema.String,
-  d: Schema.String,
-  o: Schema.optional(Schema.String),
-  s: Schema.optional(Schema.String),
-  r: Schema.optional(Schema.Array(Schema.String)),
-  spa: Schema.optional(Schema.Literals([0, 1])),
-});
+/**
+ * A route record as the store keeps it, for rollbacks: all of it, since a
+ * rollback writes it back as the route (decoding drops fields a schema
+ * doesn't name, such as realtime's or public stores').
+ */
+const StoredRoute = RouteRecordSchema;
 
 /** Stage record plus what rollback and the uptime pinger need. */
 export const StageItem = Schema.Struct({

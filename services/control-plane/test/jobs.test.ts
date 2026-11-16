@@ -2,7 +2,12 @@ import type { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-clo
 import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
-import type { EmailSending, ResolvedManifest } from '@ericminassian/platform-core';
+import {
+  type EmailSending,
+  type ManifestInput,
+  parseManifest,
+  type ResolvedManifest,
+} from '@ericminassian/platform-core';
 import { type Duration, Effect, Layer, Option, Ref } from 'effect';
 import { FetchHttpClient } from 'effect/http';
 import { describe, expect, it } from 'vitest';
@@ -22,6 +27,7 @@ import {
   toRealtimeSeries,
 } from '../src/jobs/realtime.ts';
 import { stalePreviews } from '../src/jobs/reaper.ts';
+import { liveStages, StorageExpiry } from '../src/jobs/storage.ts';
 import { STUCK_AFTER_MS, stuckDeployments, suspectStages } from '../src/jobs/watchdog.ts';
 import { describe as describeEvent, runtimeRecord, toFilterPattern, toLogLine } from '../src/logs.ts';
 import { type DeploymentItem, type StageItem, Store } from '../src/store.ts';
@@ -349,6 +355,7 @@ describe('pinger', () => {
     events: [],
     crons: {},
     storage: [],
+    storageOptions: {},
     secrets: [],
     env: {},
     ...(email ? { email } : {}),
@@ -641,6 +648,99 @@ describe('realtime', () => {
       // A failure fails the cron, so it shows as a failed job and retries.
       const failed = yield* Effect.flip(run(withRealtime, true));
       assert.strictEqual(failed.message, 'AccessDenied');
+    }),
+  );
+});
+
+describe('storage expiry', () => {
+  const stage = (s: string, status: StageItem['status'], currentDeployment?: string): StageItem => ({
+    app: 'atlas',
+    stage: s,
+    host: 'h',
+    url: 'u',
+    status,
+    preview: s.startsWith('pr-'),
+    createdAt: '2026-11-01T00:00:00Z',
+    updatedAt: '2026-11-01T00:00:00Z',
+    ...(currentDeployment ? { currentDeployment } : {}),
+  });
+  const deployment = (id: string, s: string, storage: ManifestInput['storage']): DeploymentItem => ({
+    id,
+    app: 'atlas',
+    stage: s,
+    status: 'succeeded',
+    actor: 'bob',
+    events: [],
+    createdAt: '2026-11-01T00:00:00Z',
+    manifest: parseManifest({ name: 'atlas', storage }),
+  });
+
+  it('picks stages that have a live deployment', () => {
+    expect(
+      liveStages([
+        stage('prod', 'active', 'd1'),
+        stage('pr-1', 'deploying', 'd2'),
+        stage('pr-2', 'failed'),
+        stage('pr-3', 'destroyed', 'd3'),
+        stage('pr-4', 'destroying', 'd4'),
+      ]).map((s) => s.stage),
+    ).toEqual(['prod', 'pr-1']);
+  });
+
+  effect.effect('expires the stores of live deployments that ask for it, and reports failures', () =>
+    Effect.gen(function* () {
+      const calls: Array<{ stage: string; now: number }> = [];
+      const run = (failOn?: string) =>
+        StorageExpiry.use((s) => s.run).pipe(
+          Effect.provide(
+            StorageExpiry.layer.pipe(
+              Layer.provide([
+                settingsLayer(),
+                memoryStore({
+                  stages: [
+                    stage('prod', 'active', 'd1'),
+                    stage('pr-1', 'active', 'd2'),
+                    stage('pr-2', 'active', 'd3'),
+                  ],
+                  deployments: [
+                    deployment('d1', 'prod', {
+                      snapshots: { public: true, expireAfterDays: 7 },
+                      uploads: {},
+                    }),
+                    deployment('d2', 'pr-1', ['uploads']),
+                    deployment('d3', 'pr-2', { logs: { expireAfterDays: 1 } }),
+                  ],
+                }),
+                Layer.mock(StageEngine, {
+                  expireStorage: (input) =>
+                    Effect.suspend(() => {
+                      calls.push({ stage: input.stage, now: input.now!.getTime() });
+                      return input.stage === failOn
+                        ? Effect.fail(new DeployFailed({ message: 'AccessDenied' }))
+                        : Effect.succeed<Record<string, number>>(
+                            input.stage === 'prod' ? { snapshots: 4 } : { logs: 0 },
+                          );
+                    }),
+                }),
+              ]),
+            ),
+          ),
+        );
+
+      assert.deepStrictEqual(yield* run(), { deleted: { 'atlas/prod/snapshots': 4, 'atlas/pr-2/logs': 0 } });
+      // A stage without expiring stores isn't touched.
+      assert.deepStrictEqual(
+        calls.map((c) => c.stage),
+        ['prod', 'pr-2'],
+      );
+      calls.length = 0;
+      const failed = yield* Effect.flip(run('prod'));
+      assert.strictEqual(failed.message, 'AccessDenied');
+      // The other stages still ran.
+      assert.deepStrictEqual(
+        calls.map((c) => c.stage),
+        ['prod', 'pr-2'],
+      );
     }),
   );
 });

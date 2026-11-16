@@ -217,10 +217,15 @@ function Storage() {
   const { app, scope } = useApp();
   const stores = useAtomValue(storesAtom({ app, stage: scope.stage }));
   // Without `store`, the endpoint answers the declared stores.
-  const declared = Option.match(AsyncResult.value(stores), {
-    onNone: () => [],
-    onSome: (r) => ('stores' in r ? r.stores : []),
+  const none: { readonly stores: ReadonlyArray<string>; readonly public: ReadonlyArray<string> } = {
+    stores: [],
+    public: [],
+  };
+  const listed = Option.match(AsyncResult.value(stores), {
+    onNone: () => none,
+    onSome: (r) => ('stores' in r ? { stores: r.stores, public: r.public ?? [] } : none),
   });
+  const declared = listed.stores;
   const [store, setStore] = useState('');
   const active = store || declared[0] || '';
   return (
@@ -231,7 +236,11 @@ function Storage() {
           <Select
             value={active}
             onChange={setStore}
-            options={declared.map((s) => ({ value: s, label: s }))}
+            options={declared.map((s) => ({
+              value: s,
+              // The edge serves these to anyone with the URL.
+              label: listed.public.includes(s) ? `${s} (public)` : s,
+            }))}
           />
         ) : null
       }
