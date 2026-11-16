@@ -42,9 +42,9 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
                   └───────┬─────────────────┬──────┬─┘
               static      │                 │      │  /__platform/realtime: WebSocket (no OAC)
                           │                 │      └─────────────────────────────────┐
-                          │                 │  server (OAC, always-amz-auth)         ▼
+                          │                 │  server (OAC, or the origin secret)    ▼
                           ▼                 ▼                              AppSync Event API (one;
-         S3 sites bucket (per deploy)   Lambda Web Function  <app>--<stage>  a namespace per stage)
+         S3 sites bucket (per deploy)   Web Function or request Lambda       a namespace per stage)
                                             │  (fetch handler, SDK wrapper)          ▲ publish (IAM)
      ┌──────────────────────────────────────┼─────────────────────────────────────┐  │
      │ per stage:  DynamoDB table · SQS dead-letter queue · EventBridge bus ·      ├─┘
@@ -64,10 +64,10 @@ Status: scaffold (November 2026). Decisions below were made with Eric; the
 | Component                                  | What it is                                                                                                                                                                                                                                                                     |
 | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `packages/core`                            | Contracts shared by everything: naming, app config schema, bindings, telemetry schema, router decision, and the control plane API (`PlatformApi`), all as Effect schemas. Isomorphic.                                                                                          |
-| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the Web Function server wrapper and the worker dispatcher, both auto-instrumented.                                                      |
+| `packages/sdk` (`@ericminassian/platform`) | What app code imports: every resource as an Effect service, `toFetchHandler`/`defineWorker`, and an in-memory platform for tests. Also the server wrapper (a Web Function's HTTP server, or a request-mode Lambda handler) and the worker dispatcher, all auto-instrumented.   |
 | `packages/engine`                          | Idempotent "ensure" drivers over the AWS SDK. Deploys, rolls back and destroys stages. Also wraps the AWS Emulator.                                                                                                                                                            |
 | `packages/cli` (`@ericminassian/plat`)     | `init`, `dev`, `test`, `build`, `deploy`, `apps`, `logs`, `metrics`, `errors`, `traces`, `data`, `secrets`, `rollback`, `destroy`.                                                                                                                                             |
-| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, preview reaper, storage expiry.                                                                                                                                                |
+| `services/control-plane`                   | The `platform` app: API, console, deployer, telemetry processor, uptime pinger, cost collector, compute chooser, preview reaper, storage expiry.                                                                                                                               |
 | `foundation/`                              | The platform's shared resources (DNS, certificates, router, buckets, tables, Cognito, the realtime Event API and its authorizer, the SES mail domain, container network, cluster and registry, IAM) as one CDK stack, and the deploy that brings up the control plane on them. |
 | `templates/app`                            | What `plat init` copies: an Effect app (HttpApi server, worker, React SPA on a generated client) with auth, a todo collection, a queue, an event, a cron, a file store, and agent docs.                                                                                        |
 
@@ -88,6 +88,7 @@ const app = defineApp({
     dev: { command: 'pnpm --dir web dev' }, // listens on $PLATFORM_DEV_WEB_PORT
     spa: true,
     serverRoutes: ['/api/'],
+    compute: 'auto', // or 'request' / 'instance': how the server runs (see Compute)
   },
   auth: true, // or { required: true }
   db: true, // one document DB per stage; collections are declared in code
@@ -140,9 +141,12 @@ declare module '@ericminassian/platform/config' {
 
 - **Server**: the default export of `web.server` is `toFetchHandler(layer)`,
   which serves an `HttpApi` and passes route patterns, logs and the error
-  behind a 500 to the platform's telemetry. The SDK's wrapper listens on
-  `AWS_LAMBDA_HTTP_ENDPOINT`, the Web Function contract, and adds the
-  platform routes and request telemetry around it.
+  behind a 500 to the platform's telemetry. `plat build` bundles it with the
+  SDK's `serve`, which adds the platform routes and request telemetry around
+  it and runs either way the platform runs a server (see
+  [Compute](#compute)): it listens on `AWS_LAMBDA_HTTP_ENDPOINT` (a Web
+  Function, and `plat dev`), and otherwise exports the streaming handler a
+  request-mode function calls per request. App code is the same in both.
 - **Worker**: `export default defineWorker({ layer, queues, events, crons })`.
   One bundle per stage handles all of them; the wrapper dispatches on event
   shape, and retries or dead-letters a failed run (see [Jobs](#jobs)).
@@ -204,7 +208,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 | Resource     | Name                                                                                                                                                                  |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com`                                                                                                    |
-| Web Function | `todo--prod` (endpoints `live`, `live-b`)                                                                                                                             |
+| Server       | Web Function `todo--prod` (endpoints `live`, `live-b`); request-mode function `todo--prod--web` (aliases `live`, `live-b`, a function URL each)                       |
 | Worker       | `todo--prod--worker`; a handler's own `…--worker--<queue\|event\|cron>-<name>` (`.` and `:` in event types become `_`; hashed past 64)                                |
 | Table        | `todo--prod`                                                                                                                                                          |
 | Dead letters | SQS `todo--prod--jobs--dead` (queues from before 0.4.0 were `todo--prod--emails` / `…--dlq`)                                                                          |
@@ -229,11 +233,17 @@ certificate. A viewer-request CloudFront Function (JS runtime 2.0) looks up the
 (`packages/core/src/router/decide.js`; the same file is inlined at the edge and
 used by `plat dev`):
 
-- `/__platform/*` and server routes (`/api/` by default) go to the stage's Web
-  Function. The function calls `cf.updateRequestOrigin()` with OAC (origin type
-  `lambda`, signing `always-amz-auth`). That signing mode sends bodies as
-  `UNSIGNED-PAYLOAD`, so browsers can POST without hashing, unlike Function URL
-  origins.
+- `/__platform/*` and server routes (`/api/` by default) go to the stage's
+  server, in whichever compute mode the route record names (see
+  [Compute](#compute)). The function calls `cf.updateRequestOrigin()`:
+  - a Web Function endpoint (instance mode) with OAC (origin type `lambda`,
+    signing `always-amz-auth`). That signing mode sends bodies as
+    `UNSIGNED-PAYLOAD`, so browsers can POST without hashing;
+  - a function URL (request mode, the record's `c: 'r'`) without OAC, which
+    would make every client send `x-amz-content-sha256` with a body. It adds
+    the stage's origin secret (the record's `k`) as the custom origin header
+    `x-platform-origin`, after deleting any copy the viewer sent: CloudFront
+    answers 502 when a viewer header has the name of one the function adds.
 - Files go to the sites bucket under the live deployment's prefix. SPA paths
   get `index.html`.
 - `/__platform/realtime` belongs to the router when the stage has realtime
@@ -256,10 +266,102 @@ the edge floor, which answers a client sending one host more than
 The cache key includes the rewritten URI (static keys contain the deployment
 id) plus `x-platform-host`, so apps never share cache entries. The origin
 request policy is `AllViewerExceptHostHeader` (Web Functions 404 on a foreign
-Host). Hashed assets are immutable; `index.html` revalidates.
+Host, and function URLs need their own). Hashed assets are immutable;
+`index.html` revalidates.
 
 A new app or preview is a single KVS entry: no DNS, certificate or
 distribution change. Rollback is pointing the entry back.
+
+## Compute
+
+A stage's server runs in one of two modes, from one bundle. Which one costs
+less depends on how busy the stage is, so the platform picks
+(`packages/core/src/web-compute.ts`):
+
+| Mode       | What runs                                                              | Billed                                                                                                                     |
+| ---------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `request`  | a Lambda function (arm64, `web.memoryMb`, default 1024 MB) per request | each invocation's duration and INIT by the GB-second, and requests; from the account's free tier first; nothing while idle |
+| `instance` | a Lambda Web Function; one environment serves up to `web.concurrency`  | the memory an environment uses for its whole life (until ~290 s after its last request), vCPU while it works, and requests |
+
+Overlapping requests are what a Web Function bills once and request mode
+bills each, so request mode is cheaper until a stage keeps requests in flight
+most of the time. A visit to an otherwise idle app costs ~$0.00027 on a Web
+Function (an environment kept ~290 s) and ~$0.000008 in request mode (a cold
+start's ~0.55 s INIT at 1 GB, and the request); each further request while
+the environment is warm, ~$0.0000003.
+
+```
+plat.config.ts  web.compute: 'auto' (default) | 'request' | 'instance'
+deployer        webComputeFor: previews → request; prod → the stage's mode, request at first;
+                a build before SDK 0.4.0 → instance (and 'request' refuses it)
+engine          request: publish a version → the alias the live route doesn't use → its function URL
+                instance: create a revision → the endpoint the live route doesn't use
+daily chooser   prod servers: simulateWebCompute(last days of minute rollups) → estimate on the stage
+                auto, other mode ≥ 25% cheaper 3 days running → a platform deployment in that mode
+```
+
+- **Request mode.** The function is `<app>--<stage>--web` (`index.handler`),
+  logging JSON at system level WARN. Like a Web Function's two endpoints, it
+  has two aliases (`live`, `live-b`), each with a function URL (auth `NONE`,
+  invoke mode `RESPONSE_STREAM`) and the two grants such URLs need: invoking
+  the URL, and invoking the function only through a URL. A deploy publishes a
+  version and points the alias the live route doesn't use at it, so the route
+  flip switches files and server together; the newest three versions and the
+  aliases' are kept.
+- **The origin secret.** A function URL takes requests from anyone, so the
+  SDK answers 403 to a request without `x-platform-origin`, compared in
+  constant time, before any app code runs, and strips the header from what
+  the app sees. The secret is HKDF of the stage key (`originSecret`): the
+  engine writes it into the route, the SDK derives it from its bindings, and
+  nothing else stores it. Requests that get through are the router's, so
+  `cloudfront-viewer-address` can be trusted in both modes.
+- **The SDK in request mode** turns a function URL event into a `Request`
+  (cookies rejoined, base64 bodies decoded), runs the same platform fetch as
+  a Web Function (platform routes, auth, telemetry), and streams the
+  `Response` back: status, headers (repeated ones comma-joined), each
+  Set-Cookie, and the body as the app produces it. Lambda sends the status
+  and headers only with the first write, so a bodiless response writes an
+  empty chunk. A request's event is at most 6 MiB, so a request body is at
+  most ~6 MB, or ~4.7 MB of binary (sent base64-encoded); a response streams
+  up to 200 MB. `env` lines say which mode a server runs in.
+- **Instance mode.** Endpoints run at most `web.maxEnvironments` environments
+  (prod, default 10; previews 2): Lambda keeps spare, billed environments next
+  to busy ones (CI bursts ran 9–25 at once), and the cap bounds them.
+  Revisions log at system level WARN, which drops the runtime's per-minute
+  `platform.invokeSummary` and its init, invoke and spin-down records; the
+  SDK's `env` and `req` lines carry the same facts.
+- **Both modes stay.** A deploy builds only the active mode and leaves the
+  other mode's server as it is (both cost nothing idle), so a switch back or a
+  rollback across modes finds it. Dropping `web.server`, or destroying the
+  stage, deletes both.
+- **The chooser** (`compute`, daily) prices each prod server's traffic in
+  both modes from the whole-stage minute rollups (what they keep: 3 days),
+  which sum each minute's handling time (`dur`) and the INIT its starts
+  reported. A minute's concurrency is its handling time over 60 s:
+  - request: handling time and cold starts' INIT, by memory, and requests;
+    a minute needs as many environments as its concurrency, and ones idle
+    longer than 5 minutes are gone;
+  - instance: environments alive from each busy minute until ~290 s after
+    it, as many as its concurrency over `web.concurrency`, by the peak memory
+    CloudWatch reports (`AWS/Lambda/Web` `EnvironmentMaxMemoryUsage`, else
+    256 MB); vCPU for the share of the minute a request is in flight
+    (1 − e^−concurrency); and requests.
+
+  The estimate stays on the stage (the console's Cost tab, `plat apps show`).
+  On `auto`, once the other mode has been at least 25% cheaper three days
+  running (the streak is kept on the stage), the chooser creates a deployment
+  of the live deployment's build in that mode, actor `platform`, with the
+  reason as its message and `computeSwitchOf` naming the build; the deployer
+  runs it like any other, so it shows in the deployment history and can be
+  rolled back. A stage that is deploying waits for the next day, and a build
+  whose artifacts expired (90 days) stays due until the next deployment.
+
+- **Rollback** restores the target deployment's mode, pointing that mode's
+  alias or endpoint at its version or revision first if neither has it, and
+  refuses one whose build was cleaned up.
+- **The control plane** runs its own server in instance mode: a Web Function
+  scales on its own vCPU quota, so the console keeps answering when apps'
+  request-mode servers and workers use up the account's Lambda concurrency.
 
 ## Storage
 
@@ -702,9 +804,10 @@ app CI ── plat build ──► server.zip, worker.zip, static.zip, services.
 control plane ─ `stages` queue job "deploy" ─ engine.deployStage():
    role → log groups → table → dead-letter queue → bus/rules → Cognito client → channel namespace
    → SES tenant → worker Lambdas (async config, reserved concurrency) → rule targets/schedules
-   → old queues retired → service images, task
-   definitions, ECS rollouts → static files → Web Function revision → the endpoint the live
-   route doesn't use → resource policy → services running → KVS route (last step) → old builds cleaned up
+   → old queues retired → service images, task definitions, ECS rollouts → static files → server
+   build in its compute mode (Web Function revision, or function version) → the endpoint or alias
+   the live route doesn't use → its access grants → services running → KVS route (last step)
+   → old builds cleaned up
 CI polls, streams events, waits until its nearest edge serves the deployment,
 comments the URL on the PR.
 ```
@@ -717,17 +820,25 @@ comments the URL on the PR.
   merged PR's `closed` run carries the base branch as its ref, so it may
   destroy previews but never deploy one.
 - A failure before the route flip leaves the live version untouched.
-- Each stage's Web Function has two endpoints, each pinned to one revision.
-  A deploy puts the new revision on the endpoint the live route doesn't use,
-  and the route names its endpoint, so one route write switches static files
-  and server together at each edge. Edges still on the old route keep getting
-  the old version of both until they pick up the new one.
-- Rollback writes the earlier deployment's route. Its revision is usually
-  still pinned to an endpoint (always for the previous deployment); if not,
-  the endpoint the live route doesn't use is pointed at it first.
+- The deployer decides the server's compute mode (see [Compute](#compute))
+  and records it on the deployment, with the server build (revision or
+  version) a rollback needs.
+- Either mode has two places to serve from: a Web Function's two endpoints,
+  each pinned to one revision, or a request-mode function's two aliases, each
+  on one version with its own function URL. A deploy puts the new build on
+  the one the live route doesn't use, and the route names it, so one route
+  write switches static files and server together at each edge. Edges still
+  on the old route keep getting the old version of both until they pick up
+  the new one. A deploy that changes mode switches the same way.
+- Rollback writes the earlier deployment's route, in its mode. Its build is
+  usually still on an endpoint or alias (always for the previous deployment
+  in that mode); if not, the one the live route doesn't use is pointed at it
+  first.
 - A deploy never deletes the static files the previous route points at:
   edges that haven't picked up the new route still serve them. Rollback
-  refuses a deployment whose files or revision were cleaned up since.
+  refuses a deployment whose files, revision or version were cleaned up since.
+- The platform deploys too: a compute switch is a deployment (actor
+  `platform`) of the live deployment's build in the other mode.
 - Stages: `main` → `prod`. Each PR → `pr-<n>`, destroyed when the PR closes.
   A nightly reaper removes previews idle for `previewTtlDays`.
 - App repos hold no AWS credentials. They call a reusable workflow in this
@@ -750,7 +861,9 @@ comments the URL on the PR.
    webMode: 'external' })`. The same engine that provisions AWS provisions the
    emulator, so every local run exercises it.
 3. Run the server like a Web Function would (`AWS_LAMBDA_HTTP_ENDPOINT`, same
-   bindings) with hot reload, plus the frontend dev server on a free port it
+   bindings) with hot reload, whatever its compute mode deployed (the SDK's
+   wrapper and the app's code are the same in both), plus the frontend dev
+   server on a free port it
    gets in `PLATFORM_DEV_WEB_PORT` (`web.dev.port` if that is free), so
    several apps run side by side.
 4. A local router applies the same `decide()` at `http://<app>.localhost:3000`.
@@ -777,7 +890,7 @@ comments the URL on the PR.
 in CI.
 
 Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
-2026-11-15, ECS, ECR and one-shot schedules on 2026-11-16):
+2026-11-15, ECS, ECR, one-shot schedules and function URLs on 2026-11-16):
 
 | Works                                                                               | Missing, so the wrapper fills in                                                                    |
 | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
@@ -791,6 +904,7 @@ Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
 | ECS (Fargate tasks simulated once the VPC has an internet route), ECR layer uploads | Default VPC has no internet gateway: `ensureLocalPlatform` adds one and a default route             |
 | Scheduler one-shot schedules with universal targets (`ecs:updateService`)           | ECS timestamps carry 9 decimals, which the JS SDK rejects: engine compat middleware                 |
 | SESv2: identities, configuration sets, tenants and their associations               | `SendEmail` as a tenant is NotImplemented and sent mail can't be read back: the CLI's inbox         |
+| Lambda versions, aliases, function URLs and their permissions                       | Function URLs answer 502 for a streaming handler: `plat dev` runs the server                        |
 |                                                                                     | In-memory only: re-provisioned on each start (seconds)                                              |
 
 As the emulator fills gaps (it releases several times a day), the wrapper
@@ -884,7 +998,9 @@ writing any instrumentation:
   - Rows (`u#<app>#<stage>`, 35 days) say which kind they are; the console's
     Overview shows uptime with how many came from traffic and how many were
     checks. Rows from before have no source and were all checks.
-- **Cost.** A daily Cost Explorer pull grouped by the `platform:app` tag.
+- **Cost.** A daily Cost Explorer pull grouped by the `platform:app` tag. The
+  Cost tab and `plat apps show` also show each prod server's monthly estimate
+  in both compute modes (see [Compute](#compute)).
 - **CLI.** `plat logs|metrics|errors|traces|data --json` gives agents the same views.
 
 ## Identity
@@ -924,7 +1040,11 @@ writing any instrumentation:
   - reaches its stores under `<app>/<stage>/` and `_public/<app>/<stage>/`;
   - sends email only from its own address, through its own SES tenant.
 - Web Functions use `IamAuth` endpoints, and their resource policy trusts only
-  the router distribution (`aws:SourceArn`).
+  the router distribution (`aws:SourceArn`). Request-mode function URLs take
+  requests from anyone (CloudFront's OAC would make clients hash bodies), so
+  the SDK refuses any without the stage's origin secret before app code runs.
+  The secret is derived from the stage key and lives only in the route store
+  and the control plane's records; the API never returns routes.
 - The router distribution reads the storage bucket's `_public/` prefix only.
 - CI tokens are bound to a repo and a stage (prod only from main).
 - The platform's own CI role trusts only `eric-minassian/platform` on `main`.
@@ -950,16 +1070,16 @@ The root zone `ericminassian.com` stays in Eric's management account
 
 ## Cost model
 
-| Item | Monthly |
-| Long-running service (opt-in, 0.25 vCPU, 512 MB) | ~$5.90 on Spot, ~$10.90 on-demand, of which $3.65 is the task's public IPv4 address |
-
-| Container network, cluster, registry                | $0 (no NAT); images cents                                                                                                    |
+| Item                                                | Monthly                                                                                                                      |
 | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Long-running service (opt-in, 0.25 vCPU, 512 MB)    | ~$5.90 on Spot, ~$10.90 on-demand, of which $3.65 is the task's public IPv4 address                                          |
+| Container network, cluster, registry                | $0 (no NAT); images cents                                                                                                    |
 | Hosted zone (delegated)                             | $0.50                                                                                                                        |
 | CloudFront, CloudFront Functions, KVS               | free tier: 1 TB, 10M requests, 2M function and KVS reads; then cents                                                         |
 | Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                                                          |
 | Queues, events, crons (jobs)                        | $0 at rest; $0.20 per million messages (async invokes), retries and delays $1/M schedules after 14M free; dead letters ~$0   |
-| Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle                                          |
+| Server, request mode (quiet stages, previews)       | $0 at rest; $0.0000133 per GB-s (INIT included) + $0.20/M requests, from the free 400k GB-s and 1M requests first: cents     |
+| Server, instance mode (busy prod)                   | memory used while an environment lives (~290 s past a request): ~$2.40 per 256 MB held 24/7, + vCPU and $0.30/M requests     |
 | Logs                                                | $0.50/GB ingested; ~0.3 KB a request (~$0.15 per million): spans only for failed, slow and 1 in 20; short retention          |
 | Cognito                                             | free ≤ 10k MAU                                                                                                               |
 | Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50)                                      |
@@ -969,7 +1089,12 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Edge floor (AWS WAF)                                | $0.10 for the alarm; while on, $6 a month by the hour (~$0.01/h) plus $0.60 per million requests                             |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 
-Baseline is about $1–3 a month; the edge floor adds $0.10, and about a cent an hour while it's on. `eric-minassian/aws` already puts a budget on
+Fixed cost is about $0.60 a month: the delegated zone and the edge floor's
+alarm. An idle app adds about nothing: no server held warm, no queue polled,
+no health check unless it has been quiet for 6 hours. Before the
+scale-to-zero changes (measured November 2026) an idle prod app cost ~$2.30 a
+month in a Web Function the uptime pinger kept warm plus ~$0.26 per queue,
+and the always-on web ACL $6. `eric-minassian/aws` already puts a budget on
 the account.
 
 ## Graduation
@@ -1003,10 +1128,61 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 
 ## Risks and open items
 
-- **Web Function economics.** Idle environment lifetime isn't documented, and
-  memory is billed while warm. Watch the cost page. A future `compute:
-  'event'` mode (Function URL origin with a shared-secret header) could serve
-  near-zero-traffic apps from the Lambda free tier.
+- **Web Function economics** (measured in the account, November 2026). An
+  environment bills the memory it uses (~0.25 GB here) for its whole life,
+  including ~290 s after its last request, gets no free tier, and Lambda
+  starts spare, billed environments next to busy ones (CI bursts ran 9–25 at
+  once). Quiet stages therefore run request mode, and endpoints are capped
+  (`web.maxEnvironments`). See [Compute](#compute).
+- **The compute chooser estimates.** Minute rollups hold averages, so
+  bursts (many cold starts at once in request mode, more environments in
+  instance mode) are underestimated, and a streamed response's billed time
+  past its headers isn't in `dur`. Request mode's idle lifetime is
+  undocumented; the simulation assumes 5 minutes (an environment survived 3
+  idle minutes and was gone after 6). Neither estimate subtracts the free
+  tier, which the account's workers share. The 25% margin and three-day
+  streak keep a stage from flapping on these errors.
+- **Lambda concurrency.** Request-mode servers and workers share the
+  account's concurrent executions, still the new-account default of 10:
+  one request in flight uses one. Raise "Concurrent executions" in Service
+  Quotas before several apps run request mode, since Lambda refuses
+  requests past it. The control plane runs instance mode so it isn't
+  throttled with them.
+- **Function URLs are public.** Anyone who learns a URL (it appears only in
+  the route store and control plane records) can invoke it: each such
+  request is answered 403 by the SDK in a few milliseconds, billed like any
+  request. If one leaks, reserved concurrency caps what it can cost, and
+  recreating the alias's URL config retires the address.
+- **Request mode, verified 2026-11-16 on throwaway resources** (a
+  distribution, KVS, router function and S3 origin built like the router's,
+  two functions behind function URLs; deleted afterwards):
+  - `updateRequestOrigin` switches from the S3 default origin to a function
+    URL without OAC, with `customHeaders` (a plain `{ name: value }` object).
+  - A viewer sending a header with the name the function adds as a custom
+    origin header gets a 502 (`FunctionValidationError`), so the router
+    deletes the viewer's copy first; with that, a forged `x-platform-origin`
+    is replaced by the real secret.
+  - The function URL with only `lambda:InvokeFunctionUrl` answered 403
+    ("requires both the lambda:InvokeFunctionUrl and lambda:InvokeFunction
+    permissions"); both grants on the alias, the second conditioned on
+    `lambda:InvokedViaFunctionUrl`, work.
+  - Straight to the URL: no secret or a wrong one, 403 from the SDK; the
+    secret, 200. Through the edge, the app saw its public URL,
+    `x-platform-host`, `cloudfront-viewer-address` and no origin header.
+  - POST bodies arrived byte for byte (1 MB binary, 180 KB UTF-8 JSON, a
+    form). The limit is Lambda's 6 MiB event: 5.9 MB of text and 4.7 MB of
+    binary (base64-encoded in the event) passed; 6.3 MB of text and 4.8 MB
+    of binary got 413.
+  - Responses stream through CloudFront: five chunks a second apart reached
+    the client a second apart (first at 0.38 s); 12 MB and 20 MB responses
+    arrived whole (20 MB in 1.3 s). A 204 kept its headers, as did a 302
+    and a HEAD; two Set-Cookie headers arrived separately; an app-gzipped
+    body passed intact. CloudFront dropped `accept` from `Vary: accept,
+    cookie` (the URL itself sent both).
+  - Cold starts of the template app's server (2.1 MB bundle): INIT 460–650
+    ms at 512, 1024 and 1769 MB; the first request after it ~115, ~60 and
+    ~40 ms; warm requests 12–148, 5–11 and 5–11 ms; ~140 MB used. The SDK's
+    `env` line's `initMs` was within ~30 ms of Lambda's INIT duration.
 - **Verified on the first real deploy (2026-11-15).**
   - `updateRequestOrigin` switches from the default S3 origin to a Web
     Function with OAC, and POST bodies arrive unsigned.
@@ -1162,3 +1338,10 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Spans are written for failed, slow and 1-in-20 traces; the rest are counted           | Measured 2026-11-16: a span line per call made a typical request ~1 KB of CloudWatch Logs ($0.50/GB), about $0.50 per million requests, more than the Web Function's request fee. Deciding when a request ends keeps every failed or slow trace whole, which deciding at its start can't; choosing by trace id keeps every hop of a sampled one. Lines keep `app`, `stage` and `rev`, so no reader has to infer them.                                                                                                                                    |
 | The edge floor is on only while the edge is busy (revisits the always-on floor)       | Revisits Eric's 2026-11-16 always-on call: that web ACL was the largest fixed cost ($6 a month plus $0.60 per million requests). WAF bills by the hour and CloudFront doesn't bill requests WAF blocks, so a web ACL only while the edge is busy keeps the floor for $0.10 at rest; it starts minutes into a flood. The control plane owns it: an alarm can't run a stack deploy.                                                                                                                                                                        |
 | Uptime from traffic; health checks only for quiet stages                              | A Web Function bills held memory until ~290 s after its last request, so 5-minute checks kept every prod server warm (~$2.30 per app per month) and cold-started most checks. A stage's own requests already say whether it's up; checks stay where nothing else tells (no server, quiet 6 hours, just gone quiet, failing). Health probes are left out of the rollups.                                                                                                                                                                                  |
+| Two compute modes for servers, chosen by cost (revisits the row above)                | Eric's call (2026-11-16), after measuring Web Functions here: they bill the memory an environment uses for its whole life, ~290 s past its last request, with no free tier and billed spare environments, so a visit to an idle app costs ~$0.00027. A regular Lambda bills by the millisecond from the free tier. So previews and quiet prod stages run request mode, and a busy prod stage moves to a Web Function.                                                                                                                                    |
+| Request mode behind public function URLs and an origin secret, not OAC                | OAC to a function URL still needs clients to send `x-amz-content-sha256` with a body, which webhooks and forms can't. The router adds a header derived from the stage key, which the SDK checks before app code: no new resource or secret store. API Gateway would add a per-request charge and another origin type.                                                                                                                                                                                                                                    |
+| One server bundle for both modes, two aliases like two endpoints                      | A mode switch is a redeploy of the same artifacts, with no rebuild, and app code can't tell the modes apart. Two aliases with a URL each keep the route flip switching files and server together, and rollback a route write.                                                                                                                                                                                                                                                                                                                            |
+| A mode switch is a platform deployment, after three days at 25% cheaper               | It goes through the deployer, so it is logged, shows in the history and rolls back like any deploy. The margin and the streak absorb the estimate's error and keep a stage from flapping.                                                                                                                                                                                                                                                                                                                                                                |
+| Request mode defaults to 1024 MB                                                      | Measured on the template app: INIT doesn't speed up with memory, requests do. Warm requests took 5–11 ms at 1024 MB against 12–148 at 512, so 1024 also costs less per request; 1769 MB was no faster.                                                                                                                                                                                                                                                                                                                                                   |
+| Web Function endpoints capped, runtime logs at WARN                                   | Spare environments are billed, and the cap bounds them (previews 2, prod 10 unless `web.maxEnvironments`). The runtime's own log records repeat the SDK's `env` and `req` lines and cost ingest.                                                                                                                                                                                                                                                                                                                                                         |
+| The control plane's server runs in instance mode                                      | It must keep answering when apps' request-mode servers and workers use up the account's shared Lambda concurrency; Web Functions scale on their own quota.                                                                                                                                                                                                                                                                                                                                                                                               |
