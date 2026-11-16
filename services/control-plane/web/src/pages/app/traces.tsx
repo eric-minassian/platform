@@ -36,7 +36,7 @@ import { Label } from '../../components/ui/label.tsx';
 import { Switch } from '../../components/ui/switch.tsx';
 import { type PickerOption, ValuePicker } from '../../components/value-picker.tsx';
 import { family } from '../../data/atoms.ts';
-import { fmtMs, fmtNum } from '../../format.ts';
+import { fmtMs, fmtNum, shortId } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { apiTime, timeFormat, type TimeSearch } from '../../lib/time.ts';
@@ -154,7 +154,7 @@ function traceColumns(utc: boolean, longest: number) {
     col.accessor((t) => t.rev ?? '', {
       id: 'rev',
       header: 'Deployment',
-      cell: ({ getValue }) => <Mono className="text-muted-foreground">{getValue().slice(-7)}</Mono>,
+      cell: ({ getValue }) => <Mono className="text-muted-foreground">{shortId(getValue())}</Mono>,
     }),
   ]);
 }

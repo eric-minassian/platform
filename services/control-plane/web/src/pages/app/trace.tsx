@@ -14,7 +14,7 @@ import { stackFrames } from '../../components/logs/log-drawer.tsx';
 import { EmptyState, Loaded, Mono, PageHeader, Panel, StatusPill } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import { family } from '../../data/atoms.ts';
-import { fmtMs, fmtNum } from '../../format.ts';
+import { fmtMs, fmtNum, shortId } from '../../format.ts';
 import { useStage } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { timeFormat } from '../../lib/time.ts';
@@ -156,7 +156,7 @@ function TraceView({
           <span className="tabular">{fmtMs(layout.total)}</span>
           <span className="text-subtle">·</span>
           <span>
-            deployment <Mono>{root.event.rev.slice(-7)}</Mono>
+            deployment <Mono>{shortId(root.event.rev)}</Mono>
           </span>
         </div>
       </PageHeader>

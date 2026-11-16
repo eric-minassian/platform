@@ -3,7 +3,7 @@
  * their counts, as checkboxes that add filters.
  */
 import type { FacetCount, LogFilters, LogStatsResponse } from '@ericminassian/platform-core';
-import { fmtNum } from '../../format.ts';
+import { fmtNum, shortId } from '../../format.ts';
 import { cn } from '../../lib/utils.ts';
 import { Checkbox } from '../ui/checkbox.tsx';
 import { LEVEL_COLORS, streamLabel } from './log-table.tsx';
@@ -30,7 +30,7 @@ export function toggleFilter(filters: LogFilters, key: FacetKey, value: string):
 
 function label(key: FacetKey, value: string): string {
   if (key === 'streams') return streamLabel(value);
-  if (key === 'revs') return value.length > 14 ? value.slice(-7) : value;
+  if (key === 'revs') return shortId(value);
   return value;
 }
 

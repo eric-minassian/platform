@@ -29,7 +29,7 @@ import {
 import { Segmented } from '../../components/segmented.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import { family } from '../../data/atoms.ts';
-import { fmtNum, relTime } from '../../format.ts';
+import { fmtNum, relTime, shortId } from '../../format.ts';
 import { useAutoRefresh, useStage, useTime } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { apiTime, timeFormat, type TimeSearch } from '../../lib/time.ts';
@@ -262,7 +262,7 @@ function Detail({ app, stage, group }: { app: string; stage: string; group: Erro
             <>
               <dt className="text-muted-foreground">Deployment</dt>
               <dd>
-                <Mono>{group.sample.rev.slice(-7)}</Mono>
+                <Mono>{shortId(group.sample.rev)}</Mono>
               </dd>
             </>
           )}
@@ -316,7 +316,7 @@ function Detail({ app, stage, group }: { app: string; stage: string; group: Erro
                     {series.revs.map((r, i) => (
                       <span key={r.value}>
                         {i > 0 && ', '}
-                        <Mono>{r.value.slice(-7)}</Mono> ({fmtNum(r.count)})
+                        <Mono>{shortId(r.value)}</Mono> ({fmtNum(r.count)})
                       </span>
                     ))}
                   </p>
