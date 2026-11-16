@@ -768,14 +768,31 @@ writing any instrumentation:
   - `req`: every request, with route pattern, status, latency, country and cold start
   - `err`: errors, with a fingerprint
   - `job`: every queue, event, cron or invoke run
-  - `span`: SDK calls (including `realtime.publish` and `email.send`) and outgoing `fetch`
+  - `span`: SDK calls (including `realtime.publish` and `email.send`) and
+    outgoing `fetch`, for the requests and jobs that keep them
   - `log`, `metric` (from `metrics.count/value`) and `env` (cold start)
   - `limit`: every `RateLimits` check, with the limit's name and whether it fit
   - All carry `trace`. Traces propagate through job payloads (queue
     messages, retries) and event detail.
+  - **Spans when they matter.** A request, job or `traced` unit holds its
+    spans until it ends, then writes them if it failed (a 5xx, a failed job,
+    or an `err` line while it ran), took 1 s or longer, or its trace is one of
+    1 in 20 (`TRACE_SAMPLE_RATE`, a hash of the trace id, so every hop of a
+    trace agrees). Otherwise its line counts them (`calls`, `callMs`), and the
+    trace views show "12 calls, 34ms, not recorded". It holds at most 500 and
+    counts the rest. An error writes the held spans at once; spans that end
+    after their request follow its choice. Code that no request or job ends
+    (the logs processor) writes spans as they end, and `plat dev` prints all.
+  - **Compact.** A line leaves out what a reader can tell without it: `path`
+    when it is the `route`, a first `attempt`, and a request's own `span` id
+    when no span points to it. A typical request (three calls, a 200) writes
+    one line of 251 bytes instead of four of 1,060 (pinned in
+    `packages/sdk/test/telemetry.test.ts`).
 - **Pipeline.** One account-level CloudWatch Logs subscription filter (one per
   account and region; destination is the control plane worker) forwards
-  `req|err|job|metric|limit|env` lines to the telemetry processor. It writes:
+  `req|err|job|metric|limit|env` lines to the telemetry processor. `span` and
+  `log` lines stay in CloudWatch Logs for log search and traces (Logs
+  Insights) to read on demand. The processor writes:
   - per-minute, per-hour and per-day rollups to `platform-telemetry`: request
     counts by status class, a fixed-bucket latency histogram (so DynamoDB
     `ADD` works), per-route, per-job, custom-metric and rate-limit series,
@@ -885,7 +902,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Idle app (table, bus, schedules, functions at zero) | ~$0                                                                                                                          |
 | Queues, events, crons (jobs)                        | $0 at rest; $0.20 per million messages (async invokes), retries and delays $1/M schedules after 14M free; dead letters ~$0   |
 | Web Function warm environment                       | memory billed while warm: ~$1 per 100 MB held 24/7, worst case for a steady trickle                                          |
-| Logs                                                | $0.50/GB ingested (≈3M requests per GB), short retention                                                                     |
+| Logs                                                | $0.50/GB ingested; ~0.3 KB a request (~$0.15 per million): spans only for failed, slow and 1 in 20; short retention          |
 | Cognito                                             | free ≤ 10k MAU                                                                                                               |
 | Realtime (AppSync Events)                           | $0 at rest; $1/M operations, $0.08/M connection-minutes (1,000 always-on users ≈ $3.50)                                      |
 | Email (SES)                                         | $0 at rest; $0.10 per 1,000 emails, plus $0.005 per 1,000 sent as a tenant; 1,000 tenants included, then $0.005 a month each |
@@ -1066,3 +1083,4 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | One unpolled dead-letter queue per stage, for every writer                            | Failed events and crons were dropped after Lambda's two retries. An SQS queue nothing polls is free at rest and keeps letters 14 days; the SDK, Lambda's on-failure destination, Scheduler and EventBridge all write to it, and redrive re-invokes from the first attempt on the function the handler runs in now.                                                                                                                                                                                                                                       |
 | Deployments built with an SDK older than 0.4.0 are refused                            | Bindings (v2) and job payloads changed with pushed jobs, and an old worker can't read them. Live stages keep running what they run until they deploy again; their old queues drain, and their old dead letters move into the stage's queue.                                                                                                                                                                                                                                                                                                              |
 | The control plane's deploys run on a queue with a function of its own                 | The worker also processes every app's telemetry, and was 1 GB only because deploys ran there. Deploys and destroys get 1 GB and 15 minutes on a `stages` queue run once; the worker drops to 512 MB.                                                                                                                                                                                                                                                                                                                                                     |
+| Spans are written for failed, slow and 1-in-20 traces; the rest are counted           | Measured 2026-11-16: a span line per call made a typical request ~1 KB of CloudWatch Logs ($0.50/GB), about $0.50 per million requests, more than the Web Function's request fee. Deciding when a request ends keeps every failed or slow trace whole, which deciding at its start can't; choosing by trace id keeps every hop of a sampled one. Lines keep `app`, `stage` and `rev`, so no reader has to infer them.                                                                                                                                    |
