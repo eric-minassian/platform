@@ -323,6 +323,38 @@ export const RealtimeStatsResponse = Schema.Struct({
 });
 export type RealtimeStatsResponse = typeof RealtimeStatsResponse.Type;
 
+/** One custom metric (`Metrics.count`/`value`) in one bucket: how many values, and their sum. */
+export const CustomMetricPoint = Schema.Struct({
+  ts: Schema.String,
+  count: Schema.Finite,
+  sum: Schema.Finite,
+});
+export type CustomMetricPoint = typeof CustomMetricPoint.Type;
+
+/**
+ * A custom metric over the range. `Metrics.count(name, n)` records `n` with
+ * unit `count`, so `sum` is the total; for `Metrics.value`, `sum / count` is
+ * the average.
+ */
+export const CustomMetricStats = Schema.Struct({
+  name: Schema.String,
+  unit: optional(Schema.String),
+  count: Schema.Finite,
+  sum: Schema.Finite,
+  /** One per bucket in the range, zero-filled. */
+  points: Schema.Array(CustomMetricPoint),
+});
+export type CustomMetricStats = typeof CustomMetricStats.Type;
+
+/** A stage's custom metrics recorded in the range, by name. */
+export const CustomMetricsResponse = Schema.Struct({
+  app: Schema.String,
+  stage: Schema.String,
+  res: Resolution,
+  metrics: Schema.Array(CustomMetricStats),
+});
+export type CustomMetricsResponse = typeof CustomMetricsResponse.Type;
+
 /** One rate limit's checks in one bucket. */
 export const LimitPoint = Schema.Struct({
   ts: Schema.String,
@@ -557,6 +589,7 @@ export const AdminOverview = Schema.Struct({
     appsPerMember: Schema.Finite,
     stagesPerApp: Schema.Finite,
     emailsPerDay: Schema.Finite,
+    edgeRequestsPerMinute: optional(Schema.Finite),
   }),
   apps: Schema.Finite,
   stages: Schema.Finite,
@@ -566,6 +599,41 @@ export const AdminOverview = Schema.Struct({
   cost: Schema.Struct({ total: Schema.NullOr(CostResponse), shared: Schema.NullOr(CostResponse) }),
 });
 export type AdminOverview = typeof AdminOverview.Type;
+
+/** Requests the edge's web ACL handled in one bucket (CloudWatch `Sum`s). */
+export const EdgeFloorPoint = Schema.Struct({
+  ts: Schema.String,
+  /** Blocked by the per-client floor. */
+  blocked: Schema.Finite,
+  /** Let through (every request the web ACL saw and allowed). */
+  allowed: Schema.Finite,
+});
+export type EdgeFloorPoint = typeof EdgeFloorPoint.Type;
+
+/** A request the floor blocked, from WAF's sample of the last three hours. */
+export const EdgeFloorSample = Schema.Struct({
+  at: Schema.String,
+  host: Schema.String,
+  client: Schema.String,
+  country: optional(Schema.String),
+  method: Schema.String,
+  path: Schema.String,
+});
+export type EdgeFloorSample = typeof EdgeFloorSample.Type;
+
+/** The edge's per-client request floor (`limits.edgeRequestsPerMinute`) across every app. */
+export const EdgeFloorResponse = Schema.Struct({
+  /** False when the platform has no floor; the rest is then empty. */
+  enabled: Schema.Boolean,
+  /** Requests per client per host per minute. */
+  limit: optional(Schema.Finite),
+  res: Resolution,
+  totals: Schema.Struct({ blocked: Schema.Finite, allowed: Schema.Finite }),
+  points: Schema.Array(EdgeFloorPoint),
+  /** Newest first. WAF samples a share of requests, so counts here undercount. */
+  samples: Schema.Array(EdgeFloorSample),
+});
+export type EdgeFloorResponse = typeof EdgeFloorResponse.Type;
 
 // ---------------------------------------------------------------------------
 // Errors

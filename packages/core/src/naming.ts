@@ -164,6 +164,10 @@ export const platformNames = {
   controlPlaneRole: 'platform-control-plane',
   ciRole: 'platform-ci',
   alertsTopic: 'platform-alerts',
+  /** The router's AWS WAF web ACL (`limits.edgeRequestsPerMinute`); also its CloudWatch metric name. */
+  edgeWebAcl: 'platform-edge',
+  /** Its rate-based rule, and that rule's metric name. */
+  edgeFloorRule: 'requests-per-client',
   runtimeConfigParameter: '/platform/config/runtime',
   sessionKeyParameter: '/platform/config/session-key',
   githubAppParameterPrefix: '/platform/config/github-app/',

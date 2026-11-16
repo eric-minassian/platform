@@ -196,7 +196,7 @@ export function bucketStart(ts: number, res: Resolution): number {
  * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<route>`   per-route HTTP (same fields, plus method)
  * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]
- * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum, min, max
+ * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum (and the unit)
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
  * - `u#<app>#<stage>`        sk `<iso>`           uptime checks: ok, status, ms

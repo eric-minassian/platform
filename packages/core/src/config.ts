@@ -39,11 +39,23 @@ export interface PlatformConfig {
     stagesPerApp: number;
     /** Highest `email.dailyLimit` an app may declare (recipients per UTC day). */
     emailsPerDay: number;
+    /**
+     * The edge's floor for every app: requests one client (IP address) may
+     * send one host per minute before the router answers 429 for a while.
+     * An AWS WAF rate-based rule (about $6 a month, plus $0.60 per million
+     * requests); unset, there is no web ACL. Apps set finer limits with
+     * `RateLimits`.
+     */
+    edgeRequestsPerMinute?: number;
   };
   telemetry: { logRetentionDays: { prod: number; other: number } };
 }
 
 export function definePlatformConfig(config: PlatformConfig): PlatformConfig {
+  const floor = config.limits.edgeRequestsPerMinute;
+  // WAF's rate-based rules count from 10 requests.
+  if (floor !== undefined && (!Number.isSafeInteger(floor) || floor < 10))
+    throw new Error(`limits.edgeRequestsPerMinute must be an integer of at least 10, not ${floor}`);
   const seen = new Set<string>();
   for (const m of config.members) {
     const key = m.github.toLowerCase();

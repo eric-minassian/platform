@@ -29,10 +29,12 @@ import {
   CreateDeploymentRequest,
   CreateDeploymentResponse,
   CronRunResponse,
+  CustomMetricsResponse,
   DataCollections,
   DataPage,
   DeploymentRecord,
   EmailSending,
+  EdgeFloorResponse,
   EmailStatsResponse,
   ErrorGroup,
   ErrorStatus,
@@ -229,13 +231,13 @@ const appStage = { app: Schema.String, stage: Schema.String };
 /** `?stage=` defaults to prod; the server validates the name. */
 const stageQuery = { stage: Schema.optional(Schema.String) };
 /** `?range=1h|24h|7d|30d` or `?from=&to=` (epoch ms or ISO), and `?res=1m|1h|1d`. */
-const rangeQuery = {
-  ...stageQuery,
+const timeQuery = {
   from: Schema.optional(Schema.String),
   to: Schema.optional(Schema.String),
   range: Schema.optional(Schema.String),
   res: Schema.optional(Schema.String),
 };
+const rangeQuery = { ...stageQuery, ...timeQuery };
 const limit = Schema.optional(Schema.Int);
 
 export class SessionApi extends HttpApiGroup.make('session').add(
@@ -372,6 +374,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       params: app,
       query: rangeQuery,
       success: EmailStatsResponse,
+      error: errors,
+    }),
+    /** `Metrics.count`/`value` series per name, at 1h or 1d. */
+    HttpApiEndpoint.get('customMetrics', '/apps/:app/custom-metrics', {
+      params: app,
+      query: rangeQuery,
+      success: CustomMetricsResponse,
       error: errors,
     }),
     /** `RateLimits` checks per limit: allowed and denied, at 1h or 1d. */
@@ -536,6 +545,14 @@ export class ManageApi extends HttpApiGroup.make('manage')
 
 export class AdminApi extends HttpApiGroup.make('admin')
   .add(HttpApiEndpoint.get('overview', '/admin/overview', { success: AdminOverview, error: errors }))
+  /** The edge's per-client request floor: blocked and allowed requests, and recently blocked ones. */
+  .add(
+    HttpApiEndpoint.get('edge', '/admin/edge', {
+      query: timeQuery,
+      success: EdgeFloorResponse,
+      error: errors,
+    }),
+  )
   .middleware(Authenticated) {}
 
 export class PlatformApi extends HttpApi.make('platform')
