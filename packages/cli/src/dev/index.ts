@@ -131,19 +131,29 @@ export async function runDev(opts: DevOptions): Promise<void> {
 
   // ------------------------------------------------------------ worker
   let dispatcher: Dispatcher | undefined;
-  let workerPort: number | undefined;
   if (manifest.worker) {
-    const worker = await startLocalWorker(stage, manifest, root, { mailUrl });
-    workerPort = worker.port;
+    // The dispatcher's port first: the worker posts its own retries and sends there.
+    const jobsPort = await freePort();
+    const worker = await startLocalWorker(stage, manifest, root, {
+      mailUrl,
+      jobsUrl: `http://127.0.0.1:${jobsPort}/`,
+    });
     children.push(worker.child);
     const out = prefixer(pc.yellow('worker│'), (s) => process.stdout.write(s), { spans: opts.spans });
     worker.child.stdout!.on('data', out);
     worker.child.stderr!.on('data', out);
-    dispatcher = await startWorkerDispatch(stage, manifest, worker, (kind, name, outcome, detail) => {
-      if (outcome === 'error') warn(`${kind} ${name} failed${detail ? `: ${detail}` : ''}`);
-    });
+    dispatcher = await startWorkerDispatch(
+      stage,
+      manifest,
+      worker,
+      (kind, name, outcome, detail) => {
+        if (outcome === 'error') warn(`${kind} ${name} failed${detail ? `: ${detail}` : ''}`);
+      },
+      { port: jobsPort },
+    );
     cleanups.push(() => dispatcher?.stop());
   }
+  const workerUrl = dispatcher?.url;
 
   const runCron = async (name: string) => {
     if (!dispatcher) throw new CliError('this app has no worker');
@@ -169,7 +179,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
   if (runServices) {
     const services = Object.keys(manifest.services).map((name) =>
       startDevService(stage, manifest, root, name, {
-        ...(workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {}),
+        ...(workerUrl ? { workerUrl } : {}),
         ...(opts.spans ? { spans: true } : {}),
         write: (s) => process.stdout.write(s),
         warn,
@@ -181,7 +191,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
   // ------------------------------------------------------------ web server
   if (manifest.web?.server) {
     const { child, port: serverPort } = await spawnWebServer(stage, manifest, root, {
-      ...(workerPort ? { workerUrl: `http://127.0.0.1:${workerPort}/` } : {}),
+      ...(workerUrl ? { workerUrl } : {}),
       mailUrl,
     });
     children.push(child);
@@ -291,7 +301,8 @@ export async function spawnWebServer(
     PLATFORM_LOG_PRETTY: '1',
     PLATFORM_ENTRY: resolve(root, manifest.web.server),
     PLATFORM_SDK_SERVER: resolveFromApp(root, SDK_SERVER),
-    // `Jobs.invoke` locally: the SDK posts here instead of invoking the emulator's sandboxed Lambda.
+    // Queue sends and `Jobs.invoke` locally: the SDK posts to the dispatcher instead of invoking the
+    // emulator's sandboxed Lambda.
     ...(opts.workerUrl ? { PLATFORM_LOCAL_WORKER_URL: opts.workerUrl } : {}),
     ...(opts.mailUrl ? { [LOCAL_MAIL_URL_ENV]: opts.mailUrl } : {}),
   });
@@ -321,7 +332,7 @@ function printBanner(
     `  ${pc.dim('➜')} Emulator:  ${stage.conn.endpoint}`,
   ];
   if (b.table) lines.push(`  ${pc.dim('➜')} Database:  ${b.table}`);
-  const queues = Object.keys(b.queues);
+  const queues = b.jobs?.queues ?? [];
   if (queues.length) lines.push(`  ${pc.dim('➜')} Queues:    ${queues.join(', ')}`);
   if (manifest.events.length) lines.push(`  ${pc.dim('➜')} Events:    ${manifest.events.join(', ')}`);
   if (b.storage) {

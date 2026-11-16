@@ -4,7 +4,6 @@ import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { SendMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
 import {
   APPSYNC_SUBPROTOCOL,
   type CapturedEmail,
@@ -30,7 +29,7 @@ import {
   startWorkerDispatch,
 } from '../src/dev/worker.ts';
 import { loadProject } from '../src/project.ts';
-import { waitForPort } from '../src/util/net.ts';
+import { freePort, waitForPort } from '../src/util/net.ts';
 import { FIXTURES } from './helpers.ts';
 
 // End to end through the real engine + SDK on the AWS Emulator: what `plat dev`
@@ -48,10 +47,14 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
 
   beforeAll(async () => {
     stage = await startLocalStage({ root, manifest, stage: 'test', port: 3999 });
-    worker = await startLocalWorker(stage, manifest, root, { watch: false });
+    const jobsPort = await freePort();
+    worker = await startLocalWorker(stage, manifest, root, {
+      watch: false,
+      jobsUrl: `http://127.0.0.1:${jobsPort}/`,
+    });
     worker.child.stdout?.on('data', (c) => (workerOutput += c));
     worker.child.stderr?.on('data', (c) => (workerOutput += c));
-    dispatcher = await startWorkerDispatch(stage, manifest, worker);
+    dispatcher = await startWorkerDispatch(stage, manifest, worker, () => {}, { port: jobsPort });
   });
 
   afterAll(async () => {
@@ -82,7 +85,7 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
     expect(stage.bindings.app).toBe('basic-app');
     expect(stage.bindings.stage).toBe('test');
     expect(stage.bindings.table).toBeTruthy();
-    expect(Object.keys(stage.bindings.queues)).toEqual(['jobs']);
+    expect(stage.bindings.jobs?.queues).toEqual(['jobs']);
     expect(stage.result.workerFunction?.name).toBeTruthy();
   });
 
@@ -93,18 +96,32 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
     expect(workerOutput).toContain('tick 30');
   });
 
-  it('delivers queue messages from the emulator to the worker', async () => {
-    const sqs = new SQSClient(emulatorClientConfig(stage.conn));
-    await sqs.send(
-      new SendMessageCommand({
-        QueueUrl: stage.bindings.queues.jobs!.url,
-        MessageBody: JSON.stringify({ n: 42 }),
-      }),
-    );
+  it('runs the jobs the SDK hands the dispatcher, now or when they come due', async () => {
+    const job = (n: number) =>
+      JSON.stringify({
+        __platform: 'job',
+        kind: 'queue',
+        name: 'jobs',
+        id: `m${n}`,
+        attempt: 1,
+        sentAt: Date.now(),
+        body: { n },
+      });
+    const now = await fetch(dispatcher!.url, { method: 'POST', body: job(42) });
+    expect(now.status).toBe(202);
+    const later = await fetch(dispatcher!.url, {
+      method: 'POST',
+      body: job(43),
+      headers: { 'x-platform-deliver-at': String(Date.now() + 1_500) },
+    });
+    expect(later.status).toBe(202);
+    expect(dispatcher!.pending()).toBe(1);
     const deadline = Date.now() + 30_000;
+    while (dispatcher!.pending() > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
     while (!workerOutput.includes('hello from basic-app') && Date.now() < deadline)
       await new Promise((r) => setTimeout(r, 200));
     expect(workerOutput).toContain('hello from basic-app');
+    expect(dispatcher!.pending()).toBe(0);
   });
 
   it('runs a service with the SDK runtime and stops it on SIGTERM after its finalizers', async () => {

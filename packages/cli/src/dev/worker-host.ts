@@ -3,8 +3,8 @@
 // so a worker that talks to AWS (through the SDK) can't run inside it. This
 // process runs the worker in real Node instead: it builds the same handler the
 // Lambda would (`createWorkerHandler(def)` from the app's SDK) and accepts
-// Lambda-shaped events over a loopback HTTP endpoint. The CLI feeds it SQS
-// messages, EventBridge events and crons from the emulator.
+// Lambda-shaped events over a loopback HTTP endpoint. The CLI's dispatcher
+// (worker.ts) feeds it jobs, EventBridge events and crons.
 import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage } from 'node:http';
 import { pathToFileURL } from 'node:url';

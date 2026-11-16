@@ -40,7 +40,8 @@ export function spawnService(
     PLATFORM_SDK_SERVICE: resolveFromApp(root, SDK_SERVICE),
     PLATFORM_DEV_SERVICE_TOKEN: token,
     PLATFORM_LOG_PRETTY: '1',
-    // `Jobs.invoke` locally: the SDK posts here instead of invoking the emulator's sandboxed Lambda.
+    // Queue sends and `Jobs.invoke` locally: the SDK posts to the dispatcher instead of invoking the
+    // emulator's sandboxed Lambda.
     ...(opts.workerUrl ? { PLATFORM_LOCAL_WORKER_URL: opts.workerUrl } : {}),
     ...opts.env,
   });

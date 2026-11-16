@@ -19,8 +19,8 @@ describe('loadProject', () => {
     const root = app({
       'plat.config.ts': [
         "import { schedules } from './config/schedules.ts';",
-        'const batchSize: number = 5;',
-        "export default { name: 'shop', crons: schedules, queues: { mail: { batchSize } } };",
+        'const maxAttempts: number = 5;',
+        "export default { name: 'shop', crons: schedules, queues: { mail: { maxAttempts } } };",
       ].join('\n'),
       'config/schedules.ts': "export const schedules = { nightly: '0 3 * * *' };",
       'src/.keep': '',
@@ -31,7 +31,7 @@ describe('loadProject', () => {
     expect(p.raw).toEqual({
       name: 'shop',
       crons: { nightly: '0 3 * * *' },
-      queues: { mail: { batchSize: 5 } },
+      queues: { mail: { maxAttempts: 5 } },
     });
     expect(await resolveAppName(undefined, join(root, 'src'))).toBe('shop');
   });
