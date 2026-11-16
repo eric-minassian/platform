@@ -1,3 +1,4 @@
+import type { LambdaClient } from '@aws-sdk/client-lambda';
 import { assert, describe, it } from '@effect/vitest';
 import {
   type AppRecord,
@@ -11,7 +12,7 @@ import { FetchHttpClient } from 'effect/http';
 import { Artifacts } from '../src/artifacts.ts';
 import { Deployer, DeployFailed, StageEngine } from '../src/deploy.ts';
 import { type DeploymentItem, type StageItem, Store } from '../src/store.ts';
-import { memoryStore, settingsLayer } from './support.ts';
+import { awsLayer, memoryStore, settingsLayer } from './support.ts';
 
 const shop: AppRecord = {
   name: 'shop',
@@ -69,9 +70,19 @@ const deployer = (options: {
   readonly served?: string;
   /** Wraps the in-memory store, e.g. to make some writes fail. */
   readonly store?: (store: Store['Service']) => Store['Service'];
+  /** The account's Lambda concurrency limit (default 1,000). */
+  readonly accountConcurrency?: number;
 }) =>
   Deployer.layer.pipe(
     Layer.provide([
+      awsLayer({
+        lambda: () =>
+          ({
+            send: async () => ({
+              AccountLimit: { ConcurrentExecutions: options.accountConcurrency ?? 1000 },
+            }),
+          }) as unknown as LambdaClient,
+      }),
       Layer.mock(Artifacts, {
         readText: () =>
           Effect.succeed(
@@ -340,6 +351,29 @@ describe('Deployer.run', () => {
         ),
       );
     });
+
+    it.effect(
+      'keeps a new stage on a Web Function while the account lacks the concurrency, and says why',
+      () => {
+        const inputs: DeployStageInput[] = [];
+        return Effect.gen(function* () {
+          yield* Deployer.use((d) => d.run('d1'));
+          const { dep, messages } = yield* read;
+          assert.strictEqual(inputs[0]?.webCompute, 'instance');
+          assert.strictEqual(dep.compute, 'instance');
+          assert.isTrue(messages.some((m) => /Lambda concurrency limit is 10/.test(m)));
+        }).pipe(
+          Effect.provide(
+            deployer({
+              deployments: [deployment('d1', { sdk: '0.4.0' })],
+              stages: [{ ...liveStage, currentDeployment: undefined, route: undefined }],
+              deploy: recording(inputs),
+              accountConcurrency: 10,
+            }),
+          ),
+        );
+      },
+    );
 
     it.effect('keeps prod in the mode the chooser put it in, and previews on request mode', () => {
       const inputs: DeployStageInput[] = [];

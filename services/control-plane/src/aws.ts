@@ -9,7 +9,7 @@ import { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
 import { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import { CostExplorerClient } from '@aws-sdk/client-cost-explorer';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { LambdaClient } from '@aws-sdk/client-lambda';
+import { GetAccountSettingsCommand, LambdaClient } from '@aws-sdk/client-lambda';
 import { S3Client } from '@aws-sdk/client-s3';
 import { SchedulerClient } from '@aws-sdk/client-scheduler';
 import { SESv2Client } from '@aws-sdk/client-sesv2';
@@ -18,7 +18,7 @@ import { SQSClient } from '@aws-sdk/client-sqs';
 import { SSMClient } from '@aws-sdk/client-ssm';
 import { WAFV2Client } from '@aws-sdk/client-wafv2';
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
-import { Context, Data, Effect, Layer, Predicate } from 'effect';
+import { Context, Data, Effect, Layer, Option, Predicate } from 'effect';
 
 /** A rejected AWS SDK call. `code` is the service's error name, e.g. `ParameterNotFound`. */
 export class AwsError extends Data.TaggedError('AwsError')<{
@@ -98,3 +98,14 @@ export class Aws extends Context.Service<
     });
   });
 }
+
+/**
+ * The account's Lambda concurrency limit, which decides whether `auto` may run
+ * a server in request mode (core `requestModeBlocked`); undefined when it
+ * can't be read, which leaves the choice to the setting.
+ */
+export const accountConcurrency: Effect.Effect<number | undefined, never, Aws> = Effect.gen(function* () {
+  const aws = yield* Aws;
+  const res = yield* tryAws(() => aws.lambda().send(new GetAccountSettingsCommand({}))).pipe(Effect.option);
+  return Option.match(res, { onNone: () => undefined, onSome: (r) => r.AccountLimit?.ConcurrentExecutions });
+});
