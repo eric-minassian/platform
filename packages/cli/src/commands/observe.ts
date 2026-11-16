@@ -5,11 +5,13 @@ import {
   type LimitsResponse,
   type LogLine,
   RESOURCE_KEY_PATTERN,
+  SLOW_TRACE_MS,
   type TelemetryEvent,
+  TRACE_SAMPLE_RATE,
 } from '@ericminassian/platform-core';
 import type { Command } from 'commander';
 import pc from 'picocolors';
-import { formatEvent } from '../dev/pretty.ts';
+import { formatDuration, formatEvent } from '../dev/pretty.ts';
 import { CliError, EXIT, isJsonMode, result, sparkline, table } from '../util/output.ts';
 import { shortTime, sinceRange } from '../util/time.ts';
 import { action, apiFor, appFor, type CommonOpts, withTarget } from './common.ts';
@@ -366,12 +368,27 @@ export function formatTrace(events: readonly TelemetryEvent[]): string {
   if (events.length === 0) return pc.dim('(no events for this trace)');
   const sorted = events.toSorted((a, b) => a.ts - b.ts);
   const t0 = sorted[0]!.ts;
-  return sorted
-    .map((e) => {
-      const offset = `+${String(e.ts - t0).padStart(5)}ms`;
-      return `${pc.dim(offset)} ${formatEvent(e, { spans: true }) ?? e.t}`;
-    })
-    .join('\n');
+  const lines = sorted.map((e) => {
+    const offset = `+${String(e.ts - t0).padStart(5)}ms`;
+    const line = `${pc.dim(offset)} ${formatEvent(e, { spans: true }) ?? e.t}`;
+    const note = unrecordedCalls(e);
+    return note ? `${line}\n${' '.repeat(offset.length + 3)}${pc.dim(note)}` : line;
+  });
+  if (sorted.some((e) => unrecordedCalls(e)))
+    lines.push(
+      pc.dim(
+        `calls are recorded for requests and jobs that fail or take ${SLOW_TRACE_MS / 1_000}s or longer, and for 1 in ${Math.round(1 / TRACE_SAMPLE_RATE)} traces`,
+      ),
+    );
+  return lines.join('\n');
+}
+
+/** `3 calls, 12ms, not recorded` for a request or job that counted its spans instead of writing them. */
+function unrecordedCalls(e: TelemetryEvent): string | undefined {
+  if ((e.t !== 'req' && e.t !== 'job') || !e.calls) return undefined;
+  // A line that names its own span id wrote some spans: these are the ones past the cap.
+  const calls = `${e.calls} ${e.span ? 'more ' : ''}${e.calls === 1 ? 'call' : 'calls'}`;
+  return `${calls}, ${formatDuration(e.callMs ?? 0)}, not recorded`;
 }
 
 export function readStdin(): string {

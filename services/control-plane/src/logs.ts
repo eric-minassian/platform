@@ -108,7 +108,7 @@ export function toLogLine(stream: LogStream, timestamp: number, message: string)
 export function describe(e: TelemetryEvent): string {
   switch (e.t) {
     case 'req':
-      return `${e.method} ${e.path} ${e.status} ${e.dur}ms${e.cold ? ' (cold)' : ''}`;
+      return `${e.method} ${e.path ?? e.route} ${e.status} ${e.dur}ms${e.cold ? ' (cold)' : ''}`;
     case 'err':
       return `${e.name}: ${e.message}`;
     case 'job':

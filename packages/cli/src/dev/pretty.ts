@@ -32,7 +32,7 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
   switch (e.t) {
     case 'req': {
       const color = e.status >= 500 ? pc.red : e.status >= 400 ? pc.yellow : pc.green;
-      return `${pc.bold(e.method.padEnd(6))} ${e.path} ${color(String(e.status))} ${pc.dim(`${Math.round(e.dur)}ms`)}${e.cold ? pc.magenta(' cold') : ''}${trace}`;
+      return `${pc.bold(e.method.padEnd(6))} ${e.path ?? e.route} ${color(String(e.status))} ${pc.dim(`${Math.round(e.dur)}ms`)}${e.cold ? pc.magenta(' cold') : ''}${trace}`;
     }
     case 'err': {
       const head = `${pc.red('✗')} ${pc.red(`${e.name}: ${e.message}`)}${e.route ? pc.dim(` at ${e.route}`) : ''}${e.job ? pc.dim(` in ${e.job}`) : ''}${trace}`;
