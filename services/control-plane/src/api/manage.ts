@@ -184,16 +184,24 @@ export const ManageLive = HttpApiBuilder.group(
 
       stopService: ({ params, query }) => controlService(params, query.stage, 'stop'),
 
-      redrive: ({ params, query }) =>
+      redrive: ({ params, query, payload }) =>
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
           const manifest = yield* access.liveManifest(app, stage);
-          if (Option.isNone(manifest) || !manifest.value.queues[params.name])
-            return yield* NotFound.of(`queue ${params.name} on ${stage}`);
-          const taskHandle = yield* queues
-            .redrive(app, stage, params.name)
+          if (Option.isNone(manifest)) return yield* NotFound.of(`a deployment of ${app} on ${stage}`);
+          const count = yield* queues
+            .redrive(app, stage, manifest.value, payload.ids)
             .pipe(Effect.mapError((e) => new Conflict({ code: 'redrive_failed', message: e.message })));
-          return { taskHandle };
+          return { count };
+        }),
+
+      discard: ({ params, query, payload }) =>
+        Effect.gen(function* () {
+          const { app, stage } = yield* scope(params.app, query.stage);
+          const count = yield* queues
+            .discard(app, stage, payload.ids)
+            .pipe(Effect.mapError((e) => new Conflict({ code: 'discard_failed', message: e.message })));
+          return { count };
         }),
 
       suppressed: ({ params, query }) =>

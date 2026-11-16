@@ -258,3 +258,24 @@ function fromPayload(
   }
   return null;
 }
+
+/**
+ * The oldest `@ericminassian/platform` whose bundles this platform deploys:
+ * jobs became pushed (bindings v2) in 0.4.0, and an older worker can't read
+ * them.
+ */
+export const MIN_SDK_VERSION = '0.4.0';
+
+/** Whether bundles built with SDK `version` can be deployed (undefined: a CLI older than 0.4.0 sent none). */
+export function sdkSupported(version: string | undefined): boolean {
+  if (!version) return false;
+  const parse = (v: string) =>
+    v
+      .split('-')[0]!
+      .split('.')
+      .map((n) => Number(n));
+  const [a, b] = [parse(version), parse(MIN_SDK_VERSION)];
+  if (a.length !== 3 || a.some((n) => !Number.isInteger(n))) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+  return true;
+}

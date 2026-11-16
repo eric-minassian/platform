@@ -5,12 +5,14 @@
 import {
   type ArtifactFile,
   isPreviewStage,
+  MIN_SDK_VERSION,
   ManifestError,
   newDeploymentId,
   PROD_STAGE,
   parseManifest,
   publicUrl,
   RollbackResponse,
+  sdkSupported,
   stageHost,
 } from '@ericminassian/platform-core';
 import {
@@ -65,7 +67,7 @@ export const StagesLive = HttpApiBuilder.group(
           const st = yield* store.getStage(app.name, stage);
           if (Option.isNone(st) || st.value.status === 'destroyed') return { status: 'destroyed' as const };
           yield* store.updateStage(app.name, stage, { status: 'destroying' });
-          yield* jobs.invoke('destroy', { app: app.name, stage });
+          yield* jobs.start({ kind: 'destroy', app: app.name, stage });
           return { status: 'destroying' as const };
         }),
 
@@ -138,6 +140,13 @@ export const DeploymentsLive = HttpApiBuilder.group(
           }
           const overLimit = servicesLimitIssue(settings.platform, manifest);
           if (overLimit) return yield* InvalidManifest.of(overLimit);
+          // Bundles carry the SDK's runtime, and the engine's bindings and job payloads changed
+          // under older ones (jobs are pushed since 0.4.0).
+          if (!sdkSupported(payload.sdk))
+            return yield* BadRequest.of(
+              `this deployment was built with @ericminassian/platform ${payload.sdk ?? 'older than 0.4.0'}; ` +
+                `the platform needs ${MIN_SDK_VERSION} or later. Upgrade @ericminassian/platform and @ericminassian/plat.`,
+            );
 
           // manifest.json is always uploaded; tolerate clients that list it.
           const files = [...new Set(payload.files ?? [])].filter((f) => f !== 'manifest.json');
@@ -164,6 +173,7 @@ export const DeploymentsLive = HttpApiBuilder.group(
             ...(commit ? { commit } : {}),
             ...(ref ? { ref } : {}),
             ...(payload.message ? { message: payload.message.slice(0, 500) } : {}),
+            ...(payload.sdk ? { sdk: payload.sdk.slice(0, 40) } : {}),
             manifest,
             events: [],
             createdAt: yield* nowIso,
@@ -217,7 +227,7 @@ export const DeploymentsLive = HttpApiBuilder.group(
           } else {
             yield* store.updateStage(app.name, dep.stage, { status: 'deploying' });
           }
-          yield* jobs.invoke('deploy', { id: dep.id });
+          yield* jobs.start({ kind: 'deploy', id: dep.id });
           return publicDeployment({ ...dep, status: 'queued' });
         }),
     });

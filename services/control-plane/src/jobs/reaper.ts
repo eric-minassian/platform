@@ -38,7 +38,7 @@ export class Reaper extends Context.Service<
             Effect.annotateLogs({ app: s.app, stage: s.stage, updatedAt: s.updatedAt }),
           );
           yield* store.updateStage(s.app, s.stage, { status: 'destroying' });
-          yield* jobs.invoke('destroy', { app: s.app, stage: s.stage });
+          yield* jobs.start({ kind: 'destroy', app: s.app, stage: s.stage });
         }
         return { destroyed: stale.map((s) => `${s.app}/${s.stage}`) };
       }).pipe(Effect.withSpan('Reaper.run'));

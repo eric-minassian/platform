@@ -1,14 +1,15 @@
 /**
- * Control plane worker: the deployer, stage destroyer, scheduled jobs, and the
- * telemetry processor (target of the account-level log subscription).
+ * Control plane worker: scheduled jobs, rollbacks, and the telemetry processor
+ * (target of the account-level log subscription). Deploys and destroys are
+ * the `stages` queue's, which runs in a function of its own (plat.config.ts).
  */
-import { defineWorker } from '@ericminassian/platform';
+import { defineWorker, Queues } from '@ericminassian/platform';
 import { Effect, Layer, Schema } from 'effect';
 import { Artifacts } from './artifacts.ts';
 import { Deployer, StageEngine } from './deploy.ts';
 import { AppEmail } from './email.ts';
 import { GitHub } from './github.ts';
-import { WorkerJobs } from './jobs/call.ts';
+import { StageJob, WorkerJobs } from './jobs/call.ts';
 import { CostCollector } from './jobs/cost.ts';
 import { Pinger } from './jobs/pinger.ts';
 import { RealtimeKey } from './jobs/realtime.ts';
@@ -30,27 +31,35 @@ const WorkerLive = Layer.mergeAll(
   Watchdog.layer,
 ).pipe(
   Layer.provide(
-    Layer.mergeAll(AppEmail.layer, Artifacts.layer, GitHub.layer, StageEngine.layer, WorkerJobs.layer),
+    Layer.mergeAll(
+      AppEmail.layer,
+      Artifacts.layer,
+      GitHub.layer,
+      StageEngine.layer,
+      WorkerJobs.layer.pipe(Layer.provide(Queues.layer)),
+    ),
   ),
   Layer.provideMerge(BaseLive),
 );
 
-/** What the API sends with each job (see api/deployments.ts and jobs/call.ts). */
-const DeployJob = Schema.Struct({ id: Schema.String });
-const StageJob = Schema.Struct({ app: Schema.String, stage: Schema.String });
-const RollbackJob = Schema.Struct({ ...StageJob.fields, deploymentId: Schema.optional(Schema.String) });
+/** What the API sends for a rollback (see jobs/call.ts). */
+const RollbackJob = Schema.Struct({
+  app: Schema.String,
+  stage: Schema.String,
+  deploymentId: Schema.optional(Schema.String),
+});
 
 export default defineWorker({
   layer: WorkerLive,
+  queues: {
+    stages: (message) =>
+      Effect.flatMap(Schema.decodeUnknownEffect(StageJob)(message.body), (job) =>
+        job.kind === 'deploy'
+          ? Deployer.use((d) => d.run(job.id))
+          : Deployer.use((d) => d.destroy(job.app, job.stage)),
+      ),
+  },
   invoke: {
-    deploy: (payload) =>
-      Effect.flatMap(Schema.decodeUnknownEffect(DeployJob)(payload), ({ id }) =>
-        Deployer.use((d) => d.run(id)),
-      ),
-    destroy: (payload) =>
-      Effect.flatMap(Schema.decodeUnknownEffect(StageJob)(payload), ({ app, stage }) =>
-        Deployer.use((d) => d.destroy(app, stage)),
-      ),
     // Called synchronously by the API (see jobs/call.ts for why it runs here).
     rollback: (payload) =>
       Effect.flatMap(Schema.decodeUnknownEffect(RollbackJob)(payload), ({ app, stage, deploymentId }) =>

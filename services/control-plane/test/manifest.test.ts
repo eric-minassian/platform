@@ -17,7 +17,9 @@ describe('control plane plat.config.ts', () => {
       static: 'web/dist',
       serverRoutes: ['/v1/', '/auth/'],
     });
-    expect(m.worker).toMatchObject({ entry: 'src/worker.ts', timeoutSeconds: 900, memoryMb: 1024 });
+    expect(m.worker).toMatchObject({ entry: 'src/worker.ts', timeoutSeconds: 300, memoryMb: 512 });
+    // Deploys and destroys get a function of their own with the full Lambda timeout, run once.
+    expect(m.queues).toEqual({ stages: { memoryMb: 1024, timeoutSeconds: 900, maxAttempts: 1 } });
     expect(Object.keys(m.crons).toSorted()).toEqual([
       'cost',
       'pinger',

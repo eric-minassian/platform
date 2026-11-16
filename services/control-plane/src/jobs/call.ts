@@ -5,11 +5,13 @@
  * (an Event Function), never in the API (a Web Function): KVS PutKey is
  * SigV4A-signed, and from the Web Function runtime it failed with
  * "Authentication failed" while the same call from the worker succeeds. So
- * the API runs rollbacks with `call` and waits for the result.
+ * the API runs rollbacks with `call` and waits for the result, and starts
+ * deploys and destroys on the `stages` queue, whose handler has a function of
+ * its own with Lambda's full 15 minutes and room for artifacts (plat.config.ts).
  */
 import { InvokeCommand } from '@aws-sdk/client-lambda';
+import { Queues } from '@ericminassian/platform';
 import { decodeBindings } from '@ericminassian/platform-core';
-import { invokeJob } from '@ericminassian/platform/worker';
 import { Config, Context, Effect, Layer, Option, Schema } from 'effect';
 import { HttpClient, HttpClientRequest, HttpClientResponse } from 'effect/http';
 import { Aws, tryAws } from '../aws.ts';
@@ -29,26 +31,34 @@ const LocalReply = Schema.Struct({
 
 const LambdaError = Schema.fromJsonString(Schema.Struct({ errorMessage: Schema.optional(Schema.String) }));
 
+/** A deploy or a destroy, as the `stages` queue carries it. */
+export const StageJob = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal('deploy'), id: Schema.String }),
+  Schema.Struct({ kind: Schema.Literal('destroy'), app: Schema.String, stage: Schema.String }),
+]);
+export type StageJob = typeof StageJob.Type;
+
 export class WorkerJobs extends Context.Service<
   WorkerJobs,
   {
-    /** Queues `name` on the worker and returns without waiting (Lambda async invoke, retried on failure). */
-    invoke(name: string, payload: unknown): Effect.Effect<void>;
+    /** Starts a deploy or destroy and returns without waiting: one run, no retries (see plat.config.ts). */
+    start(job: StageJob): Effect.Effect<void>;
     /** Runs `name` on the worker and answers its result. */
     call(name: string, payload: unknown): Effect.Effect<unknown, WorkerJobFailed>;
   }
 >()('@ericminassian/platform-control-plane/WorkerJobs') {
-  static readonly layer: Layer.Layer<WorkerJobs, never, Aws | HttpClient.HttpClient> = Layer.effect(
+  static readonly layer: Layer.Layer<WorkerJobs, never, Aws | HttpClient.HttpClient | Queues> = Layer.effect(
     WorkerJobs,
     Effect.gen(function* () {
       const aws = yield* Aws;
       const http = yield* HttpClient.HttpClient;
+      const queues = yield* Queues;
       // `plat dev` runs the worker as a local process that answers { ok, result | error }.
       const localWorker = yield* Config.option(Config.String('PLATFORM_LOCAL_WORKER_URL')).pipe(Effect.orDie);
 
-      const invoke = Effect.fn('WorkerJobs.invoke')(function* (name: string, payload: unknown) {
-        yield* Effect.tryPromise(() => invokeJob(name, payload));
-      }, Effect.orDie);
+      const start = Effect.fn('WorkerJobs.start')(function* (job: StageJob) {
+        yield* queues.send('stages', job);
+      });
 
       const callLocal = Effect.fnUntraced(function* (url: string, body: string, name: string) {
         const res = yield* HttpClientRequest.post(url).pipe(HttpClientRequest.bodyText(body), http.execute);
@@ -95,7 +105,7 @@ export class WorkerJobs extends Context.Service<
         }),
       );
 
-      return WorkerJobs.of({ invoke, call });
+      return WorkerJobs.of({ start, call });
     }),
   );
 }

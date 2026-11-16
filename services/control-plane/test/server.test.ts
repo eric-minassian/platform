@@ -2,6 +2,7 @@ import { assert, describe, it } from '@effect/vitest';
 import {
   type AppRecord,
   type LogLine,
+  MIN_SDK_VERSION,
   parseManifest,
   type ResolvedManifest,
 } from '@ericminassian/platform-core';
@@ -111,6 +112,9 @@ const setup = (options: TestServices = {}) =>
     });
     return { request, signIn };
   });
+
+/** A CLI that sends the SDK version every deployment needs. */
+const SDK = MIN_SDK_VERSION;
 
 describe('authentication', () => {
   it.effect('answers 401 with the error body when there are no credentials', () =>
@@ -284,7 +288,12 @@ describe('authentication', () => {
         request('/v1/apps/shop/deployments', {
           method: 'POST',
           headers: ci,
-          json: { stage, manifest: { name: 'shop', web: { static: 'dist' } }, files: ['static.zip'] },
+          json: {
+            stage,
+            manifest: { name: 'shop', web: { static: 'dist' } },
+            files: ['static.zip'],
+            sdk: SDK,
+          },
         });
       const prod = yield* deploy('prod');
       assert.strictEqual(prod.status, 201);
@@ -564,6 +573,20 @@ describe('stages and deployments', () => {
         'invalid_manifest',
       );
 
+      // Bundles built by an SDK older than 0.4.0 can't run on today's bindings and jobs.
+      for (const sdk of [undefined, '0.3.0']) {
+        const old = yield* request('/v1/apps/shop/deployments', {
+          method: 'POST',
+          headers: bob,
+          json: { stage: 'prod', manifest: { name: 'shop' }, ...(sdk ? { sdk } : {}) },
+        });
+        assert.strictEqual(old.status, 400);
+        assert.match(
+          ((yield* json(old)) as { error: { message: string } }).error.message,
+          /needs 0\.4\.0 or later\. Upgrade @ericminassian\/platform and @ericminassian\/plat/,
+        );
+      }
+
       // The test platform allows two services per app.
       const services = { a: { entry: 'a.ts' }, b: { entry: 'b.ts' }, c: { entry: 'c.ts' } };
       const tooMany = yield* request('/v1/apps/shop/deployments', {
@@ -585,6 +608,7 @@ describe('stages and deployments', () => {
           stage: 'pr-3',
           manifest: { name: 'shop', services: { a: services.a } },
           files: ['services.zip'],
+          sdk: SDK,
         },
       });
       assert.strictEqual(withServices.status, 201);
@@ -598,6 +622,7 @@ describe('stages and deployments', () => {
           stage: 'prod',
           manifest: { name: 'shop', web: { server: 'src/server.ts' } },
           files: ['server.zip', 'manifest.json'],
+          sdk: SDK,
           commit: 'c0ffee',
           message: 'first',
         },
@@ -669,7 +694,7 @@ describe('stages and deployments', () => {
         request('/v1/apps/shop/deployments', {
           method: 'POST',
           headers: bob,
-          json: { stage: 'prod', manifest: { name: 'shop', email } },
+          json: { stage: 'prod', manifest: { name: 'shop', email }, sdk: SDK },
         });
 
       const over = yield* deploy({ dailyLimit: 2001 });

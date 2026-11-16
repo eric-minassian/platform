@@ -79,6 +79,8 @@ export const DeploymentRecord = Schema.Struct({
   commit: optional(Schema.String),
   ref: optional(Schema.String),
   message: optional(Schema.String),
+  /** The `@ericminassian/platform` version its bundles were built with; absent before 0.4.0. */
+  sdk: optional(Schema.String),
   manifest: optional(ResolvedManifest),
   url: optional(Schema.String),
   error: optional(Schema.String),
@@ -193,6 +195,8 @@ export const CreateDeploymentRequest = Schema.Struct({
   commit: optional(Schema.String),
   ref: optional(Schema.String),
   message: optional(Schema.String),
+  /** The `@ericminassian/platform` version the bundles were built with (`MIN_SDK_VERSION`). */
+  sdk: optional(Schema.String),
 });
 export type CreateDeploymentRequest = typeof CreateDeploymentRequest.Encoded;
 
@@ -285,14 +289,51 @@ export const JobsResponse = Schema.Struct({
 });
 export type JobsResponse = typeof JobsResponse.Type;
 
+/** A queue's jobs that aren't running: waiting for their time, and given up on. */
 export const QueueStats = Schema.Struct({
   name: Schema.String,
-  visible: Schema.Finite,
-  inFlight: Schema.Finite,
+  /** Retries and delayed sends scheduled for later. */
+  scheduled: Schema.Finite,
+  /** Its messages in the stage's dead-letter queue (of those `deadLetters` reads). */
   deadLetter: Schema.Finite,
-  oldestAgeSeconds: Schema.NullOr(Schema.Finite),
 });
 export type QueueStats = typeof QueueStats.Type;
+
+/** One message in the stage's dead-letter queue (core `readDeadLetter`). */
+export const DeadLetterItem = Schema.Struct({
+  /** The SQS message id: what redrive and discard take. */
+  id: Schema.String,
+  /** `unknown`: a message the platform didn't write; it can only be discarded. */
+  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke', 'unknown']),
+  name: Schema.String,
+  attempts: Schema.NullOr(Schema.Finite),
+  error: Schema.Struct({ name: Schema.String, message: Schema.String }),
+  /** ISO time, when the writer recorded one. */
+  failedAt: Schema.NullOr(Schema.String),
+  /** Who gave up on it: the SDK, Lambda, Scheduler or EventBridge. */
+  source: Schema.Literals(['sdk', 'lambda', 'scheduler', 'eventbridge', 'unknown']),
+  /** The message body, event detail or invoke payload, as JSON, cut to a few hundred chars. */
+  preview: Schema.String,
+});
+export type DeadLetterItem = typeof DeadLetterItem.Type;
+
+export const DeadLettersResponse = Schema.Struct({
+  /** Messages in the queue (SQS's approximate count). */
+  total: Schema.Finite,
+  /** Up to `DEAD_LETTERS_READ` of them. */
+  items: Schema.Array(DeadLetterItem),
+});
+export type DeadLettersResponse = typeof DeadLettersResponse.Type;
+
+/** How many dead letters the API reads for a list. */
+export const DEAD_LETTERS_READ = 100;
+
+/** Redrive or discard: the given dead letters, or (no `ids`) all of them. */
+export const DeadLetterAction = Schema.Struct({ ids: Schema.optional(Schema.Array(Schema.String)) });
+export type DeadLetterAction = typeof DeadLetterAction.Encoded;
+
+export const DeadLetterActionResponse = Schema.Struct({ count: Schema.Finite });
+export type DeadLetterActionResponse = typeof DeadLetterActionResponse.Type;
 
 /** Per-namespace AppSync Events counts in one bucket (CloudWatch `Sum`s). */
 export const RealtimePoint = Schema.Struct({
@@ -685,9 +726,6 @@ export const ServiceActionResponse = Schema.Struct({
 });
 export type ServiceActionResponse = typeof ServiceActionResponse.Type;
 export type CronRunResponse = typeof CronRunResponse.Type;
-
-export const RedriveResponse = Schema.Struct({ taskHandle: Schema.String });
-export type RedriveResponse = typeof RedriveResponse.Type;
 
 // ---------------------------------------------------------------------------
 // Admin

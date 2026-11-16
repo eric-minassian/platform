@@ -3,7 +3,7 @@
  * sign-in (`/auth/*`). The console SPA itself is static (web/dist) and served
  * by the router; the platform's server wrapper adds health, telemetry and traces.
  */
-import { toFetchHandler } from '@ericminassian/platform';
+import { Queues, toFetchHandler } from '@ericminassian/platform';
 import { Layer } from 'effect';
 import { HttpLive } from './api/http.ts';
 import { Artifacts } from './artifacts.ts';
@@ -40,7 +40,7 @@ export const ServerLive = HttpLive.pipe(
       Logs.layer,
       TelemetryQuery.layer,
       Tokens.layer,
-      WorkerJobs.layer,
+      WorkerJobs.layer.pipe(Layer.provide(Queues.layer)),
     ),
   ),
   Layer.provide(BaseLive),

@@ -14,6 +14,8 @@ import {
   type CreateDeploymentRequest,
   type CreateDeploymentResponse,
   type CustomMetricsResponse,
+  type DeadLetterActionResponse,
+  type DeadLettersResponse,
   type DataCollections,
   type DataPage,
   type DeploymentRecord,
@@ -354,6 +356,18 @@ export class ApiClient {
     return this.request<unknown>('POST', `/v1/apps/${enc(app)}/crons/${enc(name)}/run`, {
       body: {},
       query: { stage },
+    });
+  }
+  deadLetters(app: string, stage: string) {
+    return this.request<DeadLettersResponse>('GET', `/v1/apps/${enc(app)}/dead-letters`, {
+      query: { stage },
+    });
+  }
+  /** Redrive or discard dead letters: `ids`, or all of them when absent. */
+  deadLetterAction(app: string, stage: string, action: 'redrive' | 'discard', ids?: readonly string[]) {
+    return this.request<DeadLetterActionResponse>('POST', `/v1/apps/${enc(app)}/dead-letters/${action}`, {
+      query: { stage },
+      body: ids ? { ids } : {},
     });
   }
 

@@ -29,6 +29,9 @@ import {
   CreateDeploymentRequest,
   CreateDeploymentResponse,
   CronRunResponse,
+  DeadLetterAction,
+  DeadLetterActionResponse,
+  DeadLettersResponse,
   CustomMetricsResponse,
   DataCollections,
   DataPage,
@@ -47,7 +50,6 @@ import {
   PutSecretRequest,
   QueueStats,
   RealtimeStatsResponse,
-  RedriveResponse,
   RollbackRequest,
   RollbackResponse,
   RouteStats,
@@ -124,7 +126,7 @@ export class NotFound extends Schema.TaggedError<NotFound, { readonly brand: uni
 
 /**
  * 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`,
- * `redrive_failed`, `paused_by_aws`, `service_action_failed`.
+ * `redrive_failed`, `discard_failed`, `paused_by_aws`, `service_action_failed`.
  */
 export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: unique symbol }>()(
   'Conflict',
@@ -368,6 +370,13 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       success: Schema.Array(QueueStats),
       error: errors,
     }),
+    /** The stage's dead-letter queue: every job that failed its last attempt. */
+    HttpApiEndpoint.get('deadLetters', '/apps/:app/dead-letters', {
+      params: app,
+      query: stageQuery,
+      success: DeadLettersResponse,
+      error: errors,
+    }),
     /** AppSync Events activity of the stage's channel namespace, from CloudWatch. */
     HttpApiEndpoint.get('realtime', '/apps/:app/realtime', {
       params: app,
@@ -578,10 +587,19 @@ export class ManageApi extends HttpApiGroup.make('manage')
       success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
       error: errors,
     }),
-    HttpApiEndpoint.post('redrive', '/apps/:app/queues/:name/redrive', {
-      params: { ...app, name: Schema.String },
+    /** Runs dead letters again from their first attempt, on the function their handler runs in now. */
+    HttpApiEndpoint.post('redrive', '/apps/:app/dead-letters/redrive', {
+      params: app,
       query: stageQuery,
-      success: RedriveResponse.pipe(HttpApiSchema.status(202)),
+      payload: DeadLetterAction,
+      success: DeadLetterActionResponse,
+      error: errors,
+    }),
+    HttpApiEndpoint.post('discard', '/apps/:app/dead-letters/discard', {
+      params: app,
+      query: stageQuery,
+      payload: DeadLetterAction,
+      success: DeadLetterActionResponse,
       error: errors,
     }),
   )

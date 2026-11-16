@@ -141,3 +141,22 @@ export function resolveFromApp(appRoot: string, specifier: string): string {
     return createRequire(import.meta.url).resolve(specifier);
   }
 }
+
+/**
+ * The version of `@ericminassian/platform` the app's bundles are built with:
+ * its own install, else the CLI's. Undefined when neither can be read.
+ */
+export function appSdkVersion(appRoot: string): string | undefined {
+  // The package's exports don't include package.json; walk up from its entry instead.
+  let dir = dirname(resolveFromApp(appRoot, '@ericminassian/platform'));
+  for (;;) {
+    const file = join(dir, 'package.json');
+    if (existsSync(file)) {
+      const pkg = JSON.parse(readFileSync(file, 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === '@ericminassian/platform') return pkg.version;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}

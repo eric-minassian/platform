@@ -1,7 +1,9 @@
 import type { CloudWatchClient, GetMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import type { InvokeCommandInput, LambdaClient } from '@aws-sdk/client-lambda';
+import type { SchedulerClient } from '@aws-sdk/client-scheduler';
 import type { PublishCommandInput, SNSClient } from '@aws-sdk/client-sns';
+import type { SQSClient } from '@aws-sdk/client-sqs';
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { assert, it as effect } from '@effect/vitest';
 import {
@@ -83,6 +85,178 @@ describe('run cron now', () => {
           ['atlas--prod--worker', 'Event', '{"__platform":"cron","name":"tick"}'],
         ],
       );
+    }),
+  );
+});
+
+/**
+ * An SQS queue for AppQueues: receives hide messages for their visibility
+ * timeout (0 leaves them visible), deletes and visibility changes act on
+ * receipt handles.
+ */
+function fakeQueue(bodies: ReadonlyArray<string>) {
+  const messages = bodies.map((body, i) => ({ id: `m${i}`, body, hiddenUntil: 0 }));
+  let receipts = 0;
+  const handles = new Map<string, string>();
+  const client = {
+    send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      const now = Date.now();
+      const input = command.input;
+      switch (command.constructor.name) {
+        case 'GetQueueAttributesCommand':
+          return { Attributes: { ApproximateNumberOfMessages: String(messages.length) } };
+        case 'ReceiveMessageCommand': {
+          const visible = messages.filter((m) => m.hiddenUntil <= now).slice(0, 10);
+          for (const m of visible) m.hiddenUntil = now + Number(input.VisibilityTimeout ?? 30) * 1000;
+          return {
+            Messages: visible.map((m) => {
+              const handle = `r${receipts++}`;
+              handles.set(handle, m.id);
+              return { MessageId: m.id, ReceiptHandle: handle, Body: m.body };
+            }),
+          };
+        }
+        case 'DeleteMessageCommand': {
+          const id = handles.get(String(input.ReceiptHandle));
+          const i = messages.findIndex((m) => m.id === id);
+          if (i >= 0) messages.splice(i, 1);
+          return {};
+        }
+        case 'ChangeMessageVisibilityCommand': {
+          const m = messages.find((x) => x.id === handles.get(String(input.ReceiptHandle)));
+          if (m) m.hiddenUntil = now + Number(input.VisibilityTimeout) * 1000;
+          return {};
+        }
+        default:
+          throw new Error(`unexpected ${command.constructor.name}`);
+      }
+    },
+  };
+  return { client: client as unknown as SQSClient, left: () => messages.map((m) => m.id) };
+}
+
+describe('dead letters', () => {
+  const job = (kind: 'queue' | 'event' | 'cron', name: string, extra: object = {}) =>
+    JSON.stringify({
+      v: 1,
+      job: { __platform: 'job', kind, name, id: `${kind}-${name}`, attempt: 5, sentAt: 1, ...extra },
+      failedAt: Date.parse('2026-11-16T10:00:00Z'),
+      error: { name: 'Bounced', message: 'no such mailbox' },
+    });
+  const manifest = parseManifest({
+    name: 'atlas',
+    queues: { emails: {}, slow: { memoryMb: 2048 } },
+    crons: { tick: 'rate(1 minute)' },
+  });
+
+  const run = <A, E>(
+    use: (q: AppQueues['Service']) => Effect.Effect<A, E>,
+    clients: { sqs: SQSClient; lambda?: LambdaClient; scheduler?: SchedulerClient },
+  ) =>
+    AppQueues.use(use).pipe(
+      Effect.provide(
+        AppQueues.layer.pipe(
+          Layer.provide([
+            awsLayer({
+              sqs: () => clients.sqs,
+              ...(clients.lambda ? { lambda: () => clients.lambda! } : {}),
+              ...(clients.scheduler ? { scheduler: () => clients.scheduler! } : {}),
+            }),
+            settingsLayer(),
+          ]),
+        ),
+      ),
+    );
+
+  effect.effect('lists what each writer left, and counts them by queue with what’s scheduled', () =>
+    Effect.gen(function* () {
+      const queue = fakeQueue([
+        job('queue', 'emails', { body: { to: 'a@b.c' } }),
+        job('queue', 'emails'),
+        job('cron', 'tick'),
+        'not ours',
+      ]);
+      const scheduler = {
+        send: async (command: { input: { NamePrefix?: string } }) => ({
+          Schedules: command.input.NamePrefix === '_q-emails-' ? [{ Name: '_q-emails-1' }] : [],
+        }),
+      } as unknown as SchedulerClient;
+      const listed = yield* run((q) => q.deadLetters('atlas', 'prod'), { sqs: queue.client });
+      assert.strictEqual(listed.total, 4);
+      assert.deepStrictEqual(listed.items[0], {
+        id: 'm0',
+        kind: 'queue',
+        name: 'emails',
+        attempts: 5,
+        error: { name: 'Bounced', message: 'no such mailbox' },
+        failedAt: '2026-11-16T10:00:00.000Z',
+        source: 'sdk',
+        preview: '{"to":"a@b.c"}',
+      });
+      assert.deepStrictEqual(
+        listed.items.map((i) => i.kind),
+        ['queue', 'queue', 'cron', 'unknown'],
+      );
+      const stats = yield* run((q) => q.stats('atlas', 'prod', ['emails', 'slow']), {
+        sqs: queue.client,
+        scheduler,
+      });
+      assert.deepStrictEqual(stats, [
+        { name: 'emails', scheduled: 1, deadLetter: 2 },
+        { name: 'slow', scheduled: 0, deadLetter: 0 },
+      ]);
+      // Looking hides nothing.
+      assert.deepStrictEqual(queue.left(), ['m0', 'm1', 'm2', 'm3']);
+    }),
+  );
+
+  effect.effect('redrives from the first attempt to the function the handler runs in now', () =>
+    Effect.gen(function* () {
+      const queue = fakeQueue([
+        job('queue', 'slow', { body: 1 }),
+        job('queue', 'emails', { body: 2 }),
+        job('queue', 'gone'),
+        'not ours',
+      ]);
+      const invoked: InvokeCommandInput[] = [];
+      const lambda = {
+        send: async (command: { input: InvokeCommandInput }) => {
+          invoked.push(command.input);
+          return {};
+        },
+      } as unknown as LambdaClient;
+      const one = yield* run((q) => q.redrive('atlas', 'prod', manifest, ['m1']), {
+        sqs: queue.client,
+        lambda,
+      });
+      assert.strictEqual(one, 1);
+      const all = yield* run((q) => q.redrive('atlas', 'prod', manifest, undefined), {
+        sqs: queue.client,
+        lambda,
+      });
+      // The letter for a queue that's gone and the one the platform didn't write stay.
+      assert.strictEqual(all, 1);
+      assert.deepStrictEqual(queue.left(), ['m2', 'm3']);
+      assert.deepStrictEqual(
+        invoked.map((i) => {
+          const p = JSON.parse(new TextDecoder().decode(i.Payload as Uint8Array)) as Record<string, unknown>;
+          return [i.FunctionName, i.InvocationType, p.name, p.attempt, p.body];
+        }),
+        [
+          ['atlas--prod--worker', 'Event', 'emails', 1, 2],
+          ['atlas--prod--worker--queue-slow', 'Event', 'slow', 1, 1],
+        ],
+      );
+    }),
+  );
+
+  effect.effect('discards the given letters, or all of them', () =>
+    Effect.gen(function* () {
+      const queue = fakeQueue([job('queue', 'emails'), job('cron', 'tick'), 'not ours']);
+      assert.strictEqual(yield* run((q) => q.discard('atlas', 'prod', ['m1']), { sqs: queue.client }), 1);
+      assert.deepStrictEqual(queue.left(), ['m0', 'm2']);
+      assert.strictEqual(yield* run((q) => q.discard('atlas', 'prod', undefined), { sqs: queue.client }), 2);
+      assert.deepStrictEqual(queue.left(), []);
     }),
   );
 });
