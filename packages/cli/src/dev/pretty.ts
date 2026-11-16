@@ -66,7 +66,7 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
       return `${color(level.toUpperCase().padEnd(5))} ${msg}${extra}${trace}`;
     }
     case 'metric':
-      return pc.blue(`metric ${e.name}=${e.value}${e.unit ? e.unit : ''}`);
+      return pc.blue(`metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`);
     // Only refusals: a line per allowed check would drown the requests.
     case 'limit':
       return e.ok ? null : pc.yellow(`rate limit ${e.name}: over`);

@@ -106,6 +106,23 @@ describe('dev helpers', () => {
     expect(stripVTControlCharacters(prettyLine(limit(false)) ?? '')).toBe('rate limit signups: over');
     expect(prettyLine(limit(true))).toBeNull();
   });
+
+  it('separates a metric from its unit', () => {
+    const metric = (unit?: string) =>
+      JSON.stringify({
+        _p: 1,
+        t: 'metric',
+        ts: 1,
+        app: 'a',
+        stage: 'local',
+        rev: 'd',
+        name: 'posts',
+        value: 378,
+        ...(unit ? { unit } : {}),
+      });
+    expect(stripVTControlCharacters(prettyLine(metric('count')) ?? '')).toBe('metric posts=378 count');
+    expect(stripVTControlCharacters(prettyLine(metric()) ?? '')).toBe('metric posts=378');
+  });
 });
 
 describe('plat metrics rate limits', () => {

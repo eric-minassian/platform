@@ -216,7 +216,7 @@ describe('logs', () => {
       stream: 'worker',
       message: 'plain text',
     });
-    expect(
+    const metric = (unit?: string) =>
       describeEvent({
         _p: 1,
         t: 'metric',
@@ -226,9 +226,10 @@ describe('logs', () => {
         rev: 'r',
         name: 'n',
         value: 3,
-        unit: 'ms',
-      }),
-    ).toBe('metric n=3ms');
+        ...(unit ? { unit } : {}),
+      });
+    expect(metric('count')).toBe('metric n=3 count');
+    expect(metric()).toBe('metric n=3');
   });
   it('builds filter patterns', () => {
     expect(toFilterPattern(undefined)).toBeUndefined();

@@ -118,7 +118,7 @@ export function describe(e: TelemetryEvent): string {
     case 'log':
       return e.msg;
     case 'metric':
-      return `metric ${e.name}=${e.value}${e.unit ?? ''}`;
+      return `metric ${e.name}=${e.value}${e.unit ? ` ${e.unit}` : ''}`;
     case 'limit':
       return `limit ${e.name} ${e.ok ? 'ok' : 'over'}`;
     case 'env':
