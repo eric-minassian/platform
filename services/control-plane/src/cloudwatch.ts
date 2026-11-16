@@ -10,7 +10,13 @@ import {
   type MetricDataQuery,
   type MetricDataResult,
 } from '@aws-sdk/client-cloudwatch';
-import { bucketStart, RESOLUTION_MS, telemetryKeys } from '@ericminassian/platform-core';
+import {
+  bucketStart,
+  QUERY_RESOLUTION_MS,
+  type QueryResolution,
+  RESOLUTION_MS,
+  telemetryKeys,
+} from '@ericminassian/platform-core';
 import { Effect } from 'effect';
 import { type Aws, tryAws } from './aws.ts';
 import type { TimeRange } from './telemetry/query.ts';
@@ -41,12 +47,22 @@ export function sumQueries(
 }
 
 /** Every page of `GetMetricData` for `queries` over `range`. */
-export const readMetrics = Effect.fnUntraced(function* (
+export const readMetrics = (aws: Aws['Service'], queries: ReadonlyArray<MetricDataQuery>, range: TimeRange) =>
+  // Bucket-aligned, so CloudWatch's period boundaries match the series'.
+  readMetricsBetween(
+    aws,
+    queries,
+    bucketStart(range.from, range.res),
+    bucketStart(range.to, range.res) + RESOLUTION_MS[range.res],
+  );
+
+/** Every page of `GetMetricData` for `queries` from `start` to `end` (epoch ms, period-aligned). */
+export const readMetricsBetween = Effect.fnUntraced(function* (
   aws: Aws['Service'],
   queries: ReadonlyArray<MetricDataQuery>,
-  range: TimeRange,
+  start: number,
+  end: number,
 ) {
-  const step = RESOLUTION_MS[range.res];
   // Usually one page: a few metrics × at most 2,000 points stays under the 100,800 per call.
   const results: MetricDataResult[] = [];
   let NextToken: string | undefined;
@@ -55,9 +71,8 @@ export const readMetrics = Effect.fnUntraced(function* (
       aws.cloudwatch().send(
         new GetMetricDataCommand({
           MetricDataQueries: [...queries],
-          // Bucket-aligned, so CloudWatch's period boundaries match the series'.
-          StartTime: new Date(bucketStart(range.from, range.res)),
-          EndTime: new Date(bucketStart(range.to, range.res) + step),
+          StartTime: new Date(start),
+          EndTime: new Date(end),
           ScanBy: 'TimestampAscending',
           NextToken,
         }),
@@ -68,6 +83,24 @@ export const readMetrics = Effect.fnUntraced(function* (
   } while (NextToken);
   return results;
 });
+
+/**
+ * The resolution CloudWatch can answer a series in: it keeps 1-minute data
+ * for 15 days, 5-minute data for 63, then hours. A coarser one comes with a
+ * note saying why.
+ */
+export function cloudWatchSeriesRes(
+  res: QueryResolution,
+  from: number,
+  now: number,
+): { readonly res: QueryResolution; readonly note?: string } {
+  const age = now - from;
+  if (age > 63 * 86_400_000 && QUERY_RESOLUTION_MS[res] < 3_600_000)
+    return { res: '1h', note: 'CloudWatch keeps 5-minute data for 63 days, so this range is in 1h buckets' };
+  if (age > 15 * 86_400_000 && res === '1m')
+    return { res: '5m', note: 'CloudWatch keeps 1-minute data for 15 days, so this range is in 5m buckets' };
+  return { res };
+}
 
 /**
  * Dense series (one zero-filled point per bucket in range) and totals, where

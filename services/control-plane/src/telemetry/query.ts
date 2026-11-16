@@ -5,6 +5,7 @@
 import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   type AppSummary,
+  autoQueryResolution,
   bucketStart,
   type CostResponse,
   type CustomMetricPoint,
@@ -20,14 +21,25 @@ import {
   type MetricsPoint,
   type MetricsResponse,
   type MinuteTraffic,
+  PROD_STAGE,
   percentile,
+  QUERY_RESOLUTION_MS,
+  type QueryResolution,
   RESOLUTION_MS,
+  RESOLUTION_TTL_DAYS,
   type Resolution,
   type RouteStats,
+  type SeriesGroupBy,
+  type SeriesQuery,
+  type SeriesResponse,
+  type SeriesStat,
+  STATUS_CLASSES,
+  type StatusClass,
+  seriesUnit,
   telemetryKeys,
   type UptimePoint,
 } from '@ericminassian/platform-core';
-import { Clock, Context, Effect, Layer, Option } from 'effect';
+import { absurd, Clock, Context, Effect, Layer, Option } from 'effect';
 import { Aws, AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 
@@ -355,6 +367,426 @@ export function toUptimePoint(i: Item): UptimePoint {
     : { ts, ok, source: 'check', status: num(i.status), ms: num(i.ms) };
 }
 
+// ------------------------------------------------------------------ explorer series
+
+/** A series query's range; `res` may be any of the explorer's resolutions. */
+export interface SeriesRange {
+  readonly from: number;
+  readonly to: number;
+  readonly res: QueryResolution;
+}
+
+/**
+ * Parses `from`/`to`/`range` like `parseRange`; without `res`, picks one for
+ * about `TARGET_POINTS` buckets given how far back minute data reaches.
+ */
+export function parseSeriesRange(
+  q: { from?: string; to?: string; range?: string },
+  res: QueryResolution | undefined,
+  now: number,
+  minuteHorizonMs: number,
+): SeriesRange {
+  const { from, to } = parseRange(q, now);
+  return { from, to, res: res ?? autoQueryResolution(from, to, now, minuteHorizonMs) };
+}
+
+/** A series range's bucket starts, oldest first (at most 2,000), and each one's index. */
+export function seriesBuckets(range: SeriesRange) {
+  const step = QUERY_RESOLUTION_MS[range.res];
+  const times: number[] = [];
+  const end = Math.floor(range.to / step) * step;
+  for (let t = Math.floor(range.from / step) * step; t <= end && times.length < 2000; t += step)
+    times.push(t);
+  return { step, times, slot: new Map(times.map((t, i) => [t, i])) };
+}
+
+/** How far back rows of a stored resolution reach (their TTL). */
+export const storedHorizonMs = (res: Resolution): number => RESOLUTION_TTL_DAYS[res] * 86_400_000;
+
+/** The stored rows each resolution is built from: 5m–30m are sums of minute rows. */
+const STORED_RES: Record<QueryResolution, Resolution> = {
+  '1m': '1m',
+  '5m': '1m',
+  '10m': '1m',
+  '15m': '1m',
+  '30m': '1m',
+  '1h': '1h',
+  '1d': '1d',
+};
+
+/**
+ * The rows a series reads (`stored`) and the buckets it answers in: a range
+ * that starts before the rows it would read expire is answered in the next
+ * stored resolution up, and `note` says so.
+ */
+export function seriesPlan(
+  range: SeriesRange,
+  now: number,
+): { readonly range: SeriesRange; readonly stored: Resolution; readonly note?: string } {
+  let res = range.res;
+  let note: string | undefined;
+  if (STORED_RES[res] === '1m' && range.from < now - storedHorizonMs('1m')) {
+    res = '1h';
+    note = `minute data is kept for ${RESOLUTION_TTL_DAYS['1m']} days, so this range is in 1h buckets`;
+  }
+  if (res === '1h' && range.from < now - storedHorizonMs('1h')) {
+    res = '1d';
+    note = `hourly data is kept for ${RESOLUTION_TTL_DAYS['1h']} days, so this range is in 1d buckets`;
+  }
+  return { range: { ...range, res }, stored: STORED_RES[res], ...(note ? { note } : {}) };
+}
+
+/** The rollup family a query reads (`telemetryKeys`); none for the CloudWatch metrics. */
+export type SeriesFamily = 'stage' | 'route' | 'job' | 'metric' | 'limit';
+
+export function seriesFamily(q: SeriesQuery): SeriesFamily | undefined {
+  switch (q.metric) {
+    case 'requests':
+    case 'latency':
+    case 'cold_starts':
+      return q.filter?.routes?.length || q.groupBy === 'route' ? 'route' : 'stage';
+    case 'jobs':
+    case 'job_duration':
+      return 'job';
+    case 'custom':
+      return 'metric';
+    case 'rate_limit':
+      return 'limit';
+    case 'realtime':
+    case 'service':
+      return undefined;
+    default:
+      return absurd(q.metric);
+  }
+}
+
+const FAMILY_KEY: Record<SeriesFamily, (app: string, stage: string, res: Resolution) => string> = {
+  stage: telemetryKeys.stage,
+  route: telemetryKeys.route,
+  job: telemetryKeys.job,
+  metric: telemetryKeys.metric,
+  limit: telemetryKeys.limit,
+};
+
+/**
+ * What rows add up to for one line in one bucket: `num` events that match
+ * (the count; for latency, every request), `den` all events in scope (what a
+ * percentage divides by), recorded values' `cnt`, `sum` and `max`, and the
+ * latency histogram.
+ */
+interface Acc {
+  num: number;
+  den: number;
+  cnt: number;
+  sum: number;
+  max: number | null;
+  hist: number[];
+}
+
+const emptyAcc = (): Acc => ({
+  num: 0,
+  den: 0,
+  cnt: 0,
+  sum: 0,
+  max: null,
+  hist: Array.from({ length: HIST_LEN }, () => 0),
+});
+
+type Contribution = Partial<Omit<Acc, 'hist'>> & { readonly hist?: readonly number[] };
+
+function addAcc(into: Acc, c: Contribution): void {
+  into.num += c.num ?? 0;
+  into.den += c.den ?? 0;
+  into.cnt += c.cnt ?? 0;
+  into.sum += c.sum ?? 0;
+  if (c.max !== undefined && c.max !== null) into.max = into.max === null ? c.max : Math.max(into.max, c.max);
+  if (c.hist) addHist(into.hist, c.hist);
+}
+
+/**
+ * A request row's count per status class. Route rows from before November
+ * 2026 counted only 4xx and 5xx: the rest of their requests were 2xx.
+ */
+export function statusCounts(i: Item): Record<StatusClass, number> {
+  const req = num(i.req);
+  const s4xx = num(i.s4xx);
+  const s5xx = num(i.s5xx);
+  const legacy = i.s2xx === undefined && i.s3xx === undefined;
+  return {
+    '2xx': legacy ? Math.max(0, req - s4xx - s5xx) : num(i.s2xx),
+    '3xx': num(i.s3xx),
+    '4xx': s4xx,
+    '5xx': s5xx,
+  };
+}
+
+/** The line key every row of an ungrouped query adds to. */
+export const ALL_SERIES = 'all';
+
+/** What one rollup row adds to each line it belongs to; a row the filter leaves out adds nothing. */
+function rowContributions(
+  q: SeriesQuery,
+  family: SeriesFamily,
+  i: Item,
+): Array<readonly [string, Contribution]> {
+  const f = q.filter ?? {};
+  const sk = String(i.sk);
+  // `<iso>` for whole-stage rows, `<iso>#<route | kind:name | name>` for the rest.
+  const key = family === 'stage' ? '' : sk.slice(sk.indexOf('#') + 1);
+  const keep = (list: ReadonlyArray<string> | undefined, value: string) =>
+    !list?.length || list.includes(value);
+  switch (q.metric) {
+    case 'requests': {
+      if (!keep(f.routes, key)) return [];
+      const counts = statusCounts(i);
+      const req = num(i.req);
+      if (q.groupBy === 'status')
+        return (f.status?.length ? f.status : STATUS_CLASSES).map((c) => [c, { num: counts[c], den: req }]);
+      const matching = f.status?.length ? f.status.reduce((a, c) => a + counts[c], 0) : req;
+      return [[q.groupBy === 'route' ? key : ALL_SERIES, { num: matching, den: req }]];
+    }
+    case 'latency': {
+      if (!keep(f.routes, key)) return [];
+      const hist = histogramOf(i);
+      const n = hist.reduce((a, b) => a + b, 0);
+      return [[q.groupBy === 'route' ? key : ALL_SERIES, { num: n, den: n, hist }]];
+    }
+    case 'cold_starts':
+      if (!keep(f.routes, key)) return [];
+      return [[ALL_SERIES, { num: num(i.cold), den: num(i.req) }]];
+    case 'jobs': {
+      if (!keep(f.jobs, key)) return [];
+      const ok = num(i.ok);
+      const error = num(i.error);
+      const runs = ok + error;
+      if (q.groupBy === 'outcome')
+        return (f.outcome ? [f.outcome] : ['ok', 'error']).map((o) => [
+          o,
+          { num: o === 'ok' ? ok : error, den: runs },
+        ]);
+      const matching = f.outcome === 'ok' ? ok : f.outcome === 'error' ? error : runs;
+      return [[q.groupBy === 'job' ? key : ALL_SERIES, { num: matching, den: runs }]];
+    }
+    case 'job_duration': {
+      if (!keep(f.jobs, key)) return [];
+      const hist = histogramOf(i);
+      const n = hist.reduce((a, b) => a + b, 0);
+      return [[q.groupBy === 'job' ? key : ALL_SERIES, { num: n, den: n, hist }]];
+    }
+    case 'custom': {
+      const name = str(i.name, key);
+      if (!keep(f.names, name)) return [];
+      const count = num(i.count);
+      return [
+        [
+          q.groupBy === 'name' ? name : ALL_SERIES,
+          {
+            num: count,
+            den: count,
+            cnt: count,
+            sum: num(i.sum),
+            max: typeof i.max === 'number' ? i.max : null,
+          },
+        ],
+      ];
+    }
+    case 'rate_limit': {
+      const name = str(i.name, key);
+      if (!keep(f.names, name)) return [];
+      const allowed = num(i.allowed);
+      const denied = num(i.denied);
+      const checks = allowed + denied;
+      if (q.groupBy === 'outcome')
+        return (f.outcome ? [f.outcome] : ['allowed', 'denied']).map((o) => [
+          o,
+          { num: o === 'allowed' ? allowed : denied, den: checks },
+        ]);
+      // A share of checks is the denied share unless the filter says otherwise.
+      const pick = f.outcome ?? (q.stat === 'percent' ? 'denied' : undefined);
+      const matching = pick === 'allowed' ? allowed : pick === 'denied' ? denied : checks;
+      return [[q.groupBy === 'name' ? name : ALL_SERIES, { num: matching, den: checks }]];
+    }
+    case 'realtime':
+    case 'service':
+      return [];
+    default:
+      return absurd(q.metric);
+  }
+}
+
+/** Six significant digits are plenty for a chart, and keep `33.333333333333336` off the wire. */
+const tidy = (v: number): number => Number(v.toPrecision(6));
+
+/**
+ * A statistic of what a line's rows add up to over `seconds`. Counts and sums
+ * are 0 with nothing behind them; shares, averages, maxima and percentiles
+ * are null. `histogram` answers the event count (its buckets go in the
+ * response's `histogram`).
+ */
+function statValue(a: Acc, stat: SeriesStat, seconds: number): number | null {
+  switch (stat) {
+    case 'count':
+    case 'histogram':
+      return a.num;
+    case 'rate':
+      return tidy(a.num / seconds);
+    case 'percent':
+      return a.den ? tidy((100 * a.num) / a.den) : null;
+    case 'sum':
+      return tidy(a.sum);
+    case 'avg':
+      return a.cnt ? tidy(a.sum / a.cnt) : null;
+    case 'max':
+      return a.max;
+    case 'p50':
+      return percentile(a.hist, 50);
+    case 'p90':
+      return percentile(a.hist, 90);
+    case 'p95':
+      return percentile(a.hist, 95);
+    case 'p99':
+      return percentile(a.hist, 99);
+    default:
+      return absurd(stat);
+  }
+}
+
+/** Groups a chart keeps, by volume; the rest are left out with a `note`. */
+export const MAX_SERIES_LINES = 10;
+
+const GROUP_NOUN: Record<SeriesGroupBy, string> = {
+  status: 'status classes',
+  route: 'routes',
+  job: 'jobs',
+  outcome: 'outcomes',
+  name: 'names',
+};
+
+/** Status classes and outcomes in their natural order; other groups by volume. */
+const NATURAL_ORDER: readonly string[] = [...STATUS_CLASSES, 'ok', 'error', 'allowed', 'denied'];
+
+/**
+ * A query's answer from rollup rows of `family` (pure): dense buckets of
+ * `range.res` from `range.from` to `range.to`, oldest first, one line per
+ * group (the top `MAX_SERIES_LINES` by volume) or one `all` line. Rows are
+ * summed into coarser buckets, histograms included, so 5-minute buckets are
+ * built from minute rows.
+ */
+export function toSeriesResponse(
+  items: readonly Item[],
+  q: SeriesQuery,
+  family: SeriesFamily,
+  range: SeriesRange,
+  note?: string,
+): SeriesResponse {
+  const { step, times, slot } = seriesBuckets(range);
+
+  const groups = new Map<string, { total: Acc; buckets: Array<Acc | undefined>; unit?: string }>();
+  const group = (key: string) => {
+    let g = groups.get(key);
+    if (!g) {
+      g = { total: emptyAcc(), buckets: Array.from({ length: times.length }, () => undefined) };
+      groups.set(key, g);
+    }
+    return g;
+  };
+  for (const i of items) {
+    const sk = String(i.sk);
+    const at = sk.indexOf('#');
+    const ts = Date.parse(at === -1 ? sk : sk.slice(0, at));
+    const index = slot.get(Math.floor(ts / step) * step);
+    if (index === undefined) continue;
+    for (const [key, c] of rowContributions(q, family, i)) {
+      const g = group(key);
+      addAcc(g.total, c);
+      addAcc((g.buckets[index] ??= emptyAcc()), c);
+      if (typeof i.unit === 'string') g.unit = i.unit;
+    }
+  }
+
+  const notes = note ? [note] : [];
+  let keys: string[];
+  if (!q.groupBy) {
+    group(ALL_SERIES);
+    keys = [ALL_SERIES];
+  } else {
+    const dim = q.groupBy;
+    const present = [...groups].filter(([, g]) =>
+      dim === 'status' || dim === 'outcome' || q.stat !== 'percent' ? g.total.num > 0 : g.total.den > 0,
+    );
+    const weight = (a: Acc) => (q.stat === 'sum' ? Math.abs(a.sum) : a.num);
+    keys = present
+      .toSorted(([ka, a], [kb, b]) =>
+        dim === 'status' || dim === 'outcome'
+          ? NATURAL_ORDER.indexOf(ka) - NATURAL_ORDER.indexOf(kb)
+          : weight(b.total) - weight(a.total) || b.total.den - a.total.den || ka.localeCompare(kb),
+      )
+      .map(([k]) => k);
+    if (keys.length > MAX_SERIES_LINES) {
+      notes.push(`showing the top ${MAX_SERIES_LINES} of ${keys.length} ${GROUP_NOUN[dim]}`);
+      keys = keys.slice(0, MAX_SERIES_LINES);
+    }
+  }
+
+  const seconds = step / 1000;
+  const empty = emptyAcc();
+  const series = keys.map((key) => ({
+    key,
+    values: groups.get(key)!.buckets.map((b) => statValue(b ?? empty, q.stat, seconds)),
+  }));
+  // A custom metric's values are in its own unit, when every line records the same one.
+  const units = new Set(keys.map((k) => groups.get(k)!.unit));
+  const [only] = units;
+  const ownUnit =
+    q.metric === 'custom' && (q.stat === 'sum' || q.stat === 'avg' || q.stat === 'max') && units.size === 1
+      ? only
+      : undefined;
+  return {
+    res: range.res,
+    timestamps: times.map((t) => telemetryKeys.time(t)),
+    unit: ownUnit ?? seriesUnit(q),
+    series,
+    ...(q.stat === 'histogram'
+      ? {
+          histogram: times.map((_, index) => {
+            const merged = emptyAcc();
+            for (const k of keys) {
+              const b = groups.get(k)!.buckets[index];
+              if (b) addAcc(merged, b);
+            }
+            return merged.hist;
+          }),
+        }
+      : {}),
+    ...(notes.length ? { note: notes.join('; ') } : {}),
+  };
+}
+
+/**
+ * The query's statistic over the whole of `from`..`to` (`to` excluded), as an
+ * alert rule reads it: the window's counts, shares and merged histogram, not
+ * an average of its buckets. Null when nothing is behind a share, average,
+ * maximum or percentile.
+ */
+export function windowValue(
+  items: readonly Item[],
+  q: SeriesQuery,
+  family: SeriesFamily,
+  from: number,
+  to: number,
+): number | null {
+  const acc = emptyAcc();
+  const { groupBy: _, ...ungrouped } = q;
+  for (const i of items) {
+    const sk = String(i.sk);
+    const at = sk.indexOf('#');
+    const ts = Date.parse(at === -1 ? sk : sk.slice(0, at));
+    if (ts < from || ts >= to) continue;
+    for (const [, c] of rowContributions(ungrouped, family, i)) addAcc(acc, c);
+  }
+  return statValue(acc, q.stat, (to - from) / 1000);
+}
+
 // ------------------------------------------------------------------ I/O
 
 const isoRange = (r: TimeRange): [string, string] => [
@@ -362,8 +794,18 @@ const isoRange = (r: TimeRange): [string, string] => [
   `${telemetryKeys.time(r.to)}\uffff`,
 ];
 
-/** Routes/jobs/metrics/limits series only exist at 1h and 1d. */
+/**
+ * The route, job, metric and limit summaries read hourly and daily rows:
+ * those families have had minute rows only since November 2026, and only the
+ * explorer's series read them.
+ */
 const seriesRange = (r: TimeRange): TimeRange => ({ ...r, res: r.res === '1m' ? '1h' : r.res });
+
+/**
+ * Rows a series reads at most. A day of 10-minute buckets of 20 routes is
+ * 28,800 minute rows (about 6 MB, a second of reads).
+ */
+const SERIES_MAX_ROWS = 100_000;
 
 /** Cost items: pk `cost#<app>` (or `cost#_total`), sk `YYYY-MM-DD`, written by the cost job. */
 export const costKey = (app: string) => `cost#${app}`;
@@ -374,6 +816,18 @@ export class TelemetryQuery extends Context.Service<
   TelemetryQuery,
   {
     metrics(app: string, stage: string, range: TimeRange): Effect.Effect<MetricsResponse>;
+    /** The explorer's query over `range`, from rollups (not `realtime` or `service`). */
+    series(app: string, stage: string, query: SeriesQuery, range: SeriesRange): Effect.Effect<SeriesResponse>;
+    /** The query's statistic over the whole of `from`..`to` (`windowValue`), from minute rollups. */
+    seriesWindow(
+      app: string,
+      stage: string,
+      query: SeriesQuery,
+      from: number,
+      to: number,
+    ): Effect.Effect<number | null>;
+    /** Prod's requests in each of the last 24 hours, oldest first (the current hour last). */
+    traffic(app: string): Effect.Effect<ReadonlyArray<number>>;
     routes(app: string, stage: string, range: TimeRange): Effect.Effect<ReadonlyArray<RouteStats>>;
     /** `declared` adds the manifest's jobs that never ran. */
     jobs(
@@ -423,7 +877,12 @@ export class TelemetryQuery extends Context.Service<
       const aws = yield* Aws;
       const settings = yield* Settings;
 
-      const queryRange = Effect.fnUntraced(function* (pk: string, fromSk: string, toSk: string) {
+      const queryRange = Effect.fnUntraced(function* (
+        pk: string,
+        fromSk: string,
+        toSk: string,
+        limit: number = 20_000,
+      ) {
         const { telemetryTable } = yield* settings.runtime;
         const items: Item[] = [];
         let ExclusiveStartKey: Record<string, unknown> | undefined;
@@ -440,7 +899,7 @@ export class TelemetryQuery extends Context.Service<
           );
           items.push(...(res.Items ?? []));
           ExclusiveStartKey = res.LastEvaluatedKey;
-        } while (ExclusiveStartKey && items.length < 20_000);
+        } while (ExclusiveStartKey && items.length < limit);
         return items;
       });
 
@@ -457,6 +916,61 @@ export class TelemetryQuery extends Context.Service<
           res: range.res,
           points: toMetricsPoints(items, range),
         } satisfies MetricsResponse;
+      }, Effect.orDie);
+
+      /** The rollup family a query reads; realtime and service queries are answered from CloudWatch. */
+      const familyOf = (query: SeriesQuery) => {
+        const family = seriesFamily(query);
+        return family
+          ? Effect.succeed(family)
+          : Effect.die(new Error(`${query.metric} is read from CloudWatch, not the rollups`));
+      };
+
+      const readSeries = Effect.fn('TelemetryQuery.series')(function* (
+        app: string,
+        stage: string,
+        query: SeriesQuery,
+        requested: SeriesRange,
+      ) {
+        const family = yield* familyOf(query);
+        const plan = seriesPlan(requested, yield* Clock.currentTimeMillis);
+        const step = QUERY_RESOLUTION_MS[plan.range.res];
+        const items = yield* queryRange(
+          FAMILY_KEY[family](app, stage, plan.stored),
+          telemetryKeys.time(Math.floor(plan.range.from / step) * step),
+          `${telemetryKeys.time(plan.range.to)}\uffff`,
+          SERIES_MAX_ROWS,
+        );
+        const cut =
+          items.length >= SERIES_MAX_ROWS
+            ? `the range has more than ${SERIES_MAX_ROWS} rows, so its newest buckets are missing: narrow the range or filter`
+            : undefined;
+        const note = [plan.note, cut].filter(Boolean).join('; ');
+        return toSeriesResponse(items, query, family, plan.range, note || undefined);
+      }, Effect.orDie);
+
+      const seriesWindow = Effect.fn('TelemetryQuery.seriesWindow')(function* (
+        app: string,
+        stage: string,
+        query: SeriesQuery,
+        from: number,
+        to: number,
+      ) {
+        const family = yield* familyOf(query);
+        const items = yield* queryRange(
+          FAMILY_KEY[family](app, stage, '1m'),
+          telemetryKeys.time(from),
+          `${telemetryKeys.time(to - 1)}\uffff`,
+        );
+        return windowValue(items, query, family, from, to);
+      }, Effect.orDie);
+
+      const traffic = Effect.fn('TelemetryQuery.traffic')(function* (app: string) {
+        const now = yield* Clock.currentTimeMillis;
+        const range: TimeRange = { from: bucketStart(now, '1h') - 23 * 3_600_000, to: now, res: '1h' };
+        const [a, b] = isoRange(range);
+        const items = yield* queryRange(telemetryKeys.stage(app, PROD_STAGE, '1h'), a, b);
+        return toMetricsPoints(items, range).map((p) => p.req);
       }, Effect.orDie);
 
       const routes = Effect.fn('TelemetryQuery.routes')(function* (
@@ -620,6 +1134,9 @@ export class TelemetryQuery extends Context.Service<
       return TelemetryQuery.of({
         stageTraffic,
         metrics,
+        series: readSeries,
+        seriesWindow,
+        traffic,
         routes,
         jobs,
         customMetrics,
