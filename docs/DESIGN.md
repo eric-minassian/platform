@@ -1103,6 +1103,10 @@ writing any instrumentation:
 - **App end users** use one shared Cognito user pool (Essentials tier: 10k MAU
   free, managed login, passkeys) at `login.platform.ericminassian.com`.
   - Each app stage gets its own public app client.
+  - Its managed login pages look like the console, following the device's light
+    or dark mode. The header names the platform's domain, the same account on
+    every app, and the app's name sits above the form. Every deploy brings the
+    client's style up to date.
   - The SDK implements `/__platform/auth/{login,callback,logout,me}`: PKCE,
     HttpOnly cookies on the app's own host, and refresh.
   - The result is one account across all of Eric's apps.
