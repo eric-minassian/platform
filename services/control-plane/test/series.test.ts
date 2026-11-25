@@ -18,7 +18,7 @@ import {
   toSeriesResponse,
   windowValue,
 } from '../src/telemetry/query.ts';
-import { api, memoryStore, type TestServices, testServices } from './support.ts';
+import { api, memoryStore, type TestServices, testServices, wallClockAt } from './support.ts';
 
 const T0 = Date.parse('2026-11-16T10:00:00.000Z');
 const MIN = 60_000;
@@ -364,6 +364,7 @@ const seriesPath = (q: unknown, params: Record<string, string> = {}) =>
 describe('series endpoint', () => {
   effect.effect('reads the query over the range, by default in about 150 buckets', () =>
     Effect.gen(function* () {
+      yield* wallClockAt(T0);
       const asked: Array<{ app: string; stage: string; query: SeriesQuery; range: SeriesRange }> = [];
       const { request, bob } = yield* setup({
         telemetry: {

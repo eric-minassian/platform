@@ -13,6 +13,7 @@ import {
 import { createPlatformFetch } from '@ericminassian/platform/testing';
 import { DateTime, Effect, Layer, Option, Ref } from 'effect';
 import { decodeJwt, SignJWT } from 'jose';
+import { vi } from 'vitest';
 import { AlertRules } from '../src/alerts/rules.ts';
 import { HttpLive } from '../src/api/http.ts';
 import { Artifacts } from '../src/artifacts.ts';
@@ -238,6 +239,16 @@ export const api = (services: Layer.Layer<Layer.Success<ReturnType<typeof testSe
       );
     };
   });
+
+/**
+ * The wall clock reads `ms` until the test's scope closes. `api`'s handler runs on its own
+ * runtime with the live clock, which `TestClock` doesn't reach.
+ */
+export const wallClockAt = (ms: number) =>
+  Effect.acquireRelease(
+    Effect.sync(() => vi.useFakeTimers({ now: ms, toFake: ['Date'] })),
+    () => Effect.sync(() => vi.useRealTimers()),
+  );
 
 /** AWS clients for a test: the ones given, and clients that fail loudly for the rest. */
 export const awsLayer = (clients: Partial<Aws['Service']>): Layer.Layer<Aws> => {
