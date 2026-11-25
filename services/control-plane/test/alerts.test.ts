@@ -30,6 +30,7 @@ import {
   settingsLayer,
   type TestServices,
   testServices,
+  wallClockAt,
 } from './support.ts';
 
 const NOW = Date.parse('2026-11-16T14:05:30.000Z');
@@ -515,7 +516,7 @@ describe('alerts API', () => {
 
   effect.effect('lists state changes newest first, of one stage or all of them', () =>
     Effect.gen(function* () {
-      yield* TestClock.setTime(NOW);
+      yield* wallClockAt(NOW);
       const event = (ts: string, stage: string, id: string): AlertEvent & { app: string } => ({
         app: 'atlas',
         ts,
