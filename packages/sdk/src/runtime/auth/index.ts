@@ -210,18 +210,29 @@ function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
+/**
+ * `plat dev`'s stand-in for managed login, in the same style (the engine's
+ * `login-branding.ts`): the app's name over a form without a card, the
+ * console's greys, and the device's light or dark mode.
+ */
 function loginPage(b: Bindings, back: string, error?: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sign in · ${escapeHtml(b.app)} (local)</title>
-<style>body{font:16px system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#f6f7f9;color:#111}
-form{background:#fff;padding:2rem;border-radius:12px;box-shadow:0 1px 3px #0002;display:grid;gap:.75rem;min-width:18rem}
-input,button{font:inherit;padding:.6rem .75rem;border-radius:8px;border:1px solid #ccd}button{background:#111;color:#fff;border:0;cursor:pointer}
-small{color:#667}.err{color:#b00}</style></head><body>
+  const app = escapeHtml(b.app);
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark"><title>Sign in · ${app} (local)</title>
+<style>:root{color-scheme:light dark;--bg:light-dark(#fff,#0a0a0a);--fg:light-dark(#171717,#ededed);--muted:light-dark(#5f5f5f,#a1a1a1);--input:light-dark(#00000029,#ffffff2e);--ring:light-dark(#0068d6,#52a8ff);--bad:light-dark(#cd2b31,#ff6166)}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+form{display:grid;gap:1rem;width:min(22rem,100vw - 2rem)}
+.app{margin:0 0 1rem;text-align:center;font-size:2.25rem;font-weight:600;letter-spacing:-.02em;line-height:1.2}
+h1{margin:0;font-size:1.5rem;line-height:1.2}p{margin:-.5rem 0 0;color:var(--muted)}.err{margin:0;color:var(--bad)}
+label{display:grid;gap:.25rem;font-weight:600;font-size:.9375rem}
+input{font:inherit;font-weight:400;padding:.375rem .75rem;border:1px solid var(--input);border-radius:6px;background:var(--bg);color:inherit}
+input:focus{outline:2px solid var(--ring);outline-offset:-2px}
+button{font:inherit;font-weight:600;padding:.375rem;border:0;border-radius:6px;background:var(--fg);color:var(--bg);cursor:pointer}</style></head><body>
 <form method="post" action="${AUTH_ROUTES.login}">
-<strong>Sign in to ${escapeHtml(b.app)}</strong><small>Local development: any email works. Users live in the AWS Emulator.</small>
-${error ? `<span class="err">${escapeHtml(error)}</span>` : ''}
-<input name="email" type="email" placeholder="you@example.com" required autofocus>
-<input name="name" placeholder="Name (optional)">
+<div class="app">${app}</div><h1>Sign in</h1><p>Local development: any email works. Users live in the AWS Emulator.</p>
+${error ? `<p class="err" role="alert">${escapeHtml(error)}</p>` : ''}
+<label>Email address<input name="email" type="email" placeholder="you@example.com" required autofocus></label>
+<label>Name (optional)<input name="name"></label>
 <input type="hidden" name="redirect" value="${escapeHtml(back)}">
 <button type="submit">Sign in</button></form></body></html>`;
 }

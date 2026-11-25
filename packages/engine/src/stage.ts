@@ -49,7 +49,7 @@ import {
   findEventApi,
   getChannelNamespace,
 } from './drivers/appsync.ts';
-import { deleteUserPoolClient, ensureUserPoolClient } from './drivers/cognito.ts';
+import { deleteUserPoolClient, ensureLoginBranding, ensureUserPoolClient } from './drivers/cognito.ts';
 import { deleteTable, describeTable, ensureTable, stageTableSpec } from './drivers/dynamodb.ts';
 import { deleteEventBus, deleteRule, ensureEventBus, ensureRule, listRules } from './drivers/events.ts';
 import { deleteRole, ensureRole } from './drivers/iam.ts';
@@ -124,6 +124,7 @@ import type {
   ResourceRef,
   RollbackStageInput,
 } from './index.ts';
+import { loginBranding } from './login-branding.ts';
 import { configurationSetArn, stageRolePolicy, stageTrustPolicy } from './policy.ts';
 import {
   applyServicesRollback,
@@ -301,6 +302,13 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       callbackUrls: [`${url}${AUTH_ROUTES.callback}`],
       logoutUrls: [`${url}/`],
     });
+    if (ctx.target === 'aws')
+      await ensureLoginBranding(ctx, {
+        userPoolId: platform.userPoolId,
+        clientId,
+        name: names.userPoolClient(app, stage),
+        branding: loginBranding({ app, domain: platform.domain }),
+      });
     auth = {
       mode: platform.target === 'emulator' ? 'local' : 'cognito',
       userPoolId: platform.userPoolId,
