@@ -22,13 +22,19 @@ function jwks(uri: string) {
 /**
  * The issuers a token may name. Cognito's keys live at
  * `<issuer>/.well-known/jwks.json`, so in AWS the two agree. Locally the keys
- * are the emulator's: AWS Emulator 1.0.471 and later name its own endpoint
- * as the issuer, earlier releases Cognito's, so a local stage takes either.
+ * are the emulator's, which has named the issuer three ways: Cognito's
+ * (1.0.385), its own endpoint (1.0.471), and Cognito's host under `.localhost`
+ * on its own port (1.0.610: `https://cognito-idp.us-east-1.localhost:4566/<pool>`).
+ * A local stage takes any of them; the signature is still checked against
+ * the emulator's keys.
  */
 export function acceptedIssuers(auth: Pick<AuthBindings, 'mode' | 'issuer' | 'jwksUri'>): string | string[] {
   if (auth.mode !== 'local') return auth.issuer;
   const ofKeys = auth.jwksUri.replace(/\/\.well-known\/jwks\.json$/, '');
-  return ofKeys === auth.issuer || ofKeys === auth.jwksUri ? auth.issuer : [auth.issuer, ofKeys];
+  if (ofKeys === auth.issuer || ofKeys === auth.jwksUri) return auth.issuer;
+  const local = new URL(ofKeys);
+  local.hostname = new URL(auth.issuer).hostname.replace(/\.amazonaws\.com$/, '.localhost');
+  return [auth.issuer, ofKeys, local.href];
 }
 
 /** Verify a Cognito ID (or access) token for this app's client and map it to a user. */
