@@ -394,26 +394,23 @@ describe('series endpoint', () => {
     }),
   );
 
-  effect.effect(
-    'refuses another app or stage than the request’s, a query it can’t answer, and an unknown res',
-    () =>
-      Effect.gen(function* () {
-        const { request, bob } = yield* setup({ telemetry: {} });
-        const refused = (q: unknown, params: Record<string, string> = {}) =>
-          Effect.gen(function* () {
-            const res = yield* request(seriesPath(q, params), { headers: bob });
-            assert.strictEqual(res.status, 400);
-            return ((yield* json(res)) as { error: { message: string } }).error.message;
-          });
-        const ok = { metric: 'requests', stat: 'count' };
-        assert.strictEqual(yield* refused({ ...ok, app: 'blog' }), 'the query reads app blog, not shop');
-        assert.strictEqual(
-          yield* refused({ ...ok, stage: 'dev' }, { stage: 'prod' }),
-          'the query reads stage dev, not prod',
-        );
-        assert.match(yield* refused({ metric: 'latency', stat: 'count' }), /latency answers/);
-        assert.match(yield* refused(ok, { res: '2m' }), /res is one of 1m, 5m/);
-      }),
+  effect.effect('refuses another stage than the request’s, a query it can’t answer, and an unknown res', () =>
+    Effect.gen(function* () {
+      const { request, bob } = yield* setup({ telemetry: {} });
+      const refused = (q: unknown, params: Record<string, string> = {}) =>
+        Effect.gen(function* () {
+          const res = yield* request(seriesPath(q, params), { headers: bob });
+          assert.strictEqual(res.status, 400);
+          return ((yield* json(res)) as { error: { message: string } }).error.message;
+        });
+      const ok = { metric: 'requests', stat: 'count' };
+      assert.strictEqual(
+        yield* refused({ ...ok, stage: 'dev' }, { stage: 'prod' }),
+        'the query reads stage dev, not prod',
+      );
+      assert.match(yield* refused({ metric: 'latency', stat: 'count' }), /latency answers/);
+      assert.match(yield* refused(ok, { res: '2m' }), /res is one of 1m, 5m/);
+    }),
   );
 
   effect.effect('reads realtime and services from CloudWatch', () =>

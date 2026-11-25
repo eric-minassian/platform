@@ -1,48 +1,46 @@
+@layer ui-sdk;
+
 @import 'tailwindcss';
-@import 'tw-animate-css';
-@import 'shadcn/tailwind.css';
 @import '@fontsource-variable/geist';
 @import '@fontsource-variable/geist-mono';
 
-/* The console is dark only: `<html class="dark">`, and every token below is its dark value. */
-@custom-variant dark (&:is(.dark *));
+/*
+ * `dark:` covers a Dark choice, and System on a dark device. Colors mostly
+ * don't need it: every token below is a light-dark() pair.
+ */
+@custom-variant dark {
+  &:where([data-color-scheme='dark'], [data-color-scheme='dark'] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-color-scheme='light']), :root:not([data-color-scheme='light']) *) {
+      @slot;
+    }
+  }
+}
 
 @theme inline {
   --font-sans: 'Geist Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-mono: 'Geist Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
-  --font-heading: var(--font-sans);
 
+  --color-canvas: var(--canvas);
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
   --color-muted: var(--muted);
   --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
   --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
+  --color-active: var(--active);
   --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
 
   /* Text that states a status (with its label or icon, never color alone). */
   --color-ok: var(--ok);
@@ -53,78 +51,90 @@
   --color-ok-mark: var(--ok-mark);
   --color-warn-mark: var(--warn-mark);
   --color-bad-mark: var(--bad-mark);
-  --color-subtle: var(--subtle);
+  --color-info-mark: var(--info-mark);
 
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  --shadow-popover:
+    0 0 0 1px var(--border), 0 4px 8px -4px rgb(0 0 0 / 0.08), 0 16px 24px -8px rgb(0 0 0 / 0.12);
+  --shadow-dialog:
+    0 0 0 1px var(--border), 0 1px 1px rgb(0 0 0 / 0.02), 0 8px 16px -4px rgb(0 0 0 / 0.08),
+    0 24px 32px -8px rgb(0 0 0 / 0.12);
+
+  --animate-in: ui-in 150ms ease-out;
 }
 
 :root {
+  color-scheme: light dark;
+}
+:root[data-color-scheme='light'] {
+  color-scheme: light;
+}
+:root[data-color-scheme='dark'] {
   color-scheme: dark;
-  /* Neutrals lean slightly blue, toward the focus color. */
-  --background: #0a0b0d;
-  --foreground: #ececef;
-  --card: #111316;
-  --card-foreground: #ececef;
-  --popover: #15181c;
-  --popover-foreground: #ececef;
-  --primary: #ececef;
-  --primary-foreground: #0b0c0e;
-  --secondary: #1b1e23;
-  --secondary-foreground: #ececef;
-  --muted: #16191d;
-  --muted-foreground: #8b909a;
-  --subtle: #5f6570;
-  --accent: #1c1f24;
-  --accent-foreground: #ececef;
-  --destructive: #f26a6a;
-  --border: #22262c;
-  --input: #2b3038;
-  --ring: #4c9aff;
-  --radius: 0.5rem;
+}
 
-  --sidebar: #0c0d10;
-  --sidebar-foreground: #b4b9c2;
-  --sidebar-primary: #ececef;
-  --sidebar-primary-foreground: #0b0c0e;
-  --sidebar-accent: #171a1e;
-  --sidebar-accent-foreground: #ececef;
-  --sidebar-border: #1d2026;
-  --sidebar-ring: #4c9aff;
+/*
+ * A neutral grey scale after Vercel's Geist: the canvas sits behind the
+ * sidebar and the content panel; cards and the panel share the background
+ * and are told apart by their borders.
+ */
+:root {
+  --canvas: light-dark(#fafafa, #000000);
+  --background: light-dark(#ffffff, #0a0a0a);
+  --card: var(--background);
+  --popover: light-dark(#ffffff, #111111);
+  --foreground: light-dark(#171717, #ededed);
+  --muted-foreground: light-dark(#5f5f5f, #a1a1a1);
+  --subtle: light-dark(#737373, #8a8a8a);
+  --muted: light-dark(#f5f5f5, #161616);
+  --accent: light-dark(#ededed, #1f1f1f);
+  --active: light-dark(#e4e4e4, #2a2a2a);
+  --border: light-dark(#00000017, #ffffff1a);
+  --border-strong: light-dark(#00000029, #ffffff2b);
+  --input: light-dark(#00000029, #ffffff2e);
+  --ring: light-dark(#0068d6, #52a8ff);
+  --primary: var(--foreground);
+  --primary-foreground: var(--background);
+  --destructive: light-dark(#cd2b31, #e5484d);
+  --destructive-foreground: #ffffff;
 
-  --ok: #4cc76a;
-  --warn: #f5c04a;
-  --bad: #f47a7a;
-  --info: #6aa9f7;
+  --ok: light-dark(#297a3a, #62c073);
+  --warn: light-dark(#a35200, #f2a20d);
+  --bad: light-dark(#cd2b31, #ff6166);
+  --info: light-dark(#0062d1, #52a8ff);
   --ok-mark: #0ca30c;
   --warn-mark: #fab219;
   --bad-mark: #d03b3b;
+  --info-mark: light-dark(#2a78d6, #3987e5);
 
   /*
-   * Chart colors, validated for this surface (dataviz palette validator, dark mode):
-   * categorical order for adjacent series, status classes, latency percentiles as one
-   * blue ramp, and the sequential heatmap ramp.
+   * Chart colors, validated per surface with the dataviz palette validator:
+   * the categorical order for adjacent series, status classes, latency
+   * percentiles as one blue ramp (the further out, the more prominent).
    */
-  --chart-1: #3987e5;
-  --chart-2: #d95926;
-  --chart-3: #199e70;
-  --chart-4: #c98500;
-  --chart-5: #d55181;
-  --chart-6: #0ca30c;
-  --chart-7: #9085e9;
-  --chart-8: #e66767;
-  --s2xx: #3987e5;
-  --s3xx: #199e70;
-  --s4xx: #c98500;
+  --chart-1: light-dark(#2a78d6, #3987e5);
+  --chart-2: light-dark(#eb6834, #d95926);
+  --chart-3: light-dark(#1baf7a, #199e70);
+  --chart-4: light-dark(#eda100, #c98500);
+  --chart-5: light-dark(#e87ba4, #d55181);
+  --chart-6: light-dark(#008300, #0ca30c);
+  --chart-7: light-dark(#6250d6, #9085e9);
+  --chart-8: light-dark(#e34948, #e66767);
+  --s2xx: var(--chart-1);
+  --s3xx: var(--chart-3);
+  --s4xx: var(--chart-4);
   --s5xx: #d03b3b;
-  --p50: #256abf;
-  --p90: #3f80d6;
-  --p95: #5598e7;
-  --p99: #9ec5f4;
-  --chart-grid: #1c2025;
-  --chart-axis: #2d3239;
+  --p50: light-dark(#86b6ef, #256abf);
+  --p90: light-dark(#5598e7, #3f80d6);
+  --p95: light-dark(#2a78d6, #5598e7);
+  --p99: light-dark(#184f95, #9ec5f4);
+  --chart-grid: light-dark(#ededed, #1c1c1c);
+  --chart-axis: light-dark(#d4d4d4, #333333);
   --ts-chart-1: var(--chart-1);
   --ts-chart-2: var(--chart-2);
   --ts-chart-3: var(--chart-3);
@@ -135,22 +145,53 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border;
   }
   html {
-    @apply bg-background font-sans text-foreground;
+    @apply bg-canvas font-sans text-foreground;
+    -webkit-text-size-adjust: 100%;
   }
   body {
-    @apply bg-background text-foreground antialiased;
+    @apply bg-canvas text-sm text-foreground antialiased;
     font-feature-settings: 'ss01', 'cv11';
   }
   ::selection {
-    background: color-mix(in oklch, var(--ring) 35%, transparent);
+    background: color-mix(in oklch, var(--ring) 30%, transparent);
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  /* The behaviors' own CSS arrives with the first component; until then closed parts stay hidden. */
+  :where([data-slot][hidden]:not([hidden='until-found'])) {
+    display: none !important;
   }
 }
 
 @utility tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* Popups enter from slightly smaller and fade, from where they open. */
+@keyframes ui-in {
+  from {
+    opacity: 0;
+    scale: 0.97;
+  }
+}
+@utility popup-motion {
+  transform-origin: var(--transform-origin);
+  transition-property: opacity, scale, translate;
+  transition-duration: 150ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  &[data-starting-style],
+  &[data-ending-style] {
+    opacity: 0;
+    scale: 0.97;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+  }
 }
 
 /* index.html's copy of the signed-out page is for clients that don't run scripts; React replaces it. */
@@ -166,24 +207,14 @@
   font-family: var(--font-sans);
   font-size: 11px;
   --ts-chart-tooltip-background: var(--popover);
-  --ts-chart-tooltip-color: var(--popover-foreground);
-  --ts-chart-tooltip-border: 1px solid var(--input);
+  --ts-chart-tooltip-color: var(--foreground);
+  --ts-chart-tooltip-border: 1px solid var(--border-strong);
   --ts-chart-tooltip-border-radius: 8px;
-  --ts-chart-tooltip-shadow: 0 10px 28px rgb(0 0 0 / 0.5);
+  --ts-chart-tooltip-shadow: 0 8px 24px -8px rgb(0 0 0 / 0.25);
   --ts-chart-tooltip-font: 500 12px/1.5 var(--font-sans);
   --ts-chart-tooltip-active-row-background: var(--accent);
   --ts-chart-crosshair-label-halo: var(--background);
 }
 .ts-chart-tooltip {
   font-variant-numeric: tabular-nums;
-}
-
-/* react-grid-layout: placeholder and resize handle in the console's colors. */
-.react-grid-item.react-grid-placeholder {
-  background: color-mix(in oklch, var(--ring) 20%, transparent) !important;
-  border-radius: var(--radius);
-  opacity: 1 !important;
-}
-.react-grid-item > .react-resizable-handle::after {
-  border-color: var(--subtle) !important;
 }

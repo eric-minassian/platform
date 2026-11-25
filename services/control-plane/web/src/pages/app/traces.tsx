@@ -10,12 +10,11 @@ import {
   TRACE_SAMPLE_RATE,
   type TraceFilters,
   type TraceSummary,
-  type TracesView,
-  type SavedQuery,
 } from '@ericminassian/platform-core';
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { Option } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
+import { X } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { DurationScatter } from '../../components/charts/scatter.tsx';
@@ -27,12 +26,13 @@ import {
   PageHeader,
   Panel,
   RouteLabel,
-  StatusPill,
+  StatusText,
 } from '../../components/page.tsx';
-import { SavedViews } from '../../components/saved-views.tsx';
-import { Segmented } from '../../components/segmented.tsx';
-import { Input } from '../../components/ui/input.tsx';
+import { Badge } from '../../components/ui/badge.tsx';
+import { Button } from '../../components/ui/button.tsx';
 import { Label } from '../../components/ui/label.tsx';
+import { NumberInput } from '../../components/ui/number-input.tsx';
+import { Segmented } from '../../components/ui/segmented.tsx';
 import { Switch } from '../../components/ui/switch.tsx';
 import { type PickerOption, ValuePicker } from '../../components/value-picker.tsx';
 import { family } from '../../data/atoms.ts';
@@ -59,7 +59,7 @@ const tracesAtom = family(
     ),
 );
 
-const optionsAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
+const jobsAtom = family((k: { app: string; stage: string; time: TimeSearch }) =>
   fresh(
     ApiClient.query('observe', 'jobs', {
       params: { app: k.app },
@@ -78,9 +78,21 @@ const routesAtom = family((k: { app: string; stage: string; time: TimeSearch }) 
   ),
 );
 
+const KINDS = [
+  { value: 'all', label: 'All' },
+  { value: 'req', label: 'Requests' },
+  { value: 'job', label: 'Jobs' },
+] as const;
+
+const OUTCOMES = [
+  { value: 'any', label: 'Any outcome' },
+  { value: 'error', label: 'Failed' },
+  { value: 'ok', label: 'Succeeded' },
+] as const;
+
 const col = columns<TraceSummary>();
 
-function traceColumns(utc: boolean, longest: number) {
+function traceColumns(app: string, utc: boolean, longest: number) {
   const when = timeFormat(utc, {
     month: 'short',
     day: 'numeric',
@@ -93,17 +105,23 @@ function traceColumns(utc: boolean, longest: number) {
     col.accessor('ts', {
       header: 'Started',
       cell: ({ getValue }) => (
-        <span className="font-mono text-[12px] text-muted-foreground">{when(getValue())}</span>
+        <span className="font-mono text-[12px] whitespace-nowrap text-muted-foreground">
+          {when(getValue())}
+        </span>
       ),
     }),
     col.accessor('name', {
       header: 'Request or job',
-      cell: ({ row }) =>
-        row.original.kind === 'req' ? (
-          <RouteLabel route={row.original.name} />
-        ) : (
-          <span className="font-mono text-[12.5px]">{row.original.name}</span>
-        ),
+      cell: ({ row, getValue }) => (
+        <Link
+          to="/apps/$app/traces/$trace"
+          params={{ app, trace: row.original.trace }}
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex max-w-full rounded-sm outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+        >
+          <RouteLabel route={getValue()} />
+        </Link>
+      ),
     }),
     col.accessor((t) => (t.failed ? 1 : 0), {
       id: 'outcome',
@@ -111,9 +129,9 @@ function traceColumns(utc: boolean, longest: number) {
       cell: ({ row }) => {
         const t = row.original;
         return (
-          <StatusPill tone={t.failed ? 'bad' : 'ok'}>
-            {t.status !== undefined ? t.status : t.failed ? 'failed' : 'ok'}
-          </StatusPill>
+          <StatusText tone={t.failed ? 'bad' : 'ok'} className="tabular">
+            {t.status ?? (t.failed ? 'Failed' : 'OK')}
+          </StatusText>
         );
       },
     }),
@@ -126,11 +144,8 @@ function traceColumns(utc: boolean, longest: number) {
           <span className="inline-flex items-center justify-end gap-2">
             <span
               aria-hidden
-              className="h-1.5 rounded-full"
-              style={{
-                width: `${Math.max(2, (t.dur / longest) * 96)}px`,
-                background: t.failed ? 'var(--s5xx)' : 'var(--chart-1)',
-              }}
+              className={t.failed ? 'h-1.5 rounded-full bg-bad-mark' : 'h-1.5 rounded-full bg-(--chart-1)'}
+              style={{ width: `${Math.max(2, (t.dur / longest) * 96)}px` }}
             />
             <span className="w-14 text-right">{fmtMs(t.dur)}</span>
           </span>
@@ -142,11 +157,11 @@ function traceColumns(utc: boolean, longest: number) {
       header: 'Spans',
       cell: ({ row }) => {
         const t = row.original;
-        return t.recorded ? (
-          <span>kept</span>
-        ) : (
-          <span className="text-muted-foreground">
-            {t.calls !== undefined ? `${fmtNum(t.calls)} calls, not kept` : 'not kept'}
+        if (t.recorded) return <Badge variant="info">Kept</Badge>;
+        if (!t.calls) return <span className="text-subtle">None</span>;
+        return (
+          <span className="whitespace-nowrap text-muted-foreground">
+            <span className="text-foreground tabular">{fmtNum(t.calls)}</span> not kept
           </span>
         );
       },
@@ -175,42 +190,24 @@ export function TracesPage() {
   const spreadAtom = tracesAtom({ app, stage, time: time.search, f: { ...f, recorded: true }, limit: 1000 });
   useAutoRefresh(spreadAtom, time.search.from === undefined);
   const spread = Option.getOrUndefined(AsyncResult.value(useSticky(useAtomValue(spreadAtom))));
-  const [minDraft, setMinDraft] = useState(f.minMs !== undefined ? String(f.minMs) : '');
+  const [minDraft, setMinDraft] = useState<number | null>(f.minMs ?? null);
 
   const routeOptions: PickerOption[] = Option.getOrElse(
     AsyncResult.value(useAtomValue(routesAtom({ app, stage, time: time.search }))),
     () => [],
   )
     .toSorted((a, b) => b.req - a.req)
-    .map((r) => ({ value: `${r.method} ${r.route}`, hint: r.req }));
+    .map((r) => ({ value: `${r.method} ${r.route}`, hint: fmtNum(r.req) }));
   const jobOptions: PickerOption[] =
     Option.getOrUndefined(
-      AsyncResult.value(useAtomValue(optionsAtom({ app, stage, time: time.search }))),
-    )?.jobs.map((j) => ({
-      value: `${j.kind}:${j.name}`,
-      hint: j.ok + j.error,
-    })) ?? [];
+      AsyncResult.value(useAtomValue(jobsAtom({ app, stage, time: time.search }))),
+    )?.jobs.map((j) => ({ value: `${j.kind}:${j.name}`, hint: fmtNum(j.ok + j.error) })) ?? [];
 
   const setFilters = (next: TraceFilters) => {
     const clean = Object.fromEntries(
       Object.entries(next).filter(([, v]) => v !== undefined && !(Array.isArray(v) && v.length === 0)),
     ) as TraceFilters;
-    void navigate({
-      search: (prev) => ({ ...prev, f: Object.keys(clean).length ? clean : undefined, saved: undefined }),
-    });
-  };
-  const view: TracesView = { kind: 'traces', filters: f };
-  const open = (q: SavedQuery) => {
-    if (q.view.kind !== 'traces') return;
-    setMinDraft(q.view.filters.minMs !== undefined ? String(q.view.filters.minMs) : '');
-    void navigate({
-      search: (prev) => ({
-        ...prev,
-        f: q.view.kind === 'traces' ? q.view.filters : undefined,
-        saved: q.id,
-        ...(q.range ? { range: q.range, from: undefined, to: undefined } : {}),
-      }),
-    });
+    void navigate({ search: (prev) => ({ ...prev, f: Object.keys(clean).length ? clean : undefined }) });
   };
 
   const traces = value?.traces ?? [];
@@ -226,7 +223,7 @@ export function TracesPage() {
     [spread],
   );
   const longest = Math.max(1, ...traces.map((t) => t.dur));
-  const tableColumns = useMemo(() => traceColumns(utc, longest), [utc, longest]);
+  const tableColumns = useMemo(() => traceColumns(app, utc, longest), [app, utc, longest]);
   const openTrace = (trace: string) =>
     void navigate({ to: '/apps/$app/traces/$trace', params: { app, trace } });
 
@@ -235,33 +232,18 @@ export function TracesPage() {
       <PageHeader
         title="Traces"
         description={`Spans are kept for failed requests and jobs, for those taking ${SLOW_TRACE_MS / 1000}s or longer, and for 1 in ${Math.round(1 / TRACE_SAMPLE_RATE)} traces.`}
-        actions={
-          <SavedViews
-            app={app}
-            stage={stage}
-            kind="traces"
-            view={view}
-            range={time.search.from === undefined ? (time.search.range ?? '24h') : undefined}
-            currentId={search.saved}
-            onOpen={open}
-            onSaved={(q) => void navigate({ search: (prev) => ({ ...prev, saved: q.id }), replace: true })}
-          />
-        }
       />
       <div className="flex flex-wrap items-center gap-2">
         <Segmented
           label="Kind"
           value={f.kind ?? 'all'}
           onChange={(k) => setFilters({ ...f, kind: k === 'all' ? undefined : k })}
-          options={[
-            { value: 'all', label: 'All' },
-            { value: 'req', label: 'Requests' },
-            { value: 'job', label: 'Jobs' },
-          ]}
+          options={KINDS}
         />
         {f.kind !== 'job' && (
           <ValuePicker
             label="All routes"
+            name="Routes"
             options={routeOptions}
             selected={f.routes ?? []}
             onChange={(routes) => setFilters({ ...f, routes })}
@@ -271,6 +253,7 @@ export function TracesPage() {
         {f.kind !== 'req' && jobOptions.length > 0 && (
           <ValuePicker
             label="All jobs"
+            name="Jobs"
             options={jobOptions}
             selected={f.jobs ?? []}
             onChange={(jobs) => setFilters({ ...f, jobs })}
@@ -281,49 +264,54 @@ export function TracesPage() {
           label="Outcome"
           value={f.outcome ?? 'any'}
           onChange={(o) => setFilters({ ...f, outcome: o === 'any' ? undefined : o })}
-          options={[
-            { value: 'any', label: 'Any outcome' },
-            { value: 'error', label: 'Failed' },
-            { value: 'ok', label: 'Succeeded' },
-          ]}
+          options={OUTCOMES}
         />
-        <form
-          className="flex items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const n = Number(minDraft);
-            setFilters({ ...f, minMs: minDraft.trim() && Number.isFinite(n) && n > 0 ? n : undefined });
-          }}
-        >
-          <Label htmlFor="traces-min" className="text-sm font-normal text-muted-foreground">
+        <div className="flex items-center gap-2">
+          <Label htmlFor="traces-min" className="font-normal text-muted-foreground">
             At least
           </Label>
-          <Input
+          <NumberInput
             id="traces-min"
-            inputMode="numeric"
-            className="h-7 w-20 tabular"
-            placeholder="0"
+            className="h-7 w-32"
+            placeholder="0ms"
+            min={0}
+            step={50}
+            largeStep={500}
+            format={{ style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' }}
             value={minDraft}
-            onChange={(e) => setMinDraft(e.target.value)}
-            onBlur={(e) => e.currentTarget.form?.requestSubmit()}
+            onValueChange={setMinDraft}
+            onValueCommit={(ms) => setFilters({ ...f, minMs: ms !== null && ms > 0 ? ms : undefined })}
           />
-          <span className="text-sm text-muted-foreground">ms</span>
-        </form>
-        <div className="flex items-center gap-2">
+        </div>
+        <div className="flex items-center gap-2 pl-1">
           <Switch
             id="traces-recorded"
+            size="sm"
             checked={f.recorded ?? false}
             onCheckedChange={(on) => setFilters({ ...f, recorded: on || undefined })}
           />
-          <Label htmlFor="traces-recorded" className="text-sm font-normal">
+          <Label htmlFor="traces-recorded" className="font-normal">
             Only with spans
           </Label>
         </div>
+        {Object.keys(f).length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setMinDraft(null);
+              setFilters({});
+            }}
+          >
+            <X />
+            Clear filters
+          </Button>
+        )}
       </div>
       {result._tag === 'Failure' && <ErrorNotice error={result.cause} />}
       <Panel
         title="Duration"
-        description="traces with spans (failed, slow and sampled); click one to open it, drag to zoom"
+        description="Traces with spans: failed, slow and sampled. Click one to open it, drag to zoom."
         actions={
           spread && (
             <span className="text-xs text-muted-foreground tabular">

@@ -6,7 +6,7 @@ import { Mono } from '../components/page.tsx';
  * `/llms.txt`). The server sends a login it turned away back here with
  * `?denied=<login>`.
  */
-import { BrandMark } from '../components/shell/app-sidebar.tsx';
+import { BrandMark } from '../components/shell/sidebar.tsx';
 import { Button } from '../components/ui/button.tsx';
 import { loginRoute } from '../router.tsx';
 
@@ -24,28 +24,27 @@ export function LoginPage(): ReactElement {
   const redirect = search.redirect ?? '/';
   const denied = search.denied === undefined ? undefined : String(search.denied);
   return (
-    <main className="grid min-h-svh place-items-center bg-background px-4 py-10">
+    <main className="grid min-h-dvh place-items-center bg-canvas px-4 py-10">
       <div className="flex w-full max-w-sm flex-col gap-6">
         <div className="flex items-center gap-2.5 font-semibold tracking-tight">
           <BrandMark />
           platform
         </div>
-        <div className="flex flex-col gap-4 rounded-lg border bg-card p-6">
+        <div className="flex flex-col gap-5 rounded-xl border bg-card p-6 shadow-[0_1px_2px_rgb(0_0_0/0.04)]">
           <div>
-            <h1 className="text-lg font-semibold tracking-tight">Sign in</h1>
+            <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
             <p className="mt-1 text-sm text-muted-foreground">Members sign in with their GitHub account.</p>
           </div>
           {denied && (
             <p
               role="alert"
-              className="rounded-md border border-warn-mark/40 bg-warn-mark/10 px-3 py-2 text-sm text-warn"
+              className="rounded-lg border border-warn-mark/40 bg-warn-mark/8 px-3 py-2 text-sm text-warn"
             >
               @{denied} isn't a member. Members are listed in <Mono>platform.config.ts</Mono>.
             </p>
           )}
           <Button
             size="lg"
-            nativeButton={false}
             render={
               <a
                 href={`/auth/github/login?redirect=${encodeURIComponent(redirect)}`}

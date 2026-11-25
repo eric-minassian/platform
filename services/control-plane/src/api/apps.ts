@@ -14,7 +14,6 @@ import { AlertRules } from '../alerts/rules.ts';
 import { canAccessApp, canCreateApp } from '../authz.ts';
 import { Settings } from '../config.ts';
 import { Dns } from '../dns.ts';
-import { Library } from '../library.ts';
 import { type Patch, Store } from '../store.ts';
 import { TelemetryQuery } from '../telemetry/query.ts';
 import { Access, publicDeployment, publicStage } from './access.ts';
@@ -47,7 +46,6 @@ export const AppsLive = HttpApiBuilder.group(
     const access = yield* Access;
     const alerts = yield* AlertRules;
     const dns = yield* Dns;
-    const library = yield* Library;
     const settings = yield* Settings;
     const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
@@ -174,10 +172,9 @@ export const AppsLive = HttpApiBuilder.group(
               message: `destroy stages first: ${live.map((s) => s.stage).join(', ')}`,
             });
           }
-          // Its rules, saved queries and dashboards first: an app registered again under the
-          // name starts without them, and removing them again is harmless where orphans aren't.
+          // Its rules first: an app registered again under the name starts without them,
+          // and removing them again is harmless where orphans aren't.
           yield* alerts.removeAll(app.name);
-          yield* library.removeApp(app.name);
           return yield* store.deleteApp(app.name);
         }),
     });

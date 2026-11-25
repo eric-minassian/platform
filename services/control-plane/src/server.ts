@@ -20,7 +20,6 @@ import { AppQueues } from './jobs/queues.ts';
 import { AppRealtime } from './jobs/realtime.ts';
 import { AppServices } from './jobs/services.ts';
 import { BaseLive } from './layers.ts';
-import { Library } from './library.ts';
 import { Logs } from './logs.ts';
 import { AppSecrets } from './secrets.ts';
 import { TelemetryQuery } from './telemetry/query.ts';
@@ -40,7 +39,6 @@ export const ServerLive = HttpLive.pipe(
       Dns.layer,
       EdgeFloor.layer,
       GitHub.layer,
-      Library.layer,
       Logs.layer,
       TelemetryQuery.layer,
       Tokens.layer,

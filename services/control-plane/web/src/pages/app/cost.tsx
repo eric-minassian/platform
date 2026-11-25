@@ -11,7 +11,8 @@ import type { ReactElement } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { DailyCostChart } from '../../components/cost/daily-cost-chart.tsx';
 import { columns, DataTable } from '../../components/data-table.tsx';
-import { Loaded, Mono, PageHeader, Panel, Stat, StatusPill } from '../../components/page.tsx';
+import { Loaded, Mono, PageHeader, Panel, Stat, Stats } from '../../components/page.tsx';
+import { Badge } from '../../components/ui/badge.tsx';
 import { fmtNum, fmtUsd, fmtUsdCents, fmtUsdEstimate, relTime } from '../../format.ts';
 import { appRoute } from '../../router.tsx';
 
@@ -39,8 +40,8 @@ export function CostPage(): ReactElement {
           const average = c.days.length ? c.days.reduce((a, d) => a + d.usd, 0) / c.days.length : 0;
           const alwaysOn = (c.alwaysOn ?? []).reduce((a, s) => a + s.monthly.totalUsd, 0);
           return (
-            <div className="flex flex-col gap-4">
-              <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <div className="flex flex-col gap-5">
+              <Stats>
                 <Stat
                   label="Month to date"
                   value={fmtUsd(c.monthToDateUsd)}
@@ -53,10 +54,11 @@ export function CostPage(): ReactElement {
                   value={c.alwaysOn?.length ? `≈ ${fmtUsdCents(alwaysOn)}` : '–'}
                   note={c.alwaysOn?.length ? 'a month, if they run all month' : 'none'}
                 />
-              </div>
+              </Stats>
               <Panel
                 title="Cost per day"
-                description="Resources tagged to the app. Shared platform resources (router, tables, buckets) count under Platform."
+                description="Resources tagged to the app"
+                footer="Shared platform resources (router, tables, buckets) count under Platform."
               >
                 <DailyCostChart
                   series={[{ key: 'usd', label: 'Cost', color: 'var(--chart-1)', days: c.days }]}
@@ -87,7 +89,7 @@ const computeColumns = compute.columns([
       const s = row.original;
       return (
         <div>
-          <StatusPill tone="info">{MODE[s.compute]}</StatusPill>
+          <Badge>{MODE[s.compute]}</Badge>
           {s.streak && (
             <div className="mt-1 text-xs text-muted-foreground">
               {MODE[s.streak.to].toLowerCase()} cheaper, day {s.streak.days} of 3
@@ -171,12 +173,14 @@ function Compute({ stages }: { stages: readonly StageCompute[] }) {
       flush
       title="Server compute, per month"
       description="Each mode priced daily from the stage's recent traffic, before the free tier"
+      footer={
+        <p>
+          On <Mono className="text-xs">auto</Mono>, a stage moves to the other mode once it has cost 25% less
+          three days running. Previews always run in request mode.
+        </p>
+      }
     >
       <DataTable columns={computeColumns} data={stages} getRowId={(s) => s.stage} />
-      <p className="border-t px-4 pt-2.5 pb-1.5 text-xs text-muted-foreground">
-        On <Mono className="text-xs">auto</Mono>, a stage moves to the other mode once it has cost 25% less
-        three days running. Previews always run in request mode.
-      </p>
     </Panel>
   );
 }
@@ -208,17 +212,18 @@ const alwaysColumns = always.columns([
 
 function AlwaysOn({ services }: { services: readonly AlwaysOnCost[] }) {
   return (
-    <Panel flush title="Always on" description="Estimated from each service's size, running all month">
+    <Panel
+      flush
+      title="Always on"
+      description="Estimated from each service's size, running all month"
+      footer="Cost Explorer doesn't attribute a container's public IPv4 address to the app; it's counted with the shared platform resources under Platform."
+    >
       <DataTable
         columns={alwaysColumns}
         data={services}
         getRowId={(a) => `${a.stage}:${a.kind}:${a.name}`}
         initialSorting={[{ id: 'total', desc: true }]}
       />
-      <p className="border-t px-4 pt-2.5 pb-1.5 text-xs text-muted-foreground">
-        Cost Explorer doesn't attribute a container's public IPv4 address to the app; it's counted with the
-        shared platform resources under Platform.
-      </p>
     </Panel>
   );
 }

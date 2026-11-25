@@ -1,7 +1,7 @@
 /**
  * The explorer's query model. The control plane answers it (the series
- * endpoint) and evaluates alert rules with it; the console builds charts,
- * saved queries, dashboard widgets and alert rules from it; the CLI sends it.
+ * endpoint) and evaluates alert rules with it; the console builds charts and
+ * alert rules from it; the CLI sends it.
  *
  * Every metric is read from the rollups the telemetry processor writes
  * (`telemetryKeys`), except `realtime` and `service`, which come from
@@ -147,8 +147,6 @@ export const SeriesQuery = Schema.Struct({
   stat: SeriesStat,
   filter: optional(SeriesFilter),
   groupBy: optional(SeriesGroupBy),
-  /** Another app than the page's (dashboards that span apps). */
-  app: optional(nonEmpty),
   /** Another stage than the page's. */
   stage: optional(nonEmpty),
 });
@@ -197,7 +195,7 @@ export const SERVICE_MEASURES = ['cpu', 'memory'] as const;
 /**
  * Why a query can't be answered, or undefined when it can. `alert` also
  * refuses what an alert rule can't watch: CloudWatch metrics, histograms,
- * groups, and another app or stage than the rule's.
+ * groups, and another stage than the rule's.
  */
 export function checkSeriesQuery(
   q: SeriesQuery,
@@ -246,7 +244,7 @@ export function checkSeriesQuery(
     if (!ALERT_METRICS.includes(q.metric)) return `alert rules can't watch ${q.metric}`;
     if (q.stat === 'histogram') return 'alert rules watch one number, not a histogram';
     if (q.groupBy) return 'alert rules watch one series; filter instead of grouping';
-    if (q.app || q.stage) return "an alert rule's query reads the rule's own app and stage";
+    if (q.stage) return "an alert rule's query reads the rule's own stage";
   }
   return undefined;
 }
@@ -297,7 +295,7 @@ export function describeQuery(q: SeriesQuery): string {
   ].filter(Boolean);
   const of = scope.length ? ` of ${scope.join(', ')}` : '';
   const by = q.groupBy ? ` by ${q.groupBy}` : '';
-  const where = q.app || q.stage ? ` (${[q.app, q.stage].filter(Boolean).join('/')})` : '';
+  const where = q.stage ? ` (${q.stage})` : '';
   const subset = f.status?.length
     ? f.status.join('+')
     : f.outcome === 'error'
@@ -342,10 +340,10 @@ export function describeQuery(q: SeriesQuery): string {
 }
 
 // ---------------------------------------------------------------------------
-// Saved queries and dashboards
+// Charts and filters
 // ---------------------------------------------------------------------------
 
-/** A query on an explorer page or widget, with the id expressions refer to it by (`a`, `b`, …). */
+/** A query of an explorer chart, with the id expressions refer to it by (`a`, `b`, …). */
 export const NamedSeriesQuery = Schema.Struct({
   id: Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9]{0,7}$/)),
   ...SeriesQuery.fields,
@@ -364,7 +362,7 @@ export const SeriesExpression = Schema.Struct({
 });
 export type SeriesExpression = typeof SeriesExpression.Type;
 
-export const ChartKind = Schema.Literals(['line', 'area', 'bar', 'heatmap', 'number', 'table']);
+export const ChartKind = Schema.Literals(['line', 'area', 'bar', 'heatmap']);
 export type ChartKind = typeof ChartKind.Type;
 
 export const MetricsView = Schema.Struct({
@@ -398,16 +396,6 @@ export const LogFilters = Schema.Struct({
 });
 export type LogFilters = typeof LogFilters.Type;
 
-export const LogsView = Schema.Struct({
-  kind: Schema.Literal('logs'),
-  /** Free text or a CloudWatch filter pattern. */
-  q: optional(Schema.String),
-  filters: optional(LogFilters),
-  /** A Logs Insights query; when set, the view runs it instead of a search. */
-  insights: optional(Schema.String),
-});
-export type LogsView = typeof LogsView.Type;
-
 export const TraceFilters = Schema.Struct({
   kind: optional(Schema.Literals(['req', 'job'])),
   /** `METHOD /pattern`. */
@@ -421,78 +409,6 @@ export const TraceFilters = Schema.Struct({
   recorded: optional(Schema.Boolean),
 });
 export type TraceFilters = typeof TraceFilters.Type;
-
-export const TracesView = Schema.Struct({ kind: Schema.Literal('traces'), filters: TraceFilters });
-export type TracesView = typeof TracesView.Type;
-
-export const QueryView = Schema.Union([MetricsView, LogsView, TracesView]);
-export type QueryView = typeof QueryView.Type;
-
-const name = Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(80));
-/** `1h`, `24h`, `7d`…: a range relative to now. */
-const relativeRange = Schema.String.check(Schema.isPattern(/^\d{1,3}[mhd]$/));
-
-export const SaveQueryRequest = Schema.Struct({
-  name,
-  view: QueryView,
-  /** The range it opens with; otherwise the page's. */
-  range: optional(relativeRange),
-  /** The stage it opens on; otherwise the page's. */
-  stage: optional(nonEmpty),
-});
-export type SaveQueryRequest = typeof SaveQueryRequest.Type;
-
-/** A named explorer, log or trace query of one app, shared by everyone who can see the app. */
-export const SavedQuery = Schema.Struct({
-  id: Schema.String,
-  app: Schema.String,
-  ...SaveQueryRequest.fields,
-  createdBy: Schema.String,
-  createdAt: Schema.String,
-  updatedAt: Schema.String,
-});
-export type SavedQuery = typeof SavedQuery.Type;
-
-/** Columns of the dashboard grid. */
-export const DASHBOARD_COLUMNS = 12;
-export const MAX_DASHBOARD_WIDGETS = 40;
-export const MAX_SAVED_QUERIES_PER_APP = 100;
-
-const gridInt = (maximum: number) => Schema.Int.check(Schema.isBetween({ minimum: 0, maximum }));
-
-export const DashboardWidget = Schema.Struct({
-  id: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,40}$/)),
-  title: Schema.String.check(Schema.isMaxLength(120)),
-  /** Position and size in grid cells: 12 columns, rows of 32px. */
-  x: gridInt(DASHBOARD_COLUMNS - 1),
-  y: gridInt(10_000),
-  w: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: DASHBOARD_COLUMNS })),
-  h: Schema.Int.check(Schema.isBetween({ minimum: 2, maximum: 40 })),
-  view: Schema.Union([MetricsView, LogsView]),
-  /** The app and stage the widget reads; otherwise the dashboard's app and prod. */
-  app: optional(nonEmpty),
-  stage: optional(nonEmpty),
-});
-export type DashboardWidget = typeof DashboardWidget.Type;
-
-export const SaveDashboardRequest = Schema.Struct({
-  name,
-  /** The app it belongs to; dashboards without one span apps. */
-  app: optional(nonEmpty),
-  range: optional(relativeRange),
-  widgets: Schema.Array(DashboardWidget).check(Schema.isMaxLength(MAX_DASHBOARD_WIDGETS)),
-});
-export type SaveDashboardRequest = typeof SaveDashboardRequest.Type;
-
-export const Dashboard = Schema.Struct({
-  id: Schema.String,
-  ...SaveDashboardRequest.fields,
-  createdBy: Schema.String,
-  createdAt: Schema.String,
-  updatedAt: Schema.String,
-  updatedBy: Schema.String,
-});
-export type Dashboard = typeof Dashboard.Type;
 
 // ---------------------------------------------------------------------------
 // Alert rules
@@ -508,6 +424,8 @@ export const ALERT_LAG_MINUTES = 2;
 export const MAX_ALERT_RULES_PER_APP = 25;
 /** How long alert state changes are kept. */
 export const ALERT_HISTORY_DAYS = 90;
+
+const name = Schema.Trim.check(Schema.isNonEmpty(), Schema.isMaxLength(80));
 
 export const AlertCondition = Schema.Struct({
   op: Schema.Literals(['above', 'below']),

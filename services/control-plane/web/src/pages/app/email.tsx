@@ -11,6 +11,7 @@ import { AsyncResult, Atom } from 'effect/reactivity';
 import { CirclePause } from 'lucide-react';
 import { type ReactElement, useCallback, useMemo } from 'react';
 import { ApiClient, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
+import { ConfirmAction } from '../../components/actions/confirm-action.tsx';
 import { report } from '../../components/actions/report.ts';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import {
@@ -22,6 +23,8 @@ import {
   PageHeader,
   Panel,
   Stat,
+  Stats,
+  StatusDot,
   StatusPill,
   type Tone,
 } from '../../components/page.tsx';
@@ -103,7 +106,7 @@ export function EmailPage(): ReactElement {
         s.enabled ? (
           <EmailStage app={app} stage={stage} stats={s} />
         ) : (
-          <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-5">
             <PageHeader title="Email" />
             <Panel>
               <EmptyState title={`No email on ${stage}`}>
@@ -124,7 +127,7 @@ function EmailStage({ app, stage, stats: s }: { app: string; stage: string; stat
   const today = s.today;
   const paused = s.sending?.status === 'paused';
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <PageHeader
         title="Email"
         description={
@@ -136,11 +139,20 @@ function EmailStage({ app, stage, stats: s }: { app: string; stage: string; stat
         }
       />
       {s.sending && paused && <Paused app={app} stage={stage} sending={s.sending} />}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <Stats>
         <Stat
           label="Sending"
-          value={!s.sending ? '–' : paused ? 'Paused' : 'Enabled'}
-          tone={!s.sending ? undefined : paused ? 'bad' : 'ok'}
+          value={
+            s.sending ? (
+              <span className="flex items-center gap-2.5">
+                <StatusDot tone={paused ? 'bad' : 'ok'} className="size-2.5" />
+                {paused ? 'Paused' : 'Enabled'}
+              </span>
+            ) : (
+              '–'
+            )
+          }
+          tone={paused ? 'bad' : undefined}
           note={
             !s.sending
               ? 'not deployed yet'
@@ -176,7 +188,7 @@ function EmailStage({ app, stage, stats: s }: { app: string; stage: string; stat
           tone={rateTone(complaintRate, 0.001, 0.005)}
           note={`${count(complaints, 'complaint', 'complaints')}, review at 0.1%`}
         />
-      </div>
+      </Stats>
       <Panel title="Delivery" description="What SES did with this stage's mail">
         <PointsChart
           points={s.points}
@@ -199,7 +211,7 @@ function Paused({ app, stage, sending }: { app: string; stage: string; sending: 
   return (
     <div
       role="alert"
-      className="flex flex-wrap items-start gap-3 rounded-lg border border-bad-mark/40 bg-bad-mark/10 px-4 py-3 text-sm"
+      className="flex flex-wrap items-start gap-3 rounded-lg border border-bad-mark/30 bg-bad-mark/8 px-3.5 py-3 text-sm"
     >
       <CirclePause className="mt-0.5 size-4 shrink-0 text-bad" />
       <div className="min-w-0 flex-1 space-y-0.5">
@@ -247,7 +259,7 @@ function SuppressionList({ app, stage }: { app: string; stage: string }) {
   const more = loaded.at(-1)?.next !== undefined;
   const remove = useCallback(
     (address: string) =>
-      void report(
+      report(
         unsuppress({
           params: { app, address },
           query: { stage },
@@ -257,14 +269,17 @@ function SuppressionList({ app, stage }: { app: string; stage: string }) {
       ),
     [app, stage, unsuppress],
   );
-  const tableColumns = useMemo(() => suppressedColumns(removal.waiting, remove), [removal.waiting, remove]);
+  const tableColumns = useMemo(
+    () => suppressedColumns(stage, removal.waiting, remove),
+    [stage, removal.waiting, remove],
+  );
   return (
     <Panel
       flush
       title="Suppression list"
       description="Addresses SES no longer sends to from this stage, after a bounce or a complaint"
     >
-      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-4 mb-3" />}
+      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-5 mb-3" />}
       {AsyncResult.isInitial(result) ? (
         <Loading rows={3} />
       ) : (
@@ -276,7 +291,7 @@ function SuppressionList({ app, stage }: { app: string; stage: string }) {
         />
       )}
       {more && (
-        <div className="border-t px-4 py-2.5">
+        <div className="border-t px-5 py-2.5">
           <Button variant="outline" size="sm" onClick={() => loadMore()} disabled={result.waiting}>
             {result.waiting ? 'Loading…' : 'Load more'}
           </Button>
@@ -287,7 +302,7 @@ function SuppressionList({ app, stage }: { app: string; stage: string }) {
 }
 
 const suppressed = columns<SuppressedAddress>();
-function suppressedColumns(busy: boolean, remove: (address: string) => void) {
+function suppressedColumns(stage: string, busy: boolean, remove: (address: string) => Promise<boolean>) {
   return suppressed.columns([
     suppressed.accessor('address', { header: 'Address', cell: ({ getValue }) => <Mono>{getValue()}</Mono> }),
     suppressed.accessor('reason', {
@@ -306,11 +321,21 @@ function suppressedColumns(busy: boolean, remove: (address: string) => void) {
       id: 'actions',
       header: () => <span className="sr-only">Actions</span>,
       meta: { className: 'w-0 text-right' },
-      cell: ({ row }) => (
-        <Button variant="outline" size="xs" disabled={busy} onClick={() => remove(row.original.address)}>
-          Remove
-        </Button>
-      ),
+      cell: ({ row }) => {
+        const { address } = row.original;
+        return (
+          <ConfirmAction
+            trigger={<Button variant="outline" size="xs" aria-label={`Remove ${address}`} />}
+            disabled={busy}
+            title={`Remove ${address}?`}
+            description={`SES sends mail from ${stage} to this address again.`}
+            confirmLabel="Remove address"
+            onConfirm={() => remove(address)}
+          >
+            Remove
+          </ConfirmAction>
+        );
+      },
     }),
   ]);
 }

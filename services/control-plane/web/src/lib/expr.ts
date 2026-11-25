@@ -1,8 +1,8 @@
 /**
  * Expressions over explorer queries, e.g. `100 * a / b`: numbers, query ids,
  * `+ - * /`, unary minus and parentheses, evaluated per bucket. A small
- * recursive-descent parser: expressions come from URLs and saved queries,
- * so they're never handed to `eval`.
+ * recursive-descent parser: expressions come from URLs, so they're never
+ * handed to `eval`.
  */
 
 export type Expr =

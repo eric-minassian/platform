@@ -130,9 +130,6 @@ export const ObserveLive = HttpApiBuilder.group(
         Effect.gen(function* () {
           const app = (yield* access.memberApp(params.app)).app.name;
           const q = query.q;
-          // The path's app is the one the caller may read; a query naming another is a mistake.
-          if (q.app !== undefined && q.app !== app)
-            return yield* BadRequest.of(`the query reads app ${q.app}, not ${app}`);
           if (q.stage !== undefined && query.stage !== undefined && q.stage !== query.stage)
             return yield* BadRequest.of(`the query reads stage ${q.stage}, not ${query.stage}`);
           const stage = yield* stageParam(query.stage ?? q.stage);

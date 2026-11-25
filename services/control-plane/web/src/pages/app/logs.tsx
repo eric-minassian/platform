@@ -1,34 +1,37 @@
 /**
  * An app stage's logs. Search text, pick facets, read the volume by level
- * (drag across it to zoom), open a line for every field it carries; or tail
- * live, or switch to Logs Insights for anything filters can't express.
+ * (drag across it to zoom), open a line beside the list for every field it
+ * carries; or tail live, or switch to Logs Insights for anything filters
+ * can't express.
  */
 import { useAtomSet, useAtomValue } from '@effect/atom-react';
-import type { LogFilters, LogLine, LogsView, SavedQuery } from '@ericminassian/platform-core';
+import type { LogFilters, LogLine } from '@ericminassian/platform-core';
 import { QUERY_RESOLUTION_MS } from '@ericminassian/platform-core';
 import { useNavigate } from '@tanstack/react-router';
+import { createListboxController } from '@ui-sdk/react/listbox';
+import { useShortcut } from '@ui-sdk/react/shortcuts';
 import { Option } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
-import { LayoutGrid, Pause, Play, Radio, Search, X } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Pause, Play, Radio, Search, SearchX, X } from 'lucide-react';
+import { type ReactNode, type RefObject, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ApiClient, apiUrl, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
 import { TimeChart } from '../../components/charts/time-chart.tsx';
-import { AddToDashboardDialog } from '../../components/dashboards/add-to-dashboard.tsx';
 import { Facets } from '../../components/logs/facets.tsx';
 import { Insights, SAMPLE_QUERY } from '../../components/logs/insights.tsx';
 import { useLiveTail } from '../../components/logs/live-tail.ts';
-import { LogDrawer } from '../../components/logs/log-drawer.tsx';
-import { LEVEL_COLORS, LogTable } from '../../components/logs/log-table.tsx';
-import { EmptyState, ErrorNotice } from '../../components/page.tsx';
-import { SavedViews } from '../../components/saved-views.tsx';
-import { Segmented } from '../../components/segmented.tsx';
+import { LogDetail } from '../../components/logs/log-detail.tsx';
+import { LEVEL_COLORS, LogTable, lineKeys } from '../../components/logs/log-table.tsx';
+import { EmptyState, ErrorNotice, PageHeader } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '../../components/ui/input-group.tsx';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '../../components/ui/input.tsx';
+import { Kbd } from '../../components/ui/kbd.tsx';
+import { Segmented } from '../../components/ui/segmented.tsx';
 import { family } from '../../data/atoms.ts';
 import { fmtNum } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { apiTime, type TimeSearch } from '../../lib/time.ts';
+import { cn } from '../../lib/utils.ts';
 import { logsRoute } from '../../router.tsx';
 
 interface LogsKey {
@@ -89,6 +92,8 @@ const linesAtom = family((k: LogsKey) =>
 
 const LEVELS = ['error', 'warn', 'info', 'debug', 'system'] as const;
 
+type Mode = 'search' | 'live' | 'insights';
+
 export function LogsPage() {
   const { app } = logsRoute.useParams();
   const search = logsRoute.useSearch();
@@ -97,219 +102,137 @@ export function LogsPage() {
   const time = useTime();
   const { utc } = usePrefs();
   const filters = search.f ?? {};
-  const mode = search.insights !== undefined ? 'insights' : search.live ? 'live' : 'search';
-  const [draft, setDraft] = useState(search.q ?? '');
-  const [selected, setSelected] = useState<{ key: string; line: LogLine }>();
-  const [adding, setAdding] = useState(false);
-  const searchBox = useRef<HTMLInputElement>(null);
-
-  // `/` focuses the search box, as in most log viewers.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (e.key === '/' && !target?.closest('input, textarea, [contenteditable]')) {
-        e.preventDefault();
-        searchBox.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  const mode: Mode = search.insights !== undefined ? 'insights' : search.live ? 'live' : 'search';
 
   const setSearch = (patch: Record<string, unknown>, replace = false) =>
     void navigate({ search: (prev) => ({ ...prev, ...patch }), replace });
-  const setFilters = (f: LogFilters) => setSearch({ f: hasFilters(f) ? f : undefined, saved: undefined });
+  const setFilters = (f: LogFilters) => setSearch({ f: hasFilters(f) ? f : undefined });
 
-  const view: LogsView = {
-    kind: 'logs',
-    ...(search.q ? { q: search.q } : {}),
-    ...(hasFilters(filters) ? { filters } : {}),
-    ...(search.insights !== undefined ? { insights: search.insights } : {}),
-  };
-  const open = (q: SavedQuery) => {
-    if (q.view.kind !== 'logs') return;
-    setDraft(q.view.q ?? '');
-    setSearch({
-      q: q.view.q,
-      f: q.view.filters,
-      insights: q.view.insights,
-      live: undefined,
-      saved: q.id,
-      ...(q.range ? { range: q.range, from: undefined, to: undefined } : {}),
-    });
-  };
-
+  const scope = { app, stage, q: search.q, filters, utc };
   return (
-    <div className="flex h-[calc(100svh-6.5rem)] min-h-[32rem] flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {mode !== 'insights' && (
-          <form
-            className="min-w-64 flex-1"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setSearch({ q: draft.trim() || undefined, saved: undefined });
-            }}
-          >
-            <InputGroup className="h-8">
-              <InputGroupAddon>
-                <Search />
-              </InputGroupAddon>
-              <InputGroupInput
-                ref={searchBox}
-                aria-label="Search log lines"
-                placeholder="Search text or a filter pattern, e.g. { $.status >= 500 }"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                className="font-mono text-[12.5px]"
-              />
-              {search.q && (
-                <InputGroupAddon align="inline-end">
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label="Clear the search"
-                    onClick={() => {
-                      setDraft('');
-                      setSearch({ q: undefined });
-                    }}
-                  >
-                    <X />
-                  </Button>
-                </InputGroupAddon>
-              )}
-            </InputGroup>
-          </form>
-        )}
-        {mode === 'insights' && <div className="flex-1" />}
-        <Segmented
-          label="Mode"
-          value={mode}
-          onChange={(m) =>
-            setSearch({
-              insights: m === 'insights' ? (search.insights ?? SAMPLE_QUERY) : undefined,
-              live: m === 'live' ? true : undefined,
-            })
-          }
-          options={[
-            { value: 'search', label: 'Search' },
-            {
-              value: 'live',
-              label: (
-                <>
-                  <Radio className="size-3.5" /> Live
-                </>
-              ),
-            },
-            { value: 'insights', label: 'Insights' },
-          ]}
-        />
-        <Button variant="outline" size="sm" onClick={() => setAdding(true)}>
-          <LayoutGrid />
-          Add to dashboard
-        </Button>
-        <SavedViews
+    <>
+      <PageHeader
+        title="Logs"
+        actions={
+          <Segmented<Mode>
+            label="Mode"
+            value={mode}
+            onChange={(m) =>
+              setSearch({
+                insights: m === 'insights' ? (search.insights ?? SAMPLE_QUERY) : undefined,
+                live: m === 'live' ? true : undefined,
+              })
+            }
+            options={[
+              { value: 'search', label: 'Search' },
+              { value: 'live', label: 'Live' },
+              { value: 'insights', label: 'Insights' },
+            ]}
+          />
+        }
+      />
+      {mode === 'insights' ? (
+        <Insights
           app={app}
           stage={stage}
-          kind="logs"
-          view={view}
-          range={time.search.from === undefined ? (time.search.range ?? '24h') : undefined}
-          currentId={search.saved}
-          onOpen={open}
-          onSaved={(q) => setSearch({ saved: q.id }, true)}
+          time={time.search}
+          query={search.insights ?? SAMPLE_QUERY}
+          onQueryChange={(insights) => setSearch({ insights }, true)}
         />
-      </div>
-
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border bg-card">
-        {mode === 'insights' ? (
-          <Insights
-            app={app}
-            stage={stage}
-            time={time.search}
-            query={search.insights ?? SAMPLE_QUERY}
-            onQueryChange={(insights) => setSearch({ insights }, true)}
-          />
-        ) : (
-          <>
-            <aside className="hidden w-52 shrink-0 overflow-y-auto border-r lg:block" aria-label="Filters">
-              <FacetsPanel
-                app={app}
-                stage={stage}
-                time={time.search}
-                q={search.q}
-                filters={filters}
-                onChange={setFilters}
-              />
-            </aside>
-            <div className="flex min-w-0 flex-1 flex-col">
-              {mode === 'live' ? (
-                <Live
-                  app={app}
-                  stage={stage}
-                  q={search.q}
+      ) : (
+        <>
+          <SearchBox key={search.q ?? ''} q={search.q} onSearch={(q) => setSearch({ q })} />
+          {/* Fills the panel to its bottom edge (the shell's padding is for pages that scroll). A 0px
+              basis keeps the lines from sizing the page: they scroll inside instead. */}
+          <div className="flex min-h-[30rem] grow basis-0 gap-6">
+            <aside
+              aria-label="Filters"
+              className="relative hidden w-52 shrink-0 overflow-y-auto pb-4 lg:block"
+            >
+              {isPattern(search.q) ? (
+                <Facets
+                  stats={undefined}
                   filters={filters}
-                  utc={utc}
-                  selected={selected?.key}
-                  onSelect={(line, key) => setSelected({ line, key })}
+                  onChange={setFilters}
+                  note="No counts for a filter pattern."
                 />
               ) : (
-                <>
-                  <Volume app={app} stage={stage} time={time.search} q={search.q} filters={filters} />
-                  <History
-                    withDate={time.window.to - time.window.from > 86_400_000}
-                    app={app}
-                    stage={stage}
-                    time={time.search}
-                    q={search.q}
-                    filters={filters}
-                    utc={utc}
-                    selected={selected?.key}
-                    onSelect={(line, key) => setSelected({ line, key })}
-                  />
-                </>
+                <CountedFacets {...scope} time={time.search} onChange={setFilters} />
               )}
-            </div>
-            {selected && (
-              <LogDrawer
-                app={app}
-                stage={stage}
-                line={selected.line}
-                utc={utc}
-                onClose={() => setSelected(undefined)}
+            </aside>
+            {mode === 'live' ? (
+              <LiveView {...scope} onFilter={(patch) => setFilters({ ...filters, ...patch })} />
+            ) : (
+              <SearchView
+                {...scope}
+                time={time.search}
+                withDate={time.window.to - time.window.from > 86_400_000}
                 onFilter={(patch) => setFilters({ ...filters, ...patch })}
               />
             )}
-          </>
-        )}
-      </div>
-      <AddToDashboardDialog
-        open={adding}
-        onOpenChange={setAdding}
-        app={app}
-        stage={stage}
-        title={search.insights !== undefined ? 'Logs Insights' : search.q ? `Logs: ${search.q}` : 'Logs'}
-        view={view}
-      />
-    </div>
-  );
-}
-
-type StatsProps = {
-  app: string;
-  stage: string;
-  time: TimeSearch;
-  q: string | undefined;
-  filters: LogFilters;
-};
-
-function FacetsPanel(props: StatsProps & { onChange: (f: LogFilters) => void }) {
-  if (!isPattern(props.q)) return <CountedFacets {...props} />;
-  return (
-    <>
-      <p className="px-4 pt-3 text-xs text-muted-foreground">No facets for a filter pattern.</p>
-      <Facets stats={undefined} filters={props.filters} onChange={props.onChange} />
+          </div>
+        </>
+      )}
     </>
   );
 }
+
+function SearchBox({ q, onSearch }: { q: string | undefined; onSearch: (q: string | undefined) => void }) {
+  const [draft, setDraft] = useState(q ?? '');
+  const input = useRef<HTMLInputElement>(null);
+  // `/` focuses the search box, as in most log viewers.
+  useShortcut('/', () => input.current?.focus(), { description: 'Search log lines' });
+  return (
+    <search>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSearch(draft.trim() || undefined);
+        }}
+      >
+        <InputGroup>
+          <InputGroupAddon>
+            <Search />
+          </InputGroupAddon>
+          <InputGroupInput
+            ref={input}
+            aria-label="Search log lines"
+            aria-keyshortcuts="/"
+            placeholder="Search text or a filter pattern, e.g. { $.status >= 500 }"
+            value={draft}
+            onValueChange={setDraft}
+            className="font-mono text-[13px]"
+          />
+          {q ? (
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Clear the search"
+              onClick={() => {
+                setDraft('');
+                onSearch(undefined);
+              }}
+            >
+              <X />
+            </Button>
+          ) : (
+            !draft && <Kbd aria-hidden>/</Kbd>
+          )}
+        </InputGroup>
+      </form>
+    </search>
+  );
+}
+
+type Scope = {
+  app: string;
+  stage: string;
+  q: string | undefined;
+  filters: LogFilters;
+  utc: boolean;
+};
+
+type StatsProps = Scope & { time: TimeSearch };
 
 function CountedFacets({
   app,
@@ -325,12 +248,139 @@ function CountedFacets({
   return <Facets stats={stats} filters={filters} onChange={onChange} />;
 }
 
-function Volume(props: StatsProps) {
-  if (!isPattern(props.q)) return <CountedVolume {...props} />;
-  return <p className="border-b px-4 py-3 text-xs text-muted-foreground">{PATTERN_NOTE}</p>;
+/** Whether the list has room for the line panel beside it; otherwise the panel is a drawer. */
+function useRoomBeside(card: RefObject<HTMLElement | null>): boolean {
+  const [wide, setWide] = useState(true);
+  useLayoutEffect(() => {
+    const el = card.current;
+    if (!el) return undefined;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setWide(entry.contentRect.width >= 832);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [card]);
+  return wide;
 }
 
-function CountedVolume({ app, stage, time, q, filters }: StatsProps) {
+/** The list in its card, with whatever sits above it, and the open line beside it. */
+function Workspace({
+  app,
+  stage,
+  utc,
+  q,
+  lines,
+  top,
+  onFilter,
+  hasMore,
+  loadingMore,
+  onLoadMore,
+  withDate,
+  empty,
+}: Scope & {
+  lines: readonly LogLine[];
+  top: ReactNode;
+  onFilter: (patch: Partial<LogFilters>) => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
+  withDate: boolean;
+  empty: ReactNode;
+}) {
+  const [selected, setSelected] = useState<{ key: string; line: LogLine }>();
+  const [controller] = useState(() => createListboxController());
+  const card = useRef<HTMLElement>(null);
+  const beside = useRoomBeside(card);
+  const keys = useMemo(() => lineKeys(lines), [lines]);
+  const index = selected ? keys.indexOf(selected.key) : -1;
+  const step = (delta: -1 | 1) => {
+    const line = index < 0 ? undefined : lines[index + delta];
+    if (line) setSelected({ key: keys[index + delta]!, line });
+  };
+  return (
+    <section ref={card} className="flex min-w-0 flex-1 overflow-hidden rounded-xl border bg-card">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {top}
+        <LogTable
+          lines={lines}
+          keys={keys}
+          q={q}
+          utc={utc}
+          selected={selected?.key}
+          following={selected !== undefined}
+          onSelect={(line, key) => setSelected({ line, key })}
+          controller={controller}
+          {...(hasMore !== undefined ? { hasMore } : {})}
+          {...(loadingMore !== undefined ? { loadingMore } : {})}
+          {...(onLoadMore ? { onLoadMore } : {})}
+          withDate={withDate}
+          className="min-h-0 flex-1"
+          empty={empty}
+        />
+      </div>
+      {selected && (
+        <LogDetail
+          app={app}
+          stage={stage}
+          line={selected.line}
+          utc={utc}
+          inline={beside}
+          onStep={step}
+          onFilter={onFilter}
+          onClose={(refocus) => {
+            setSelected(undefined);
+            // Once the panel (or the drawer that made the page inert) is gone.
+            if (refocus)
+              requestAnimationFrame(() => {
+                controller.highlight(selected.key);
+                controller.focus();
+              });
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function SearchView(
+  props: StatsProps & { withDate: boolean; onFilter: (patch: Partial<LogFilters>) => void },
+) {
+  const { app, stage, time, q, filters } = props;
+  const atom = linesAtom({ app, stage, time, q, f: filters });
+  const result = useAtomValue(atom);
+  const loadMore = useAtomSet(atom);
+  const loaded = loadedPages(result);
+  const lines = useMemo(() => loaded.flatMap((p) => p.lines), [loaded]);
+  return (
+    <Workspace
+      {...props}
+      lines={lines}
+      top={
+        isPattern(q) ? (
+          <p className="border-b px-5 py-3 text-xs text-muted-foreground">{PATTERN_NOTE}</p>
+        ) : (
+          <Volume {...props} />
+        )
+      }
+      hasMore={loaded.at(-1)?.nextToken !== undefined}
+      loadingMore={result.waiting}
+      onLoadMore={() => loadMore()}
+      empty={
+        result._tag === 'Failure' ? (
+          <ErrorNotice error={result.cause} className="m-5" />
+        ) : AsyncResult.isInitial(result) || result.waiting ? (
+          <EmptyState title="Reading logs…" />
+        ) : (
+          <EmptyState icon={<SearchX />} title="No lines match">
+            Widen the time range or remove a filter.
+          </EmptyState>
+        )
+      }
+    />
+  );
+}
+
+function Volume({ app, stage, time, q, filters }: StatsProps) {
   const atom = statsAtom({ app, stage, time, q, f: filters });
   useAutoRefresh(atom, time.from === undefined);
   const result = useSticky(useAtomValue(atom));
@@ -349,106 +399,37 @@ function CountedVolume({ app, stage, time, q, filters }: StatsProps) {
   );
   const timestamps = useMemo(() => stats?.timestamps.map((t) => Date.parse(t)) ?? [], [stats]);
   return (
-    <div className="border-b px-4 pt-3 pb-1">
-      <div className="mb-1 flex items-center gap-3 text-xs text-muted-foreground">
-        <span>
-          <span className="text-sm font-medium text-foreground tabular">
-            {stats ? fmtNum(stats.total) : '–'}
-          </span>{' '}
+    <div className="shrink-0 border-b px-5 pt-3.5 pb-1">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <p className="text-[13px] text-muted-foreground">
+          <span className="font-semibold text-foreground tabular">{stats ? fmtNum(stats.total) : '–'}</span>{' '}
           lines
-        </span>
-        {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="py-1" />}
-        <ul className="ml-auto flex gap-3">
+        </p>
+        <ul className="ml-auto flex gap-3 text-xs text-muted-foreground" aria-label="Levels">
           {series.map((s) => (
             <li key={s.key} className="flex items-center gap-1.5">
-              <span aria-hidden className="size-2 rounded-[2px]" style={{ background: s.color }} />
+              <span aria-hidden className="size-2 rounded-full" style={{ background: s.color }} />
               {s.label}
             </li>
           ))}
         </ul>
       </div>
+      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mt-2" />}
       <TimeChart
         timestamps={timestamps}
         stepMs={stats ? QUERY_RESOLUTION_MS[stats.res] : 60_000}
         series={series}
         kind="bar"
         format={fmtNum}
-        height={110}
+        height={104}
         ariaLabel="Log lines over time by level"
       />
     </div>
   );
 }
 
-function History({
-  withDate,
-  app,
-  stage,
-  time,
-  q,
-  filters,
-  utc,
-  selected,
-  onSelect,
-}: {
-  withDate: boolean;
-  app: string;
-  stage: string;
-  time: TimeSearch;
-  q: string | undefined;
-  filters: LogFilters;
-  utc: boolean;
-  selected: string | undefined;
-  onSelect: (line: LogLine, key: string) => void;
-}) {
-  const atom = linesAtom({ app, stage, time, q, f: filters });
-  const result = useAtomValue(atom);
-  const loadMore = useAtomSet(atom);
-  const loaded = loadedPages(result);
-  const lines = useMemo(() => loaded.flatMap((p) => p.lines), [loaded]);
-  const hasMore = loaded.at(-1)?.nextToken !== undefined;
-  if (result._tag === 'Failure' && lines.length === 0)
-    return <ErrorNotice error={result.cause} className="m-4" />;
-  return (
-    <LogTable
-      lines={lines}
-      q={q}
-      utc={utc}
-      selected={selected}
-      onSelect={onSelect}
-      hasMore={hasMore}
-      loadingMore={result.waiting}
-      onLoadMore={() => loadMore()}
-      withDate={withDate}
-      className="min-h-0 flex-1"
-      empty={
-        AsyncResult.isInitial(result) || result.waiting ? (
-          <EmptyState title="Reading logs…" />
-        ) : (
-          <EmptyState title="No lines match">Widen the time range or remove a filter.</EmptyState>
-        )
-      }
-    />
-  );
-}
-
-function Live({
-  app,
-  stage,
-  q,
-  filters,
-  utc,
-  selected,
-  onSelect,
-}: {
-  app: string;
-  stage: string;
-  q: string | undefined;
-  filters: LogFilters;
-  utc: boolean;
-  selected: string | undefined;
-  onSelect: (line: LogLine, key: string) => void;
-}) {
+function LiveView(props: Scope & { onFilter: (patch: Partial<LogFilters>) => void }) {
+  const { app, stage, q, filters } = props;
   const [paused, setPaused] = useState(false);
   const url = apiUrl.observe.tail({
     params: { app },
@@ -456,35 +437,35 @@ function Live({
   });
   const tail = useLiveTail(url, paused);
   return (
-    <>
-      <div className="flex items-center gap-3 border-b px-4 py-2 text-xs text-muted-foreground">
-        <span className="flex items-center gap-2">
-          <span
-            className={
-              paused ? 'size-2 rounded-full bg-subtle' : 'size-2 animate-pulse rounded-full bg-ok-mark'
-            }
-            aria-hidden
-          />
-          {paused
-            ? `Paused · ${fmtNum(tail.waiting - tail.lines.length)} new lines waiting`
-            : 'Streaming new lines as they arrive'}
-        </span>
-        <Button variant="outline" size="xs" className="ml-auto" onClick={() => setPaused((p) => !p)}>
-          {paused ? <Play /> : <Pause />}
-          {paused ? 'Resume' : 'Pause'}
-        </Button>
-      </div>
-      {tail.error && <ErrorNotice error={tail.error} className="m-4" />}
-      <LogTable
-        lines={tail.lines}
-        withDate={false}
-        q={q}
-        utc={utc}
-        selected={selected}
-        onSelect={onSelect}
-        className="min-h-0 flex-1"
-        empty={<EmptyState title="Waiting for log lines…">A tail runs for up to 15 minutes.</EmptyState>}
-      />
-    </>
+    <Workspace
+      {...props}
+      lines={tail.lines}
+      withDate={false}
+      top={
+        <>
+          <div className="flex h-11 shrink-0 items-center gap-3 border-b px-5 text-[13px] text-muted-foreground">
+            <span className="flex items-center gap-2">
+              <span
+                aria-hidden
+                className={cn('size-2 rounded-full', paused ? 'bg-subtle' : 'animate-pulse bg-ok-mark')}
+              />
+              {paused
+                ? `Paused · ${fmtNum(tail.waiting - tail.lines.length)} new lines waiting`
+                : 'Streaming new lines as they arrive'}
+            </span>
+            <Button variant="outline" size="xs" className="ml-auto" onClick={() => setPaused((p) => !p)}>
+              {paused ? <Play /> : <Pause />}
+              {paused ? 'Resume' : 'Pause'}
+            </Button>
+          </div>
+          {tail.error && <ErrorNotice error={tail.error} className="m-4" />}
+        </>
+      }
+      empty={
+        <EmptyState icon={<Radio />} title="Waiting for log lines…">
+          A tail runs for up to 15 minutes.
+        </EmptyState>
+      }
+    />
   );
 }

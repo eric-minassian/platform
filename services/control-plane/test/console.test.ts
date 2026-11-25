@@ -10,7 +10,7 @@ import {
   zoomOut,
   zoomTo,
 } from '../web/src/lib/time.ts';
-import { layoutTrace } from '../web/src/lib/trace.ts';
+import { layoutTrace, type TraceSpan } from '../web/src/lib/trace.ts';
 import { resolveView, viewResolution } from '../web/src/lib/view.ts';
 
 describe('expressions', () => {
@@ -108,24 +108,60 @@ describe('trace layout', () => {
     { ...base, t: 'err', ts: 1099, source: 'http', name: 'TypeError', message: 'boom', fingerprint: 'f' },
   ];
 
+  const flat = (spans: readonly TraceSpan[]): TraceSpan[] =>
+    spans.flatMap((s) => [s, ...flat(s.children ?? [])]);
+
   it('nests each span under its caller, in start order', () => {
-    const { rows, total } = layoutTrace(events);
-    expect(rows.map((r) => [r.op, r.depth, r.start])).toEqual([
+    const { spans, root, total } = layoutTrace(events);
+    expect(flat(spans).map((s) => [s.op, s.depth, s.start])).toEqual([
       ['GET', 0, 0],
       ['db.get', 1, 10],
       ['fetch', 1, 30],
       ['db.query', 2, 70],
-      ['TypeError', 0, 99],
     ]);
-    expect(rows[0]).toMatchObject({ failed: true, label: '/x → 500' });
+    expect(root).toMatchObject({ value: 's1', failed: true, label: 'GET /x', status: '500' });
     expect(total).toBe(100);
   });
 
+  it('lists errors and logs with the span they happened in', () => {
+    const { lines } = layoutTrace([
+      ...events,
+      { ...base, t: 'log', ts: 1050, level: 'warn', msg: 'slow', parent: 's2' },
+    ]);
+    expect(lines.map((l) => [l.level, l.at, l.span, l.text])).toEqual([
+      ['warn', 50, 's2', 'slow'],
+      ['error', 99, 's1', 'TypeError: boom'],
+    ]);
+  });
+
+  it('places spans from their own request or job', () => {
+    const { spans } = layoutTrace([
+      { ...base, t: 'req', ts: 1100, method: 'POST', route: '/x', status: 202, dur: 100, span: 'r' },
+      { ...base, t: 'job', ts: 1500, kind: 'queue', name: 'q', status: 'ok', dur: 200, span: 'j' },
+      {
+        ...base,
+        t: 'span',
+        ts: 1450,
+        op: 'db.put',
+        dur: 50,
+        status: 'ok',
+        start: 100,
+        span: 'k',
+        parent: 'j',
+      },
+    ]);
+    expect(flat(spans).map((s) => [s.value, s.start])).toEqual([
+      ['r', 0],
+      ['j', 300],
+      ['k', 400],
+    ]);
+  });
+
   it('shows the calls a request made without keeping them', () => {
-    const { rows } = layoutTrace([
+    const { root } = layoutTrace([
       { ...base, t: 'req', ts: 50, method: 'GET', route: '/', status: 200, dur: 20, calls: 4, callMs: 12 },
     ]);
-    expect(rows[0]?.unrecorded).toEqual({ calls: 4, ms: 12 });
+    expect(root?.unrecorded).toEqual({ calls: 4, ms: 12 });
   });
 });
 

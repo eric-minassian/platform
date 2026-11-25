@@ -13,12 +13,13 @@ import {
   PageHeader,
   Panel,
   Stat,
+  Stats,
   StatusDot,
   StatusPill,
   statusTone,
   type Tone,
 } from '../components/page.tsx';
-import { InputGroup, InputGroupAddon, InputGroupInput } from '../components/ui/input-group.tsx';
+import { InputGroup, InputGroupAddon, InputGroupInput } from '../components/ui/input.tsx';
 import { appsAtom } from '../data/atoms.ts';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime } from '../format.ts';
 import { useAutoRefresh } from '../lib/hooks.ts';
@@ -50,7 +51,7 @@ const appColumns = col.columns([
             <Link
               to="/apps/$app"
               params={{ app: s.app.name }}
-              className="font-medium hover:underline"
+              className="rounded-sm font-medium outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
               onClick={(e) => e.stopPropagation()}
             >
               {s.app.name}
@@ -194,7 +195,7 @@ function AppsBody({
   const cost = apps.reduce((n, s) => n + (s.costMonthToDateUsd ?? 0), 0);
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <Stats>
         <Stat
           label="Apps"
           value={apps.length}
@@ -208,12 +209,12 @@ function AppsBody({
         />
         <Stat label="Requests" value={`${fmtNum(reqPerMin)}/min`} note="all prod stages, last hour" />
         <Stat label="Cost, month to date" value={fmtUsd(cost)} note="tagged to apps" />
-      </div>
+      </Stats>
       <Panel
         flush
         title={`${shown.length} ${shown.length === 1 ? 'app' : 'apps'}`}
         actions={
-          <InputGroup className="h-8 w-64">
+          <InputGroup className="w-64">
             <InputGroupAddon>
               <Search />
             </InputGroupAddon>
@@ -221,7 +222,7 @@ function AppsBody({
               aria-label="Filter apps"
               placeholder="Filter by name or repo"
               value={filter}
-              onChange={(e) => setFilter(e.target.value)}
+              onValueChange={setFilter}
             />
           </InputGroup>
         }

@@ -17,7 +17,6 @@ import {
   type CreateDeploymentRequest,
   type CreateDeploymentResponse,
   type CustomMetricsResponse,
-  type Dashboard,
   type DeadLetterActionResponse,
   type DeadLettersResponse,
   type DataCollections,
@@ -46,8 +45,6 @@ import {
   type RollbackRequest,
   type RollbackResponse,
   type RouteStats,
-  type SaveDashboardRequest,
-  type SavedQuery,
   type SecretInfo,
   type SeriesQuery,
   type SeriesResponse,
@@ -399,30 +396,6 @@ export class ApiClient {
     );
   }
 
-  // ------------------------------------------------------------- saved queries & dashboards
-  async listQueries(app: string): Promise<SavedQuery[]> {
-    return list(await this.request('GET', `/v1/apps/${enc(app)}/queries`), 'queries');
-  }
-  deleteQuery(app: string, id: string) {
-    return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/queries/${enc(id)}`);
-  }
-  /** Every dashboard the caller can see; with `app`, that app's and the cross-app ones. */
-  async listDashboards(app?: string): Promise<Dashboard[]> {
-    return list(await this.request('GET', '/v1/dashboards', { query: { app } }), 'dashboards');
-  }
-  getDashboard(id: string) {
-    return this.request<Dashboard>('GET', `/v1/dashboards/${enc(id)}`);
-  }
-  createDashboard(req: SaveDashboardRequest) {
-    return this.request<Dashboard>('POST', '/v1/dashboards', { body: req });
-  }
-  /** Replaces the dashboard. */
-  updateDashboard(id: string, req: SaveDashboardRequest) {
-    return this.request<Dashboard>('PUT', `/v1/dashboards/${enc(id)}`, { body: req });
-  }
-  deleteDashboard(id: string) {
-    return this.request<unknown>('DELETE', `/v1/dashboards/${enc(id)}`);
-  }
   services(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
     return this.request<ServicesResponse>('GET', `/v1/apps/${enc(app)}/services`, { query: q });
   }

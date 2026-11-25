@@ -6,9 +6,11 @@
  */
 import { LogFilters, MetricsView, SeriesQuery, TraceFilters } from '@ericminassian/platform-core';
 import {
+  createBrowserHistory,
   createRootRoute,
   createRoute,
   createRouter,
+  type RouterHistory,
   lazyRouteComponent,
   Outlet,
   retainSearchParams,
@@ -18,6 +20,7 @@ import { Shell } from './components/shell/shell.tsx';
 import { searchSchema } from './lib/search.ts';
 import { type TimeSearch, validateTimeSearch } from './lib/time.ts';
 import { NotFoundPage } from './pages/not-found.tsx';
+import { RouteError } from './pages/route-error.tsx';
 
 declare module '@tanstack/react-router' {
   interface Register {
@@ -28,6 +31,8 @@ declare module '@tanstack/react-router' {
     readonly time?: boolean;
     /** Its name in the top bar's breadcrumb. */
     readonly title?: string;
+    /** The page fills the panel's height and scrolls inside its own parts, like a log list. */
+    readonly fill?: boolean;
   }
 }
 
@@ -62,23 +67,6 @@ const appsRoute = createRoute({
   path: '/',
   staticData: { title: 'Apps' },
   component: page(() => import('./pages/apps.tsx'), 'AppsPage'),
-});
-
-const dashboardSearch = searchSchema({ edit: Schema.Boolean });
-
-const dashboardsRoute = createRoute({
-  getParentRoute: () => shellRoute,
-  path: '/dashboards',
-  staticData: { title: 'Dashboards' },
-  component: page(() => import('./pages/dashboards/list.tsx'), 'DashboardsPage'),
-});
-
-export const dashboardRoute = createRoute({
-  getParentRoute: () => shellRoute,
-  path: '/dashboards/$id',
-  staticData: { time: true, title: 'Dashboard' },
-  validateSearch: dashboardSearch,
-  component: page(() => import('./pages/dashboards/board.tsx'), 'DashboardPage'),
 });
 
 const platformRoute = createRoute({
@@ -121,13 +109,12 @@ export const overviewRoute = child(
 export const logsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: 'logs',
-  staticData: { title: 'Logs', time: true },
+  staticData: { title: 'Logs', time: true, fill: true },
   validateSearch: searchSchema({
     q: Schema.String,
     f: LogFilters,
     insights: Schema.String,
     live: Schema.Boolean,
-    saved: Schema.String,
   }),
   component: page(() => import('./pages/app/logs.tsx'), 'LogsPage'),
 });
@@ -136,7 +123,7 @@ export const tracesRoute = createRoute({
   getParentRoute: () => appRoute,
   path: 'traces',
   staticData: { title: 'Traces', time: true },
-  validateSearch: searchSchema({ f: TraceFilters, saved: Schema.String }),
+  validateSearch: searchSchema({ f: TraceFilters }),
   component: page(() => import('./pages/app/traces.tsx'), 'TracesPage'),
 });
 
@@ -151,7 +138,7 @@ export const metricsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: 'metrics',
   staticData: { title: 'Metrics', time: true },
-  validateSearch: searchSchema({ view: MetricsView, saved: Schema.String }),
+  validateSearch: searchSchema({ view: MetricsView }),
   component: page(() => import('./pages/app/metrics.tsx'), 'MetricsPage'),
 });
 
@@ -196,31 +183,20 @@ export const deploymentsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: 'deployments',
   staticData: { title: 'Deployments' },
-  // `deployment`: the one whose detail is open.
-  validateSearch: searchSchema({ deployment: Schema.String }),
   component: page(() => import('./pages/app/deployments.tsx'), 'DeploymentsPage'),
 });
 
-const appDashboardsRoute = child(
-  'dashboards',
-  'Dashboards',
-  page(() => import('./pages/dashboards/list.tsx'), 'AppDashboardsPage'),
-);
-
-export const appDashboardRoute = createRoute({
+export const deploymentRoute = createRoute({
   getParentRoute: () => appRoute,
-  path: 'dashboards/$id',
-  staticData: { title: 'Dashboard', time: true },
-  validateSearch: dashboardSearch,
-  component: page(() => import('./pages/dashboards/board.tsx'), 'AppDashboardPage'),
+  path: 'deployments/$deployment',
+  staticData: { title: 'Deployment' },
+  component: page(() => import('./pages/app/deployment.tsx'), 'DeploymentPage'),
 });
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
   shellRoute.addChildren([
     appsRoute,
-    dashboardsRoute,
-    dashboardRoute,
     platformRoute,
     appRoute.addChildren([
       overviewRoute,
@@ -230,8 +206,6 @@ const routeTree = rootRoute.addChildren([
       metricsRoute,
       errorsRoute,
       alertsRoute,
-      appDashboardsRoute,
-      appDashboardRoute,
       child(
         'jobs',
         'Jobs',
@@ -263,6 +237,7 @@ const routeTree = rootRoute.addChildren([
       databaseRoute,
       storageRoute,
       deploymentsRoute,
+      deploymentRoute,
       child(
         'secrets',
         'Secrets',
@@ -282,8 +257,18 @@ const routeTree = rootRoute.addChildren([
   ]),
 ]);
 
-export const router = createRouter({
-  routeTree,
-  defaultPreload: 'intent',
-  scrollRestoration: true,
-});
+/** The console's router, on the browser's history; tests pass a memory history. */
+export const createConsoleRouter = (history: RouterHistory = createBrowserHistory()) =>
+  createRouter({
+    routeTree,
+    history,
+    defaultPreload: 'intent',
+    defaultErrorComponent: RouteError,
+    scrollRestoration: true,
+    // Pages scroll inside the content panel, not the window.
+    scrollToTopSelectors: ['#main-panel'],
+  });
+
+export type ConsoleRouter = ReturnType<typeof createConsoleRouter>;
+
+export const router = createConsoleRouter();

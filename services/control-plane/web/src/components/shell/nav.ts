@@ -14,7 +14,6 @@ import {
   HardDrive,
   KeyRound,
   LayoutDashboard,
-  LayoutGrid,
   Layers,
   ListChecks,
   type LucideIcon,
@@ -33,7 +32,6 @@ export type AppPage =
   | '/apps/$app/metrics'
   | '/apps/$app/errors'
   | '/apps/$app/alerts'
-  | '/apps/$app/dashboards'
   | '/apps/$app/jobs'
   | '/apps/$app/services'
   | '/apps/$app/email'
@@ -59,7 +57,12 @@ export interface NavGroup {
 }
 
 export const APP_NAV: readonly NavGroup[] = [
-  { items: [{ page: '/apps/$app', label: 'Overview', icon: LayoutDashboard }] },
+  {
+    items: [
+      { page: '/apps/$app', label: 'Overview', icon: LayoutDashboard },
+      { page: '/apps/$app/deployments', label: 'Deployments', icon: Layers },
+    ],
+  },
   {
     label: 'Observe',
     items: [
@@ -68,7 +71,6 @@ export const APP_NAV: readonly NavGroup[] = [
       { page: '/apps/$app/metrics', label: 'Metrics', icon: ChartSpline },
       { page: '/apps/$app/errors', label: 'Errors', icon: TriangleAlert },
       { page: '/apps/$app/alerts', label: 'Alerts', icon: Bell },
-      { page: '/apps/$app/dashboards', label: 'Dashboards', icon: LayoutGrid },
     ],
   },
   {
@@ -98,10 +100,6 @@ export const APP_NAV: readonly NavGroup[] = [
     ],
   },
   {
-    label: 'Ship',
-    items: [{ page: '/apps/$app/deployments', label: 'Deployments', icon: Layers }],
-  },
-  {
     label: 'Configure',
     items: [
       { page: '/apps/$app/secrets', label: 'Secrets', icon: KeyRound },
@@ -113,3 +111,11 @@ export const APP_NAV: readonly NavGroup[] = [
 
 /** The page's URL path for an app. */
 export const appPath = (app: string, page: AppPage): string => page.replace('$app', encodeURIComponent(app));
+
+/** Whether a sidebar item is the current page: Overview only on its own path, the rest on any page under theirs. */
+export function isCurrent(path: string, app: string, page: AppPage): boolean {
+  const href = appPath(app, page);
+  return page === '/apps/$app'
+    ? path === href || path === `${href}/`
+    : path === href || path.startsWith(`${href}/`);
+}

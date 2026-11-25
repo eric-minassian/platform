@@ -3,8 +3,10 @@
  * their counts, as checkboxes that add filters.
  */
 import type { FacetCount, LogFilters, LogStatsResponse } from '@ericminassian/platform-core';
+import type { ReactNode } from 'react';
 import { fmtNum, shortId } from '../../format.ts';
 import { cn } from '../../lib/utils.ts';
+import { Button } from '../ui/button.tsx';
 import { Checkbox } from '../ui/checkbox.tsx';
 import { LEVEL_COLORS, streamLabel } from './log-table.tsx';
 
@@ -34,17 +36,84 @@ function label(key: FacetKey, value: string): string {
   return value;
 }
 
+function Option({
+  id,
+  checked,
+  onChange,
+  title,
+  children,
+  count,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: () => void;
+  title: string;
+  children: ReactNode;
+  count?: number;
+}) {
+  return (
+    <label
+      htmlFor={id}
+      className="-mx-1.5 flex h-7 cursor-default items-center gap-2 rounded-md px-1.5 text-[13px] hover:bg-muted"
+    >
+      <Checkbox
+        id={id}
+        checked={checked}
+        onCheckedChange={onChange}
+        aria-description={count === undefined ? undefined : `${fmtNum(count)} lines`}
+      />
+      <span className="flex min-w-0 flex-1 items-center gap-2" title={title}>
+        {children}
+      </span>
+      {count !== undefined && (
+        <span aria-hidden className="text-xs text-muted-foreground tabular">
+          {fmtNum(count)}
+        </span>
+      )}
+    </label>
+  );
+}
+
 export function Facets({
   stats,
   filters,
   onChange,
+  note,
 }: {
   stats: LogStatsResponse | undefined;
   filters: LogFilters;
   onChange: (filters: LogFilters) => void;
+  /** Said above the facets, e.g. why there are no counts. */
+  note?: string;
 }) {
+  const filtered = Object.values(filters).some((v) => (Array.isArray(v) ? v.length > 0 : !!v));
   return (
-    <div className="flex flex-col gap-5 px-4 py-3">
+    <div className="flex flex-col gap-5">
+      <header className="flex h-7 items-center justify-between">
+        <h2 className="text-sm font-semibold">Filters</h2>
+        {filtered && (
+          <Button variant="ghost" size="xs" onClick={() => onChange({})}>
+            Clear
+          </Button>
+        )}
+      </header>
+      {note && <p className="-mt-3 text-xs text-muted-foreground">{note}</p>}
+      {filters.trace && (
+        <fieldset className="min-w-0">
+          <legend className="mb-1 text-xs font-medium text-muted-foreground">Trace</legend>
+          <Option
+            id="facet-trace"
+            checked
+            title={filters.trace}
+            onChange={() => {
+              const { trace: _drop, ...rest } = filters;
+              onChange(rest);
+            }}
+          >
+            <span className="truncate font-mono text-[12px]">{filters.trace}</span>
+          </Option>
+        </fieldset>
+      )}
       {FACETS.map((facet) => {
         const counts: readonly FacetCount[] = stats?.facets[facet.stat] ?? [];
         const selected: readonly string[] = filters[facet.key] ?? [];
@@ -61,42 +130,29 @@ export function Facets({
         if (ordered.length === 0 && (facet.key !== 'levels' || !stats)) return null;
         return (
           <fieldset key={facet.key} className="min-w-0">
-            <legend className="mb-1.5 text-xs font-medium text-muted-foreground">{facet.title}</legend>
+            <legend className="mb-1 text-xs font-medium text-muted-foreground">{facet.title}</legend>
             {ordered.length === 0 && <p className="text-xs text-subtle">None in this range</p>}
-            {ordered.map((c) => {
-              const id = `facet-${facet.key}-${c.value}`;
-              const checked = selected.includes(c.value);
-              return (
-                <label
-                  key={c.value}
-                  htmlFor={id}
-                  className="flex h-7 cursor-pointer items-center gap-2 rounded-md px-1 text-sm hover:bg-accent/60"
-                >
-                  <Checkbox
-                    id={id}
-                    checked={checked}
-                    onCheckedChange={() => onChange(toggleFilter(filters, facet.key, c.value))}
-                  />
-                  {facet.key === 'levels' && (
-                    <span
-                      aria-hidden
-                      className="size-2 shrink-0 rounded-[2px]"
-                      style={{ background: LEVEL_COLORS[c.value] }}
-                    />
-                  )}
+            {ordered.map((c) => (
+              <Option
+                key={c.value}
+                id={`facet-${facet.key}-${c.value}`}
+                checked={selected.includes(c.value)}
+                onChange={() => onChange(toggleFilter(filters, facet.key, c.value))}
+                title={c.value}
+                {...(stats ? { count: c.count } : {})}
+              >
+                {facet.key === 'levels' && (
                   <span
-                    className={cn(
-                      'min-w-0 flex-1 truncate',
-                      facet.key !== 'levels' && 'font-mono text-[12px]',
-                    )}
-                    title={c.value}
-                  >
-                    {label(facet.key, c.value)}
-                  </span>
-                  <span className="text-xs text-muted-foreground tabular">{fmtNum(c.count)}</span>
-                </label>
-              );
-            })}
+                    aria-hidden
+                    className="size-2 shrink-0 rounded-full"
+                    style={{ background: LEVEL_COLORS[c.value] }}
+                  />
+                )}
+                <span className={cn('truncate', facet.key !== 'levels' && 'font-mono text-[12px]')}>
+                  {label(facet.key, c.value)}
+                </span>
+              </Option>
+            ))}
           </fieldset>
         );
       })}

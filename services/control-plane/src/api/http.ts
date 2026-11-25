@@ -12,12 +12,10 @@ import { Access } from './access.ts';
 import { AdminLive } from './admin.ts';
 import { AlertsLive } from './alerts.ts';
 import { AppsLive } from './apps.ts';
-import { DashboardsLive } from './dashboards.ts';
 import { DeploymentsLive, StagesLive } from './deployments.ts';
 import { RequestValidationLive, RouterErrorsLive } from './errors.ts';
 import { ManageLive } from './manage.ts';
 import { ObserveLive } from './observe.ts';
-import { QueriesLive } from './queries.ts';
 import { ConsoleSignInLive, SessionLive } from './session.ts';
 
 export const HttpLive = Layer.mergeAll(
@@ -31,8 +29,6 @@ export const HttpLive = Layer.mergeAll(
     StagesLive,
     DeploymentsLive,
     ObserveLive,
-    QueriesLive,
-    DashboardsLive,
     AlertsLive,
     ManageLive,
     AdminLive,

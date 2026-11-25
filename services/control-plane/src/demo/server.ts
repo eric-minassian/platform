@@ -2,10 +2,10 @@
  * A demo of the control plane API for working on the console without AWS:
  * `pnpm web:demo` serves `PlatformApi` on http://127.0.0.1:8787 with the
  * sample apps and telemetry of `data.ts`, signed in as an admin, and the
- * console's dev server (`pnpm web:dev`) proxies to it. Saved queries,
- * dashboards and alert rules are kept in memory; other writes answer as the
- * real API would without changing anything. Also what `pnpm web:shots`
- * photographs, so screenshots never show real data.
+ * console's dev server (`pnpm web:dev`) proxies to it. Alert rules are kept
+ * in memory; other writes answer as the real API would without changing
+ * anything. Also what `pnpm web:shots` photographs, so screenshots never show
+ * real data.
  */
 import { toFetchHandler } from '@ericminassian/platform';
 import {
@@ -15,14 +15,11 @@ import {
   BINDINGS_ENV,
   type Bindings,
   checkSeriesQuery,
-  type Dashboard,
-  type DashboardWidget,
   names,
   newId,
   QUERY_RESOLUTION_MS,
   type QueryResolution,
   RESOLUTION_TTL_DAYS,
-  type SavedQuery,
   autoQueryResolution,
 } from '@ericminassian/platform-core';
 import {
@@ -93,140 +90,8 @@ const storedRes = (w: Window): '1m' | '1h' | '1d' =>
   w.to - w.from <= 6 * HOUR ? '1m' : w.to - w.from <= 14 * DAY ? '1h' : '1d';
 
 // ---------------------------------------------------------------------------
-// In-memory state: saved queries, dashboards, alert rules, triage
+// In-memory state: alert rules, triage
 // ---------------------------------------------------------------------------
-
-const savedQueries = new Map<string, SavedQuery>([
-  [
-    'q_p95_routes',
-    {
-      id: 'q_p95_routes',
-      app: 'atlas',
-      name: 'p95 latency by route',
-      view: {
-        kind: 'metrics',
-        queries: [{ id: 'a', metric: 'latency', stat: 'p95', groupBy: 'route' }],
-        chart: 'line',
-        scale: 'log',
-      },
-      range: '7d',
-      createdBy: 'demo',
-      createdAt: iso(T0 - 3 * DAY),
-      updatedAt: iso(T0 - 3 * DAY),
-    },
-  ],
-  [
-    'q_refresh_errors',
-    {
-      id: 'q_refresh_errors',
-      app: 'atlas',
-      name: 'Refresh errors',
-      view: { kind: 'logs', filters: { levels: ['error', 'warn'], streams: ['worker'] } },
-      createdBy: 'demo',
-      createdAt: iso(T0 - 2 * DAY),
-      updatedAt: iso(T0 - 2 * DAY),
-    },
-  ],
-]);
-
-const widget = (
-  id: string,
-  title: string,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  view: DashboardWidget['view'],
-  app?: string,
-): DashboardWidget => ({
-  id,
-  title,
-  x,
-  y,
-  w,
-  h,
-  view,
-  ...(app ? { app } : {}),
-});
-
-const dashboards = new Map<string, Dashboard>([
-  [
-    'd_atlas',
-    {
-      id: 'd_atlas',
-      name: 'Search and refresh',
-      app: 'atlas',
-      range: '24h',
-      widgets: [
-        widget('w1', 'Requests by status', 0, 0, 8, 8, {
-          kind: 'metrics',
-          queries: [{ id: 'a', metric: 'requests', stat: 'count', groupBy: 'status' }],
-          chart: 'bar',
-        }),
-        widget('w2', 'Health', 8, 0, 4, 8, {
-          kind: 'metrics',
-          queries: [
-            { id: 'a', metric: 'requests', stat: 'count', label: 'Requests' },
-            { id: 'b', metric: 'requests', stat: 'percent', filter: { status: ['5xx'] }, label: '5xx %' },
-            { id: 'c', metric: 'latency', stat: 'p95', label: 'p95' },
-            { id: 'd', metric: 'jobs', stat: 'count', filter: { outcome: 'error' }, label: 'Failed jobs' },
-          ],
-          chart: 'number',
-        }),
-        widget('w3', 'p95 by route', 0, 8, 6, 8, {
-          kind: 'metrics',
-          queries: [{ id: 'a', metric: 'latency', stat: 'p95', groupBy: 'route' }],
-          chart: 'line',
-          scale: 'log',
-        }),
-        widget('w4', 'Latency distribution', 6, 8, 6, 8, {
-          kind: 'metrics',
-          queries: [{ id: 'a', metric: 'latency', stat: 'histogram' }],
-          chart: 'heatmap',
-        }),
-        widget('w5', 'Job runs', 0, 16, 4, 8, {
-          kind: 'metrics',
-          queries: [{ id: 'a', metric: 'jobs', stat: 'count', groupBy: 'outcome' }],
-          chart: 'bar',
-        }),
-        widget('w6', 'items_indexed', 4, 16, 4, 8, {
-          kind: 'metrics',
-          queries: [{ id: 'a', metric: 'custom', stat: 'sum', filter: { names: ['items_indexed'] } }],
-          chart: 'bar',
-        }),
-        widget('w7', 'Errors', 8, 16, 4, 8, { kind: 'logs', filters: { levels: ['error'] } }),
-      ],
-      createdBy: 'demo',
-      createdAt: iso(T0 - 5 * DAY),
-      updatedAt: iso(T0 - DAY),
-      updatedBy: 'demo',
-    },
-  ],
-  [
-    'd_traffic',
-    {
-      id: 'd_traffic',
-      name: 'Traffic across apps',
-      range: '7d',
-      widgets: APPS.slice(0, 3).map((a, i) =>
-        widget(
-          `t${i}`,
-          `${a.record.name} requests`,
-          (i % 2) * 6,
-          Math.floor(i / 2) * 8,
-          6,
-          8,
-          { kind: 'metrics', queries: [{ id: 'a', metric: 'requests', stat: 'count' }], chart: 'area' },
-          a.record.name,
-        ),
-      ),
-      createdBy: 'demo',
-      createdAt: iso(T0 - 9 * DAY),
-      updatedAt: iso(T0 - 9 * DAY),
-      updatedBy: 'demo',
-    },
-  ],
-]);
 
 const rule = (
   id: string,
@@ -1135,69 +1000,6 @@ const ObserveDemo = HttpApiBuilder.group(PlatformApi, 'observe', (h) =>
   ),
 );
 
-const QueriesDemo = HttpApiBuilder.group(PlatformApi, 'queries', (h) =>
-  Effect.succeed(
-    h.handleAll({
-      list: ({ params }) => Effect.succeed([...savedQueries.values()].filter((q) => q.app === params.app)),
-      create: ({ params, payload }) =>
-        Effect.sync(() => {
-          const q: SavedQuery = {
-            id: newId('q'),
-            app: params.app,
-            ...payload,
-            createdBy: 'demo',
-            createdAt: iso(Date.now()),
-            updatedAt: iso(Date.now()),
-          };
-          savedQueries.set(q.id, q);
-          return q;
-        }),
-      update: ({ params, payload }) => {
-        const prev = savedQueries.get(params.id);
-        if (!prev || prev.app !== params.app) return Effect.fail(NotFound.of('saved query'));
-        const next: SavedQuery = { ...prev, ...payload, updatedAt: iso(Date.now()) };
-        savedQueries.set(next.id, next);
-        return Effect.succeed(next);
-      },
-      remove: ({ params }) => Effect.sync(() => void savedQueries.delete(params.id)),
-    }),
-  ),
-);
-
-const DashboardsDemo = HttpApiBuilder.group(PlatformApi, 'dashboards', (h) =>
-  Effect.succeed(
-    h.handleAll({
-      list: ({ query }) =>
-        Effect.succeed([...dashboards.values()].filter((d) => !query.app || !d.app || d.app === query.app)),
-      create: ({ payload }) =>
-        Effect.sync(() => {
-          const d: Dashboard = {
-            id: newId('d'),
-            ...payload,
-            createdBy: 'demo',
-            createdAt: iso(Date.now()),
-            updatedAt: iso(Date.now()),
-            updatedBy: 'demo',
-          };
-          dashboards.set(d.id, d);
-          return d;
-        }),
-      get: ({ params }) => {
-        const d = dashboards.get(params.id);
-        return d ? Effect.succeed(d) : Effect.fail(NotFound.of('dashboard'));
-      },
-      update: ({ params, payload }) => {
-        const prev = dashboards.get(params.id);
-        if (!prev) return Effect.fail(NotFound.of('dashboard'));
-        const next: Dashboard = { ...prev, ...payload, updatedAt: iso(Date.now()), updatedBy: 'demo' };
-        dashboards.set(next.id, next);
-        return Effect.succeed(next);
-      },
-      remove: ({ params }) => Effect.sync(() => void dashboards.delete(params.id)),
-    }),
-  ),
-);
-
 const AlertsDemo = HttpApiBuilder.group(PlatformApi, 'alerts', (h) =>
   Effect.succeed(
     h.handleAll({
@@ -1420,8 +1222,6 @@ export const DemoLive = Layer.mergeAll(HttpApiBuilder.layer(PlatformApi), Router
     StagesDemo,
     DeploymentsDemo,
     ObserveDemo,
-    QueriesDemo,
-    DashboardsDemo,
     AlertsDemo,
     ManageDemo,
     AdminDemo,

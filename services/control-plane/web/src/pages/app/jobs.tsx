@@ -17,24 +17,36 @@ import type {
 import { Option } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
 import { Play, RotateCcw, Trash2 } from 'lucide-react';
-import { type MouseEvent, type ReactElement, useCallback, useMemo, useRef, useState } from 'react';
+import { type MouseEvent, type ReactElement, useCallback, useMemo, useState } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { ConfirmAction } from '../../components/actions/confirm-action.tsx';
 import { report } from '../../components/actions/report.ts';
 import { Sparkline } from '../../components/charts/sparkline.tsx';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
-import { EmptyState, Loaded, Mono, PageHeader, Panel, Stat } from '../../components/page.tsx';
+import {
+  EmptyState,
+  Fact,
+  Facts,
+  Loaded,
+  Mono,
+  PageHeader,
+  Panel,
+  Stat,
+  Stats,
+} from '../../components/page.tsx';
 import { Badge } from '../../components/ui/badge.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '../../components/ui/sheet.tsx';
+  Drawer,
+  DrawerBody,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from '../../components/ui/drawer.tsx';
+import { confirm } from '../../components/ui/overlays.tsx';
 import { family, seriesAtom } from '../../data/atoms.ts';
 import { fmtDateTime, fmtMs, fmtNum, fmtPct, relTime } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
@@ -174,7 +186,7 @@ function Figures({
   const runs = ok === undefined || failed === undefined ? undefined : ok + failed;
   const scheduled = queues?.reduce((n, q) => n + q.scheduled, 0);
   return (
-    <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <Stats>
       <Stat label="Runs" value={fmtNum(runs)} note={jobs ? plural(jobs.jobs.length, 'job') : undefined} />
       <Stat
         label="Failed"
@@ -189,7 +201,7 @@ function Figures({
         tone={letters?.total ? 'bad' : undefined}
         note="jobs that failed every attempt"
       />
-    </div>
+    </Stats>
   );
 }
 
@@ -353,10 +365,10 @@ function Crons({
               {d.crons.map((c) => {
                 const last = d.jobs.find((j) => j.kind === 'cron' && j.name === c.name)?.lastRun;
                 return (
-                  <li key={c.name} className="flex items-center gap-3 border-b px-4 py-2.5 last:border-0">
+                  <li key={c.name} className="flex items-center gap-3 border-b px-5 py-3 last:border-0">
                     <div className="min-w-0 flex-1">
                       <Mono>{c.name}</Mono>
-                      <div className="text-xs text-muted-foreground">
+                      <div className="mt-0.5 text-xs text-muted-foreground">
                         <Mono className="text-xs">{c.schedule}</Mono>
                         {' · '}
                         {last ? `last ran ${relTime(last)}` : 'no runs yet'}
@@ -365,6 +377,7 @@ function Crons({
                     <Button
                       variant="outline"
                       size="sm"
+                      aria-label={`Run ${c.name} now`}
                       disabled={run.waiting}
                       onClick={() =>
                         void report(
@@ -391,7 +404,7 @@ function Crons({
  * Jobs that failed every attempt, from the stage's dead-letter queue. Redrive
  * runs them again from their first attempt, on the function their handler
  * runs in now; a message the platform didn't write (`unknown`) can only be
- * discarded. Discarding all of them asks first.
+ * discarded. Redriving or discarding all of them, or discarding one, asks first.
  */
 function DeadLetters({ app, stage }: { app: string; stage: string }) {
   const letters = useAtomValue(deadLettersAtom({ app, stage }));
@@ -428,10 +441,18 @@ function DeadLetters({ app, stage }: { app: string; stage: string }) {
       actions={
         total > 0 && (
           <>
-            <Button variant="outline" size="sm" disabled={busy} onClick={() => void act('redrive')}>
+            <ConfirmAction
+              trigger={<Button variant="outline" size="sm" />}
+              destructive={false}
+              disabled={busy}
+              title={`Redrive ${plural(total, 'dead letter')}?`}
+              description="Each runs again from its first attempt, on the function its handler runs in now. Messages the platform didn't write stay in the queue."
+              confirmLabel={`Redrive ${fmtNum(total)}`}
+              onConfirm={() => act('redrive')}
+            >
               <RotateCcw />
               Redrive all
-            </Button>
+            </ConfirmAction>
             <ConfirmAction
               trigger={<Button variant="ghost" size="sm" />}
               disabled={busy}
@@ -446,49 +467,57 @@ function DeadLetters({ app, stage }: { app: string; stage: string }) {
           </>
         )
       }
+      footer={
+        data && data.total > data.items.length
+          ? `${fmtNum(data.items.length)} of about ${fmtNum(data.total)} shown.`
+          : undefined
+      }
     >
       <Loaded result={letters} loading={<div className="h-24" />}>
         {(d) => (
-          <>
-            <DataTable
-              columns={columnsOf}
-              data={d.items}
-              getRowId={(l) => l.id}
-              onRowClick={(l) => setOpen(l.id)}
-              isSelected={(l) => l.id === open}
-              empty={
-                <EmptyState title="No dead letters">
-                  Every job that ran either succeeded or will retry.
-                </EmptyState>
-              }
-            />
-            {d.total > d.items.length && (
-              <p className="border-t px-4 pt-2.5 pb-1.5 text-xs text-muted-foreground">
-                {fmtNum(d.items.length)} of about {fmtNum(d.total)} shown.
-              </p>
-            )}
-          </>
+          <DataTable
+            columns={columnsOf}
+            data={d.items}
+            getRowId={(l) => l.id}
+            onRowClick={(l) => setOpen(l.id)}
+            isSelected={(l) => l.id === open}
+            empty={
+              <EmptyState title="No dead letters">
+                Every job that ran either succeeded or will retry.
+              </EmptyState>
+            }
+          />
         )}
       </Loaded>
-      <DeadLetterSheet
+      <DeadLetterDrawer
         letter={selected}
         busy={busy}
         onOpenChange={(o) => !o && setOpen(undefined)}
         onAct={async (which, id) => {
-          if (await act(which, [id])) setOpen(undefined);
+          const done = await act(which, [id]);
+          if (done) setOpen(undefined);
+          return done;
         }}
       />
     </Panel>
   );
 }
 
-const letter = columns<DeadLetterItem>();
+const discardOne = (l: DeadLetterItem) =>
+  confirm({
+    title: l.kind === 'unknown' ? 'Discard this message?' : `Discard this ${l.name} dead letter?`,
+    description: "It's deleted from the dead-letter queue and won't run again.",
+    confirmLabel: 'Discard',
+    destructive: true,
+  });
+
+const letterColumn = columns<DeadLetterItem>();
 function letterColumns(
   busy: boolean,
   act: (which: 'redrive' | 'discard', ids: readonly string[]) => Promise<boolean>,
 ) {
-  return letter.columns([
-    letter.accessor((l) => `${l.kind}:${l.name}`, {
+  return letterColumn.columns([
+    letterColumn.accessor((l) => `${l.kind}:${l.name}`, {
       id: 'job',
       header: 'Job',
       cell: ({ row }) => (
@@ -498,7 +527,7 @@ function letterColumns(
         </div>
       ),
     }),
-    letter.accessor((l) => l.error.name, {
+    letterColumn.accessor((l) => l.error.name, {
       id: 'error',
       header: 'Error',
       meta: { className: 'max-w-[32rem]' },
@@ -514,13 +543,13 @@ function letterColumns(
         );
       },
     }),
-    letter.accessor((l) => l.attempts ?? -1, {
+    letterColumn.accessor((l) => l.attempts ?? -1, {
       id: 'attempts',
       header: 'Attempts',
       meta: { numeric: true },
       cell: ({ row }) => row.original.attempts ?? '–',
     }),
-    letter.accessor((l) => l.failedAt ?? '', {
+    letterColumn.accessor((l) => l.failedAt ?? '', {
       id: 'failedAt',
       header: 'Failed',
       meta: { numeric: true },
@@ -533,25 +562,43 @@ function letterColumns(
         </span>
       ),
     }),
-    letter.display({
+    letterColumn.display({
       id: 'actions',
       header: () => <span className="sr-only">Actions</span>,
       meta: { className: 'w-0 whitespace-nowrap text-right' },
       cell: ({ row }) => {
         const l = row.original;
-        // A row click opens the letter; its buttons act on it instead.
-        const onClick = (which: 'redrive' | 'discard') => (e: MouseEvent) => {
+        const label = l.kind === 'unknown' ? 'message' : l.name;
+        // A row click opens the letter; its buttons act on it instead. Discard asks
+        // in the shared dialog, outside the row, so its clicks never reach the row.
+        const onRedrive = (e: MouseEvent) => {
           e.stopPropagation();
-          void act(which, [l.id]);
+          void act('redrive', [l.id]);
+        };
+        const onDiscard = (e: MouseEvent) => {
+          e.stopPropagation();
+          void discardOne(l).then((yes) => (yes ? act('discard', [l.id]) : false));
         };
         return (
           <div className="flex justify-end gap-1">
             {l.kind !== 'unknown' && (
-              <Button variant="outline" size="xs" disabled={busy} onClick={onClick('redrive')}>
+              <Button
+                variant="outline"
+                size="xs"
+                aria-label={`Redrive ${label}`}
+                disabled={busy}
+                onClick={onRedrive}
+              >
                 Redrive
               </Button>
             )}
-            <Button variant="ghost" size="xs" disabled={busy} onClick={onClick('discard')}>
+            <Button
+              variant="ghost"
+              size="xs"
+              aria-label={`Discard ${label}`}
+              disabled={busy}
+              onClick={onDiscard}
+            >
               Discard
             </Button>
           </div>
@@ -569,8 +616,8 @@ const SOURCE: Record<DeadLetterItem['source'], string> = {
   unknown: 'unknown',
 };
 
-function DeadLetterSheet({
-  letter: l,
+function DeadLetterDrawer({
+  letter,
   busy,
   onOpenChange,
   onAct,
@@ -578,68 +625,73 @@ function DeadLetterSheet({
   letter: DeadLetterItem | undefined;
   busy: boolean;
   onOpenChange: (open: boolean) => void;
-  onAct: (which: 'redrive' | 'discard', id: string) => Promise<void>;
+  onAct: (which: 'redrive' | 'discard', id: string) => Promise<boolean>;
 }) {
-  // Focus lands on what's read, not on Discard, so Enter can't throw a letter away.
-  const body = useRef<HTMLDivElement>(null);
+  // The letter stays on screen while the drawer slides out.
+  const [kept, setKept] = useState(letter);
+  if (letter && letter !== kept) setKept(letter);
+  const l = letter ?? kept;
   return (
-    <Sheet open={l !== undefined} onOpenChange={onOpenChange}>
-      <SheetContent initialFocus={body} className="w-full gap-0 data-[side=right]:sm:max-w-xl">
+    <Drawer open={letter !== undefined} onOpenChange={onOpenChange}>
+      {/* Focus lands on what's read, not on Discard, so Enter can't throw a letter away. */}
+      <DrawerContent width="36rem" initialFocus="content">
         {l && (
           <>
-            <SheetHeader className="border-b">
-              <SheetTitle className="flex items-center gap-2">
+            <DrawerHeader>
+              <DrawerTitle>
                 <KindBadge kind={l.kind} />
                 {l.kind === 'unknown' ? 'Unknown message' : <Mono className="text-base">{l.name}</Mono>}
-              </SheetTitle>
-              <SheetDescription>
+              </DrawerTitle>
+              <DrawerDescription>
                 Failed{' '}
                 {l.failedAt ? `${relTime(l.failedAt)}, ${fmtDateTime(l.failedAt)}` : 'at an unknown time'}
-              </SheetDescription>
-            </SheetHeader>
-            <div
-              ref={body}
-              tabIndex={-1}
-              className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4 outline-none"
-            >
-              <div className="rounded-md border border-bad-mark/40 bg-bad-mark/10 px-3 py-2 text-sm">
+              </DrawerDescription>
+            </DrawerHeader>
+            <DrawerBody className="flex flex-col gap-5">
+              <div className="rounded-lg border border-bad-mark/30 bg-bad-mark/8 px-3.5 py-2.5">
                 <div className="font-medium text-bad">{l.error.name}</div>
                 <div className="mt-0.5 break-words whitespace-pre-wrap">{l.error.message}</div>
               </div>
-              <dl className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2 text-sm">
-                <dt className="text-muted-foreground">Attempts</dt>
-                <dd className="tabular">{l.attempts ?? 'unknown'}</dd>
-                <dt className="text-muted-foreground">Given up by</dt>
-                <dd>{SOURCE[l.source]}</dd>
-                <dt className="text-muted-foreground">Message</dt>
-                <dd>
+              <Facts>
+                <Fact label="Attempts">
+                  <span className="tabular">{l.attempts ?? 'unknown'}</span>
+                </Fact>
+                <Fact label="Given up by">{SOURCE[l.source]}</Fact>
+                <Fact label="Message">
                   <Mono className="break-all">{l.id}</Mono>
-                </dd>
-              </dl>
-              <div>
-                <h3 className="mb-1.5 text-xs font-medium text-muted-foreground">
+                </Fact>
+              </Facts>
+              <section>
+                <h3 className="mb-2 text-[13px] font-medium text-muted-foreground">
                   Payload, cut to a few hundred characters
                 </h3>
-                <pre className="overflow-x-auto rounded-md border bg-background p-3 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
+                <pre className="overflow-x-auto rounded-lg bg-muted p-3.5 font-mono text-xs leading-relaxed break-all whitespace-pre-wrap">
                   {prettyJson(l.preview) || '–'}
                 </pre>
-              </div>
-            </div>
-            <SheetFooter className="flex-row justify-end border-t">
-              <Button variant="ghost" disabled={busy} onClick={() => void onAct('discard', l.id)}>
+              </section>
+            </DrawerBody>
+            <DrawerFooter>
+              <ConfirmAction
+                trigger={<Button variant="ghost" />}
+                disabled={busy}
+                title={l.kind === 'unknown' ? 'Discard this message?' : `Discard this ${l.name} dead letter?`}
+                description="It's deleted from the dead-letter queue and won't run again."
+                confirmLabel="Discard"
+                onConfirm={() => onAct('discard', l.id)}
+              >
                 Discard
-              </Button>
+              </ConfirmAction>
               {l.kind !== 'unknown' && (
                 <Button disabled={busy} onClick={() => void onAct('redrive', l.id)}>
                   <RotateCcw />
                   Redrive
                 </Button>
               )}
-            </SheetFooter>
+            </DrawerFooter>
           </>
         )}
-      </SheetContent>
-    </Sheet>
+      </DrawerContent>
+    </Drawer>
   );
 }
 

@@ -1,20 +1,21 @@
 /**
  * An app's record: its description, the repository CI may deploy it from,
- * and the members who own it. Deleting the app removes only that record,
- * and only once no stage is left; it asks for the app's name first.
+ * and the members who own it, each saved on its own. Deleting the app
+ * removes only that record, and only once no stage is left; it asks for the
+ * app's name first.
  */
 import { useAtom } from '@effect/atom-react';
-import { type AppSummary, REPO_PATTERN } from '@ericminassian/platform-core';
+import { type AppSummary, REPO_PATTERN, type UpdateAppRequest } from '@ericminassian/platform-core';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Option } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
-import { type ReactElement, useState } from 'react';
+import { type ReactElement, type ReactNode, useState } from 'react';
 import { ApiClient } from '../../client.ts';
 import { ConfirmAction } from '../../components/actions/confirm-action.tsx';
 import { report } from '../../components/actions/report.ts';
 import { Loading, Mono, PageHeader, Panel } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '../../components/ui/field.tsx';
+import { Field, FieldDescription, FieldError, FieldLabel } from '../../components/ui/field.tsx';
 import { Input } from '../../components/ui/input.tsx';
 import { appChanged, appsChanged } from '../../data/atoms.ts';
 import { useAppSummary } from '../../data/hooks.ts';
@@ -42,9 +43,11 @@ export function SettingsPage(): ReactElement {
         description={`The record of ${app}: what it is, where it deploys from, who owns it.`}
       />
       {summary ? (
-        <div className="flex max-w-3xl flex-col gap-4">
-          {/* Keyed by app: the form starts from the record once, not on every refetch. */}
-          <AppForm key={app} summary={summary} />
+        // Keyed by app: each form starts from the record once, not on every refetch.
+        <div key={app} className="flex max-w-3xl flex-col gap-5">
+          <DescriptionForm summary={summary} />
+          <RepositoryForm summary={summary} />
+          <OwnersForm summary={summary} />
           <DangerZone summary={summary} />
         </div>
       ) : (
@@ -54,107 +57,182 @@ export function SettingsPage(): ReactElement {
   );
 }
 
-function AppForm({ summary }: { summary: AppSummary }) {
-  const record = summary.app;
-  const app = record.name;
+/** Saves one change to the app's record; resolves whether it saved. */
+function useUpdate(app: string) {
   const [save, updateApp] = useAtom(updateAppAtom, { mode: 'promiseExit' });
-  const [description, setDescription] = useState(record.description ?? '');
-  const [repo, setRepo] = useState(record.repo);
-  const [owners, setOwners] = useState(record.owners.join(', '));
-  const badRepo = !REPO_PATTERN.test(repo.trim());
-  const ownerList = ownersOf(owners);
-  const noOwners = ownerList.length === 0;
-  const changed =
-    description.trim() !== (record.description ?? '') ||
-    repo.trim() !== record.repo ||
-    ownerList.join(',') !== record.owners.join(',');
+  const update = (payload: UpdateAppRequest, what: string) =>
+    report(
+      updateApp({ params: { app }, payload, reactivityKeys: [...appChanged(app), ...appsChanged] }),
+      `Saved ${app}'s ${what}`,
+    );
+  return [save.waiting, update] as const;
+}
+
+/**
+ * One setting as a card: its title and what it means above the field, and
+ * a band below with a note and the setting's own Save, enabled once it changes.
+ */
+function SettingCard({
+  title,
+  description,
+  note,
+  changed,
+  invalid,
+  saving,
+  onSave,
+  onDiscard,
+  children,
+}: {
+  title: string;
+  description: ReactNode;
+  note: ReactNode;
+  changed: boolean;
+  invalid: boolean;
+  saving: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  children: ReactNode;
+}) {
   return (
-    <Panel title="App">
-      <form
-        className="flex flex-col gap-5"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (badRepo || noOwners) return;
-          void report(
-            updateApp({
-              params: { app },
-              payload: { repo: repo.trim(), description: description.trim(), owners: ownerList },
-              reactivityKeys: [...appChanged(app), ...appsChanged],
-            }),
-            `Saved ${app}`,
-          );
-        }}
-      >
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="app-description">Description</FieldLabel>
-            <Input
-              id="app-description"
-              value={description}
-              maxLength={DESCRIPTION_MAX}
-              placeholder="What the app does, in a line"
-              onChange={(e) => setDescription(e.target.value)}
-            />
-          </Field>
-          <Field data-invalid={badRepo || undefined}>
-            <FieldLabel htmlFor="app-repo">Repository</FieldLabel>
-            <Input
-              id="app-repo"
-              className="font-mono"
-              value={repo}
-              spellCheck={false}
-              placeholder="owner/name"
-              onChange={(e) => setRepo(e.target.value)}
-              aria-invalid={badRepo || undefined}
-            />
-            <FieldDescription>
-              {badRepo ? (
-                'A GitHub repository as owner/name.'
-              ) : (
-                <>
-                  CI deploys are accepted only from this repository (GitHub OIDC):{' '}
-                  <Mono className="text-xs">main</Mono> to prod, pull requests to previews.
-                </>
-              )}
-            </FieldDescription>
-          </Field>
-          <Field data-invalid={noOwners || undefined}>
-            <FieldLabel htmlFor="app-owners">Owners</FieldLabel>
-            <Input
-              id="app-owners"
-              value={owners}
-              spellCheck={false}
-              placeholder="GitHub usernames, comma separated"
-              onChange={(e) => setOwners(e.target.value)}
-              aria-invalid={noOwners || undefined}
-            />
-            <FieldDescription>
-              {noOwners
-                ? 'An app needs at least one owner.'
-                : 'Members who can manage the app. Admins can manage every app.'}
-            </FieldDescription>
-          </Field>
-        </FieldGroup>
-        <div className="flex items-center gap-3">
-          <Button type="submit" disabled={save.waiting || !changed || badRepo || noOwners}>
-            {save.waiting ? 'Saving…' : 'Save'}
-          </Button>
-          {changed && (
+    <form
+      aria-label={title}
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (changed && !invalid) onSave();
+      }}
+    >
+      <Panel
+        footer={
+          <>
+            <span className="min-w-0 flex-1">{note}</span>
+            {changed && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Discard ${title.toLowerCase()} changes`}
+                onClick={onDiscard}
+              >
+                Discard
+              </Button>
+            )}
             <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                setDescription(record.description ?? '');
-                setRepo(record.repo);
-                setOwners(record.owners.join(', '));
-              }}
+              type="submit"
+              size="sm"
+              aria-label={`Save ${title.toLowerCase()}`}
+              disabled={saving || !changed || invalid}
             >
-              Discard changes
+              {saving ? 'Saving…' : 'Save'}
             </Button>
-          )}
-        </div>
-      </form>
-    </Panel>
+          </>
+        }
+      >
+        <Field invalid={invalid} className="gap-0">
+          <h2>
+            <FieldLabel className="text-base font-semibold tracking-tight select-auto">{title}</FieldLabel>
+          </h2>
+          <FieldDescription className="mt-1.5 mb-4 text-sm">{description}</FieldDescription>
+          {children}
+        </Field>
+      </Panel>
+    </form>
+  );
+}
+
+function DescriptionForm({ summary }: { summary: AppSummary }) {
+  const record = summary.app;
+  const [saving, update] = useUpdate(record.name);
+  const [description, setDescription] = useState(record.description ?? '');
+  return (
+    <SettingCard
+      title="Description"
+      description="What the app does, in a line. It shows under the app's name in the list of apps."
+      note={`Up to ${DESCRIPTION_MAX} characters.`}
+      changed={description.trim() !== (record.description ?? '')}
+      invalid={false}
+      saving={saving}
+      onSave={() => void update({ description: description.trim() }, 'description')}
+      onDiscard={() => setDescription(record.description ?? '')}
+    >
+      <Input
+        className="max-w-xl"
+        value={description}
+        maxLength={DESCRIPTION_MAX}
+        placeholder="What the app does, in a line"
+        onValueChange={setDescription}
+      />
+    </SettingCard>
+  );
+}
+
+function RepositoryForm({ summary }: { summary: AppSummary }) {
+  const record = summary.app;
+  const [saving, update] = useUpdate(record.name);
+  const [repo, setRepo] = useState(record.repo);
+  const bad = !REPO_PATTERN.test(repo.trim());
+  return (
+    <SettingCard
+      title="Repository"
+      description="CI deploys are accepted only from this GitHub repository, through GitHub OIDC."
+      note={
+        <>
+          <Mono className="text-xs text-foreground">main</Mono> deploys to prod; pull requests deploy
+          previews.
+        </>
+      }
+      changed={repo.trim() !== record.repo}
+      invalid={bad}
+      saving={saving}
+      onSave={() => void update({ repo: repo.trim() }, 'repository')}
+      onDiscard={() => setRepo(record.repo)}
+    >
+      <Input
+        className="max-w-sm font-mono text-[13px]"
+        value={repo}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder="owner/name"
+        onValueChange={setRepo}
+      />
+      {bad && (
+        <FieldError match className="mt-2">
+          A GitHub repository as owner/name.
+        </FieldError>
+      )}
+    </SettingCard>
+  );
+}
+
+function OwnersForm({ summary }: { summary: AppSummary }) {
+  const record = summary.app;
+  const [saving, update] = useUpdate(record.name);
+  const [owners, setOwners] = useState(record.owners.join(', '));
+  const list = ownersOf(owners);
+  const none = list.length === 0;
+  return (
+    <SettingCard
+      title="Owners"
+      description="Members who can manage the app. Admins can manage every app."
+      note="GitHub usernames, separated by commas."
+      changed={list.join(',') !== record.owners.join(',')}
+      invalid={none}
+      saving={saving}
+      onSave={() => void update({ owners: list }, 'owners')}
+      onDiscard={() => setOwners(record.owners.join(', '))}
+    >
+      <Input
+        className="max-w-xl"
+        value={owners}
+        spellCheck={false}
+        autoComplete="off"
+        placeholder="octocat, hubot"
+        onValueChange={setOwners}
+      />
+      {none && (
+        <FieldError match className="mt-2">
+          An app needs at least one owner.
+        </FieldError>
+      )}
+    </SettingCard>
   );
 }
 
@@ -165,63 +243,72 @@ function DangerZone({ summary }: { summary: AppSummary }) {
   const [typed, setTyped] = useState('');
   const live = summary.stages.filter((s) => s.status !== 'destroyed');
   return (
-    <Panel title="Delete app" className="border-bad-mark/40">
-      <div className="flex flex-wrap items-center gap-4">
-        <div className="min-w-0 flex-1 text-sm text-muted-foreground">
-          {live.length ? (
-            <>
-              Destroy its stages first:{' '}
-              {live.map((s, i) => (
-                <span key={s.stage}>
-                  {i > 0 && ', '}
-                  <Mono className="text-foreground">{s.stage}</Mono>
-                </span>
-              ))}
-              . Previews can be destroyed on{' '}
-              <Link to="/apps/$app/deployments" params={{ app }} className="text-foreground hover:underline">
-                Deployments
-              </Link>
-              ; prod with <Mono>plat destroy --stage prod --force</Mono>.
-            </>
-          ) : (
-            "Removes the app's record. Its repository and code are untouched."
-          )}
+    <Panel
+      className="border-bad-mark/40 [&>footer]:border-bad-mark/25 [&>footer]:bg-bad-mark/6"
+      footer={
+        <div className="ml-auto">
+          <ConfirmAction
+            trigger={<Button variant="destructive" size="sm" />}
+            disabled={live.length > 0 || del.waiting}
+            title={`Delete ${app}?`}
+            description="This removes the app's record and can't be undone. Its repository and code are untouched."
+            body={
+              <Field>
+                <FieldLabel>
+                  Type <Mono>{app}</Mono> to confirm
+                </FieldLabel>
+                <Input
+                  className="font-mono text-[13px]"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={typed}
+                  onValueChange={setTyped}
+                />
+              </Field>
+            }
+            canConfirm={typed === app}
+            confirmLabel="Delete app"
+            onOpenChange={(open) => !open && setTyped('')}
+            onConfirm={async () => {
+              const done = await report(
+                removeApp({ params: { app }, reactivityKeys: appsChanged }),
+                `Deleted ${app}`,
+              );
+              if (done) await navigate({ to: '/' });
+              return done;
+            }}
+          >
+            Delete app
+          </ConfirmAction>
         </div>
-        <ConfirmAction
-          trigger={<Button variant="destructive" />}
-          disabled={live.length > 0 || del.waiting}
-          title={`Delete ${app}?`}
-          description="This removes the app's record and can't be undone. Its repository and code are untouched."
-          body={
-            <Field>
-              <FieldLabel htmlFor="delete-app-name">
-                Type <Mono>{app}</Mono> to confirm
-              </FieldLabel>
-              <Input
-                id="delete-app-name"
-                className="font-mono"
-                autoComplete="off"
-                spellCheck={false}
-                value={typed}
-                onChange={(e) => setTyped(e.target.value)}
-              />
-            </Field>
-          }
-          canConfirm={typed === app}
-          confirmLabel="Delete app"
-          onOpenChange={(open) => !open && setTyped('')}
-          onConfirm={async () => {
-            const done = await report(
-              removeApp({ params: { app }, reactivityKeys: appsChanged }),
-              `Deleted ${app}`,
-            );
-            if (done) await navigate({ to: '/' });
-            return done;
-          }}
-        >
-          Delete app
-        </ConfirmAction>
-      </div>
+      }
+    >
+      <h2 className="text-base font-semibold tracking-tight">Delete app</h2>
+      <p className="mt-1.5 text-sm text-pretty text-muted-foreground">
+        {live.length ? (
+          <>
+            Destroy its stages first:{' '}
+            {live.map((s, i) => (
+              <span key={s.stage}>
+                {i > 0 && ', '}
+                <Mono className="text-foreground">{s.stage}</Mono>
+              </span>
+            ))}
+            . Previews can be destroyed on{' '}
+            <Link
+              to="/apps/$app/deployments"
+              params={{ app }}
+              className="text-foreground underline-offset-4 hover:underline"
+            >
+              Deployments
+            </Link>
+            ; prod with{' '}
+            <Mono className="whitespace-nowrap text-foreground">plat destroy --stage prod --force</Mono>.
+          </>
+        ) : (
+          "Removes the app's record. Its repository and code are untouched."
+        )}
+      </p>
     </Panel>
   );
 }

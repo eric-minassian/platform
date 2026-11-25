@@ -4,8 +4,8 @@
  * knows to close and a form to clear.
  */
 import { Exit } from 'effect';
-import { toast } from 'sonner';
 import { errorMessage } from '../../client.ts';
+import { toast } from '../ui/overlays.tsx';
 
 export async function report<A, E>(
   exit: Promise<Exit.Exit<A, E>>,

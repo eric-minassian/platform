@@ -8,13 +8,7 @@
  *   APP#<name>      STAGE#<stage>     STAGES        <name>#<stage>   StageItem
  *   APP#<name>      DEP#<id>          DEP#<id>      DEP              DeploymentItem
  *   APP#<name>      ALERT#<id>        ALERTS        <name>#<id>      AlertRule (alerts/rules.ts)
- *   APP#<name>      QUERY#<id>        -             -                SavedQuery
- *   DASHBOARD#<id>  META              DASHBOARDS    <app or ~>#<id>  Dashboard
  *   PLATFORM        EDGE_FLOOR        -             -                EdgeFloorItem
- *
- * A dashboard's `gsi1sk` starts with its app, or `~` for one that spans apps:
- * `~` sorts after every app name, so one Query from `<app>#` to the end of
- * `~#` reads an app's dashboards and the cross-app ones.
  *
  * Required table schema (created by the foundation): string keys `pk`/`sk`,
  * GSI `gsi1` on `gsi1pk`/`gsi1sk` projecting ALL.
@@ -22,10 +16,8 @@
 import {
   type AlertRule,
   type AppRecord,
-  type Dashboard,
   DeploymentRecord,
   RouteRecordSchema,
-  type SavedQuery,
   StageRecord,
   type WebCompute,
 } from '@ericminassian/platform-core';
@@ -113,23 +105,4 @@ export function deploymentItem(dep: DeploymentItem) {
 
 export function alertRuleItem(rule: AlertRule) {
   return { ...alertRuleKey(rule.app, rule.id), gsi1pk: 'ALERTS', gsi1sk: `${rule.app}#${rule.id}`, ...rule };
-}
-
-export const savedQueryKey = (app: string, id: string) => ({ pk: `APP#${app}`, sk: `QUERY#${id}` });
-export const dashboardKey = (id: string) => ({ pk: `DASHBOARD#${id}`, sk: 'META' });
-
-/** A cross-app dashboard's place in `gsi1sk` (see the layout above). */
-export const CROSS_APP = '~';
-
-export function savedQueryItem(query: SavedQuery) {
-  return { ...savedQueryKey(query.app, query.id), ...query };
-}
-
-export function dashboardItem(dashboard: Dashboard) {
-  return {
-    ...dashboardKey(dashboard.id),
-    gsi1pk: 'DASHBOARDS',
-    gsi1sk: `${dashboard.app ?? CROSS_APP}#${dashboard.id}`,
-    ...dashboard,
-  };
 }

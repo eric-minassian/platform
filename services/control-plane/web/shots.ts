@@ -2,9 +2,10 @@
  * Screenshots of the console against the demo API (`src/demo`), so a UI
  * change can show its before and after without real data.
  *
- *   pnpm web:shots [--out <dir>] [page…]
+ *   pnpm web:shots [--out <dir>] [--theme light|dark|both] [page…]
  *
- * Takes every page in PAGES (or the ones named) into `shots/` by default.
+ * Takes every page in PAGES (or the ones named) into `shots/` by default, in
+ * the light theme; `both` writes `<page>-light.png` and `<page>-dark.png`.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
@@ -25,8 +26,6 @@ const PAGES: Record<string, string> = {
   traces: '/apps/atlas/traces',
   errors: '/apps/atlas/errors',
   alerts: '/apps/atlas/alerts?rule=a_jobs',
-  dashboard: '/apps/atlas/dashboards/d_atlas',
-  dashboards: '/dashboards',
   jobs: '/apps/atlas/jobs',
   services: '/apps/inbox/services',
   email: '/apps/inbox/email',
@@ -34,6 +33,7 @@ const PAGES: Record<string, string> = {
   database: '/apps/atlas/database',
   storage: '/apps/atlas/storage',
   deployments: '/apps/atlas/deployments',
+  deployment: '/apps/atlas/deployments/dep_atlas_prod_4f2c1a90',
   secrets: '/apps/atlas/secrets',
   cost: '/apps/atlas/cost',
   settings: '/apps/atlas/settings',
@@ -42,7 +42,7 @@ const PAGES: Record<string, string> = {
 };
 
 const { values, positionals } = parseArgs({
-  options: { out: { type: 'string', default: 'shots' } },
+  options: { out: { type: 'string', default: 'shots' }, theme: { type: 'string', default: 'light' } },
   allowPositionals: true,
 });
 const unknown = positionals.filter((p) => !(p in PAGES));
@@ -51,6 +51,10 @@ if (unknown.length) {
   process.exit(1);
 }
 const pages = positionals.length ? positionals : Object.keys(PAGES);
+const themes =
+  values.theme === 'both'
+    ? (['light', 'dark'] as const)
+    : ([values.theme === 'dark' ? 'dark' : 'light'] as const);
 
 /** A port nothing listens on, so other worktrees' dev servers are left alone. */
 const freePort = () =>
@@ -78,6 +82,21 @@ async function waitFor(url: string, child: ChildProcess) {
   throw new Error(`The demo API didn't answer at ${url}`);
 }
 
+/**
+ * The page scrolls inside the content panel, so a full-page shot of the
+ * window would stop at the fold: grow the viewport to the panel's content first.
+ */
+async function fullPanel(page: import('playwright').Page, path: string) {
+  const extra = await page.evaluate(() => {
+    const panel = document.getElementById('main-panel');
+    return panel ? Math.max(0, panel.scrollHeight - panel.clientHeight) : 0;
+  });
+  await page.setViewportSize({ width: 1440, height: 900 + extra });
+  await page.waitForTimeout(300);
+  await page.screenshot({ path, fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 900 });
+}
+
 const apiPort = await freePort();
 const demo = spawn(process.execPath, [join(root, 'src/demo/server.ts')], {
   env: { ...process.env, PORT: String(apiPort) },
@@ -102,15 +121,19 @@ try {
   const problems: string[] = [];
   page.on('pageerror', (e) => problems.push(String(e)));
   page.on('console', (m) => m.type() === 'error' && problems.push(m.text()));
-  for (const name of pages) {
-    problems.length = 0;
-    await page.goto(`${base}${PAGES[name]}`, { waitUntil: 'networkidle' });
-    // Charts draw after their data arrives.
-    await page.waitForTimeout(1500);
-    const file = join(out, `${name}.png`);
-    await page.screenshot({ path: file, fullPage: true });
-    console.log(file);
-    for (const p of problems) console.warn(`  ${name}: ${p.split('\n')[0]}`);
+  for (const theme of themes) {
+    // The console follows the system theme until someone picks one.
+    await page.emulateMedia({ colorScheme: theme });
+    for (const name of pages) {
+      problems.length = 0;
+      await page.goto(`${base}${PAGES[name]}`, { waitUntil: 'networkidle' });
+      // Charts draw after their data arrives.
+      await page.waitForTimeout(1500);
+      const file = join(out, themes.length > 1 ? `${name}-${theme}.png` : `${name}.png`);
+      await fullPanel(page, file);
+      console.log(file);
+      for (const p of problems) console.warn(`  ${name}: ${p.split('\n')[0]}`);
+    }
   }
 } finally {
   await browser.close();

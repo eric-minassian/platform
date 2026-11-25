@@ -1,13 +1,14 @@
 /**
- * An app stage at a glance: what's live, five figures against the previous
- * period, the four charts that explain most incidents (status, latency,
- * errors, the latency distribution) on one cursor with deployment markers,
- * the busiest routes, what happened lately, and the custom metrics and rate
- * limits the stage recorded.
+ * An app stage at a glance: the deployment that's live and where it came
+ * from, five figures against the previous period, the charts that explain
+ * most incidents (status, latency, errors, and job runs when the app has
+ * jobs) on one cursor with deployment markers, the busiest routes, what
+ * happened lately, and the custom metrics and rate limits the stage recorded.
  */
 import { useAtomValue } from '@effect/atom-react';
 import {
   type CustomMetricStats,
+  type DeploymentRecord,
   type ErrorGroup,
   type LimitStats,
   type MetricsView,
@@ -21,13 +22,31 @@ import {
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Option } from 'effect';
 import { AsyncResult, Atom } from 'effect/reactivity';
-import { ArrowUpRight, Bell, CircleCheck, Layers, TriangleAlert } from 'lucide-react';
+import {
+  ArrowUpRight,
+  Bell,
+  CircleCheck,
+  FolderGit2,
+  Layers,
+  Rocket,
+  ScrollText,
+  TriangleAlert,
+} from 'lucide-react';
 import type { ReactNode } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { Sparkline } from '../../components/charts/sparkline.tsx';
 import { columns, DataTable } from '../../components/data-table.tsx';
+import {
+  actorLabel,
+  COMPUTE_LABEL,
+  DeploymentSource,
+  DeploymentState,
+  RollbackButton,
+  useRollback,
+} from '../../components/deployments/shared.tsx';
 import { ChartPanel } from '../../components/metrics/chart-panel.tsx';
 import {
+  Detail,
   EmptyState,
   Loaded,
   Mono,
@@ -35,12 +54,14 @@ import {
   Panel,
   RouteLabel,
   Stat,
+  Stats,
   StatusPill,
   statusTone,
 } from '../../components/page.tsx';
+import { Badge } from '../../components/ui/badge.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import { alertRulesAtom, deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
-import { stageOf, useAppSummary, useDeployment } from '../../data/hooks.ts';
+import { stageOf, useAppSummary, useDeployment, useLiveManifest } from '../../data/hooks.ts';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime, shortId } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { formatterFor } from '../../lib/series.ts';
@@ -70,10 +91,10 @@ const ERROR_RATE: MetricsView = {
   ],
   chart: 'area',
 };
-const DISTRIBUTION: MetricsView = {
+const JOB_RUNS: MetricsView = {
   kind: 'metrics',
-  queries: [{ id: 'a', metric: 'latency', stat: 'histogram' }],
-  chart: 'heatmap',
+  queries: [{ id: 'a', metric: 'jobs', stat: 'count', groupBy: 'outcome' }],
+  chart: 'bar',
 };
 
 const STATUS_QUERY: SeriesQuery = { metric: 'requests', stat: 'count', groupBy: 'status' };
@@ -234,47 +255,61 @@ export function OverviewPage() {
   return (
     <>
       <Header app={app} stage={stage} />
+      <LiveDeployment app={app} stage={stage} />
       <Figures app={app} stage={stage} time={time.search} cost={summary?.costMonthToDateUsd} />
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <ChartPanel
-          title="Requests"
-          description="by status class"
-          app={app}
-          stage={stage}
-          time={time.search}
-          view={STATUS}
-        />
-        <ChartPanel
-          title="Latency"
-          description="p50, p95 and p99, log scale"
-          app={app}
-          stage={stage}
-          time={time.search}
-          view={LATENCY}
-        />
-        <ChartPanel
-          title="5xx rate"
-          description="share of requests answered 5xx"
-          app={app}
-          stage={stage}
-          time={time.search}
-          view={ERROR_RATE}
-        />
-        <ChartPanel
-          title="Latency distribution"
-          description="requests per latency bucket"
-          app={app}
-          stage={stage}
-          time={time.search}
-          view={DISTRIBUTION}
-        />
-      </div>
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[3fr_2fr]">
+      <Charts app={app} stage={stage} time={time.search} />
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[3fr_2fr]">
         <TopRoutes app={app} stage={stage} time={time.search} />
         <Activity app={app} stage={stage} time={time.search} />
       </div>
       <Recorded app={app} stage={stage} time={time.search} />
     </>
+  );
+}
+
+function Charts({ app, stage, time }: { app: string; stage: string; time: TimeSearch }) {
+  const manifest = useLiveManifest(app, stage);
+  const hasJobs =
+    manifest !== undefined &&
+    Object.keys(manifest.queues).length + manifest.events.length + Object.keys(manifest.crons).length > 0;
+  return (
+    <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      <ChartPanel
+        title="Requests"
+        description="by status class"
+        app={app}
+        stage={stage}
+        time={time}
+        view={STATUS}
+      />
+      <ChartPanel
+        title="Latency"
+        description="p50, p95 and p99, log scale"
+        app={app}
+        stage={stage}
+        time={time}
+        view={LATENCY}
+      />
+      <ChartPanel
+        title="5xx rate"
+        description="share of requests answered 5xx"
+        app={app}
+        stage={stage}
+        time={time}
+        view={ERROR_RATE}
+        className={hasJobs ? undefined : 'xl:col-span-2'}
+      />
+      {hasJobs && (
+        <ChartPanel
+          title="Job runs"
+          description="by outcome"
+          app={app}
+          stage={stage}
+          time={time}
+          view={JOB_RUNS}
+        />
+      )}
+    </div>
   );
 }
 
@@ -421,7 +456,6 @@ function Recorded({ app, stage, time }: { app: string; stage: string; time: Time
 function Header({ app, stage }: { app: string; stage: string }) {
   const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));
   const current = stageOf(summary, stage);
-  const live = useDeployment(current?.currentDeployment);
   const up = stage === 'prod' ? summary?.health?.up : undefined;
   return (
     <PageHeader
@@ -435,21 +469,29 @@ function Header({ app, stage }: { app: string; stage: string }) {
           )}
         </>
       }
+      description={summary?.app.description}
       actions={
-        current && (
-          <>
+        <>
+          {summary?.app.repo && (
             <Button
               variant="outline"
               size="sm"
-              nativeButton={false}
-              render={<Link to="/apps/$app/deployments" params={{ app }} />}
+              render={
+                <a
+                  href={`https://github.com/${summary.app.repo}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-label="Repository"
+                />
+              }
             >
-              <Layers />
-              Deployments
+              <FolderGit2 />
+              Repository
             </Button>
+          )}
+          {current && current.status !== 'destroyed' && (
             <Button
               size="sm"
-              nativeButton={false}
               render={
                 <a href={current.url} target="_blank" rel="noreferrer" aria-label={`Visit ${current.host}`} />
               }
@@ -457,35 +499,129 @@ function Header({ app, stage }: { app: string; stage: string }) {
               Visit
               <ArrowUpRight />
             </Button>
+          )}
+        </>
+      }
+    />
+  );
+}
+
+/**
+ * The stage's live deployment, the way Vercel leads a project with its
+ * production deployment: where it runs, what it is and where it came from,
+ * with its logs and a rollback to the one before.
+ */
+function LiveDeployment({ app, stage }: { app: string; stage: string }) {
+  const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));
+  const current = stageOf(summary, stage);
+  const live = useDeployment(current?.currentDeployment);
+  const deployments = Option.getOrElse(
+    AsyncResult.value(useAtomValue(deploymentsAtom({ app, stage }))),
+    (): readonly DeploymentRecord[] => [],
+  );
+  const { busy, rollBack } = useRollback(app);
+  if (!current) return null;
+  const previous = live
+    ? deployments.find((d) => d.id !== live.id && d.status === 'succeeded' && d.createdAt < live.createdAt)
+    : undefined;
+  const firing = summary?.alerts?.alarm ?? 0;
+  return (
+    <Panel
+      title={stage === 'prod' ? 'Production deployment' : `Live on ${stage}`}
+      actions={
+        <>
+          {live && (
+            <Button
+              variant="outline"
+              size="sm"
+              render={
+                <Link
+                  to="/apps/$app/logs"
+                  params={{ app }}
+                  search={(prev) => ({ ...prev, f: { revs: [live.id] } })}
+                />
+              }
+            >
+              <ScrollText />
+              Runtime logs
+            </Button>
+          )}
+          {previous && (
+            <RollbackButton
+              stage={stage}
+              deployment={previous}
+              busy={busy}
+              onRollback={() => rollBack(stage, previous)}
+              trigger={<Button variant="outline" size="sm" />}
+              label="Instant rollback"
+            />
+          )}
+          <Button variant="outline" size="sm" render={<Link to="/apps/$app/deployments" params={{ app }} />}>
+            <Layers />
+            Deployments
+          </Button>
+        </>
+      }
+      footer={
+        firing > 0 || current.status !== 'active' ? (
+          <>
+            {firing > 0 && (
+              <Link
+                to="/apps/$app/alerts"
+                params={{ app }}
+                className="inline-flex items-center gap-2 rounded-sm text-bad outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+              >
+                <Bell className="size-3.5" />
+                {firing === 1 ? '1 alert firing' : `${firing} alerts firing`}
+              </Link>
+            )}
+            {current.status !== 'active' && <span>The stage is {current.status}.</span>}
           </>
-        )
+        ) : undefined
       }
     >
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-        {current && (
-          <a href={current.url} target="_blank" rel="noreferrer" className="text-foreground hover:underline">
-            {current.host}
-          </a>
-        )}
-        {live && (
-          <>
-            <span className="text-subtle">·</span>
-            {live.commit && <Mono className="text-foreground">{live.commit.slice(0, 7)}</Mono>}
-            {live.message && <span className="max-w-96 truncate">{live.message.split('\n')[0]}</span>}
-            <span className="text-subtle">·</span>
-            <span>
-              {relTime(live.finishedAt ?? live.createdAt)} by {live.actor.replace(/^ci:/, 'CI ')}
-            </span>
-          </>
-        )}
-        {current?.compute && (
-          <>
-            <span className="text-subtle">·</span>
-            <span>{current.compute === 'request' ? 'Request mode' : 'Instance mode'}</span>
-          </>
-        )}
-      </div>
-    </PageHeader>
+      {live ? (
+        <div className="grid grid-cols-1 gap-x-10 gap-y-5 sm:grid-cols-2 lg:grid-cols-[repeat(3,minmax(0,1fr))]">
+          <Detail label="Deployment">
+            <Link
+              to="/apps/$app/deployments/$deployment"
+              params={{ app, deployment: live.id }}
+              className="inline-flex items-center gap-2 rounded-sm outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+            >
+              <Mono>{shortId(live.id)}</Mono>
+              <Badge variant="info">Current</Badge>
+            </Link>
+          </Detail>
+          <Detail label="Status">
+            <DeploymentState d={live} />
+          </Detail>
+          <Detail label="Domain">
+            <a
+              href={current.url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex max-w-full items-center gap-1 rounded-sm outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+            >
+              <span className="truncate">{current.host}</span>
+              <ArrowUpRight className="size-3.5 shrink-0 text-subtle" />
+            </a>
+          </Detail>
+          <Detail label="Source" className="sm:col-span-2">
+            <DeploymentSource d={live} repo={summary?.app.repo} />
+          </Detail>
+          <Detail label="Created">
+            {relTime(live.finishedAt ?? live.createdAt)}{' '}
+            <span className="font-normal text-muted-foreground">by {actorLabel(live.actor)}</span>
+          </Detail>
+          <Detail label="Compute">{current.compute ? COMPUTE_LABEL[current.compute] : '–'}</Detail>
+        </div>
+      ) : (
+        <EmptyState icon={<Rocket />} title={`Nothing is live on ${stage} yet`} className="py-6">
+          Run <Mono>plat deploy{stage === 'prod' ? '' : ` --stage ${stage}`}</Mono>, or push to the
+          repository.
+        </EmptyState>
+      )}
+    </Panel>
   );
 }
 
@@ -511,14 +647,14 @@ function Figures({
   const up = uptime?.length ? uptime.filter((u) => u.ok).length / uptime.length : null;
   const fromTraffic = uptime?.filter((u) => u.source === 'traffic').length ?? 0;
   return (
-    <Loaded result={result} loading={<div className="grid h-[92px] grid-cols-2 gap-3 lg:grid-cols-5" />}>
+    <Loaded result={result} loading={<div className="h-[106px] rounded-xl border" />}>
       {([status, hist, prevStatus, prevHist]) => {
         const nowF = figures(status, hist);
         const before = figures(prevStatus, prevHist);
         const rate = nowF.requests ? nowF.errors / nowF.requests : null;
         const prevRate = before.requests ? before.errors / before.requests : null;
         return (
-          <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+          <Stats>
             <Stat
               label="Requests"
               value={fmtNum(nowF.requests)}
@@ -549,7 +685,7 @@ function Figures({
               }
             />
             <Stat label="Cost, month to date" value={fmtUsd(cost)} note="tagged to this app" />
-          </div>
+          </Stats>
         );
       }}
     </Loaded>
@@ -571,7 +707,6 @@ function TopRoutes({ app, stage, time }: { app: string; stage: string; time: Tim
         <Button
           variant="ghost"
           size="sm"
-          nativeButton={false}
           render={
             <Link
               to="/apps/$app/metrics"

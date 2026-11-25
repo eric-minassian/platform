@@ -968,12 +968,12 @@ writing any instrumentation:
   environments and throttles, queue age) are read from CloudWatch on demand.
 - **Reading it back** (`src/telemetry/query.ts`, `src/logs.ts`,
   `src/insights.ts`):
-  - _Series_ (the Metrics explorer, dashboards, alert rules, `plat metrics
-    --metric`): a query's statistic per bucket from the rollups. 5 to 30
-    minute buckets are sums of minute rows, and histograms add, so
-    percentiles stay exact. A window older than minute rows falls back to
-    hours with a note. Grouped queries keep the top 10 groups. Realtime and
-    service series come from their CloudWatch metrics.
+  - _Series_ (the Metrics explorer, alert rules, `plat metrics --metric`): a
+    query's statistic per bucket from the rollups. 5 to 30 minute buckets are
+    sums of minute rows, and histograms add, so percentiles stay exact. A
+    window older than minute rows falls back to hours with a note. Grouped
+    queries keep the top 10 groups. Realtime and service series come from
+    their CloudWatch metrics.
   - _Log search:_ text or a filter pattern runs on FilterLogEvents. Any
     structured filter but streams (level, route, status class, deployment,
     trace) runs on Logs Insights over the stage's log groups, newest first,
@@ -1000,44 +1000,50 @@ writing any instrumentation:
   `notify` rules email the alerts topic on entering and leaving Alarm with a
   link to the rule. Unchanged rules are written at most every 10 minutes.
   Up to 25 rules per app. A platform with no rules does one read a minute.
-- **Saved queries and dashboards** are rows in the state table (layout in
-  `src/records.ts`). Saved queries belong to an app. A dashboard belongs to
-  an app or to none; one that spans apps is visible to and editable by
-  every member, and each widget still needs access to its own app.
 - **Console** (`platform.ericminassian.com`, `services/control-plane/web`):
-  dark only, React on TanStack Router, Charts and Table with shadcn/ui.
-  - **Layout:** one sidebar. At the top level: Apps, Dashboards (all,
-    including those that span apps) and Platform. In an app, its pages grouped
-    as Observe (Overview, Logs, Traces, Metrics, Errors, Alerts, Dashboards),
-    Run (Jobs, and Services, Email and Realtime when a stage declares them),
-    Data (Database, Storage), Ship (Deployments) and Configure (Secrets, Cost,
-    Settings). The scope switcher picks the app and stage; ⌘K jumps to an app,
-    a page or a trace id.
+  React on TanStack Router, Charts and Table, with its controls on ui-sdk
+  (headless behaviors: keyboard, focus, ARIA, popups) styled after Vercel's
+  Geist: neutral greys, light, dark or the device's setting (saved per
+  browser, applied before the first paint).
+  - **Layout:** a sidebar on the canvas and the page in a panel beside it;
+    the sidebar folds to icons (⌘B) and is a drawer on phones. At the top
+    level: Apps and Platform (admins). In an app: Overview and Deployments,
+    then Observe (Logs, Traces, Metrics, Errors, Alerts), Run (Jobs, and
+    Services, Email and Realtime when a stage declares them), Data (Database,
+    Storage) and Configure (Secrets, Cost, Settings). The scope switcher picks
+    the app and stage; ⌘K jumps to an app, a page, a time range or a trace
+    id, or switches the color scheme.
+  - **Agents:** every control is a ui-sdk part with a name, so a browser
+    agent can find and use it; anything destructive is marked
+    (`data-agent-confirm`) and needs a person. The console registers no
+    WebMCP tools: the `plat` CLI is the agent's interface.
   - **Everything is in the URL:** the time window, stage, filters, queries and
     chart choices are typed search params, so any view is a link and the
     window follows you between pages. Dragging across a chart zooms every
     chart on the page; charts on a page share a cursor and mark deployments.
   - **Home:** every app with status, its prod traffic over 24 hours, error
     rate, p95, firing alerts, cost and last deploy, trouble first.
+  - **Overview:** the stage's live deployment (where it runs, its source,
+    who deployed it, compute mode; its logs and a rollback to the one before),
+    five figures against the previous period, requests, latency, 5xx and job
+    runs, the busiest routes, recent activity, and the custom metrics and
+    rate limits the stage recorded.
   - **Metrics:** the explorer. Up to 8 queries (metric, statistic, filters,
     group by) over the rollups, expressions over them (`100 * b / a`), as a
-    line, area, bar, heatmap, number or table. Each unit gets its own chart,
+    line, area, bar or heatmap. Each unit gets its own chart,
     never a second axis. The bucket size follows the window (about 150
     points; minute rollups for the last 3 days, hourly after). Expressions
     run in the browser on the series the API returns.
   - **Logs:** search (text or a filter pattern) with facets for level,
     stream, route, status class and deployment, a volume chart by level, and
-    a line's neighbours in its stream; Live tail; Logs Insights over the
-    stage's own log groups, charting `stats … by bin()` results.
+    a line's details in a panel beside the list with its neighbours in its
+    stream; Live tail; Logs Insights over the stage's own log groups,
+    charting `stats … by bin()` results.
   - **Traces:** recent traces with filters and a duration scatter; a trace
     as a waterfall with its logs. **Errors:** groups with occurrences by
     deployment and the stack.
-  - **Saved views** on Logs, Traces and Metrics belong to the app and are
-    shared by its members (up to 100 per app).
-  - **Dashboards** belong to an app or span apps. Widgets are explorer charts
-    or log searches on a 12-column grid, placed by dragging and resizing; a
-    dashboard opens on its own time window. Any chart's menu can open it in
-    the explorer, add it to a dashboard or start an alert rule from it.
+  - Any chart's menu can open it in the explorer or start an alert rule from
+    it.
   - **Run, Data, Ship, Configure:** jobs (each queue's scheduled retries and
     delayed sends, the stage's dead letters with redrive and discard, cron
     run-now); services (state from ECS, container starts and failed runs from
@@ -1047,7 +1053,8 @@ writing any instrumentation:
     deliveries and connections are only reported for the whole API, so they
     aren't shown per app); email (sending status, today's recipients against
     the limit, SES's per-tenant sends, deliveries, bounces and complaints,
-    and the suppression list); collections and files; deployments with
+    and the suppression list); collections (an item opens with its JSON) and
+    files; deployments, each with its own page (event log, manifest) and a
     rollback; secrets; cost; settings.
   - **Platform:** members, platform cost, and the edge floor's state and
     blocked requests.
@@ -1423,5 +1430,4 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Alert rules are evaluated by the control plane from the rollups                       | CloudWatch alarms would need a custom metric per series ($0.30 a month) and $0.10 per alarm, per app and stage. The rollups already hold every series the explorer charts, so one cron a minute serves every rule for cents, and a rule can watch anything a chart shows.                                                                                                                                                                                                                                                                                |
 | A rule's state is written when it changes, else every 10 minutes                      | A write per rule per minute is ~$0.05 a rule a month, even for idle apps; reads cost less, and the history keeps every change.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Members' Logs Insights queries run only on their stage's log groups                   | The control plane can read every log group, so the API picks the groups and refuses queries that name their own (`SOURCE`, `logGroups(`).                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Dashboards that span apps are open to every member                                    | They have no one app to authorize against. Each widget's data still goes through its own app's access check, so a member sees an error in place of an app they can't read.                                                                                                                                                                                                                                                                                                                                                                               |
 | Explorer expressions run in the browser                                               | Each query's series is fetched and cached once, and arithmetic over aligned buckets is cheap. Alert rules watch a single query, so the server never needs them.                                                                                                                                                                                                                                                                                                                                                                                          |

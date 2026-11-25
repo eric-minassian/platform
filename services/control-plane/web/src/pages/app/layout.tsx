@@ -40,7 +40,7 @@ export function AppLayout() {
       <EmptyState
         title={`Can't open ${app}`}
         action={
-          <Button variant="outline" nativeButton={false} render={<Link to="/" />}>
+          <Button variant="outline" render={<Link to="/" />}>
             All apps
           </Button>
         }

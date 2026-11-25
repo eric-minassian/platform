@@ -9,7 +9,7 @@ import type { ReactElement } from 'react';
 import { ApiClient, fresh, timeToLive } from '../client.ts';
 import { type CostSeries, DailyCostChart } from '../components/cost/daily-cost-chart.tsx';
 import { columns, DataTable } from '../components/data-table.tsx';
-import { Loaded, Mono, PageHeader, Panel, Stat, StatusPill } from '../components/page.tsx';
+import { Loaded, Mono, PageHeader, Panel, Stat, Stats, StatusPill } from '../components/page.tsx';
 import { type PointSeries, PointsChart } from '../components/points/points-chart.tsx';
 import { fmtDateTime, fmtNum, fmtPct, fmtUsd, relTime } from '../format.ts';
 
@@ -31,8 +31,8 @@ export function PlatformPage(): ReactElement {
 
 function Overview({ overview: o }: { overview: AdminOverview }) {
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+    <div className="flex flex-col gap-5">
+      <Stats>
         <Stat label="Apps" value={fmtNum(o.apps)} />
         <Stat
           label="Live stages"
@@ -55,7 +55,7 @@ function Overview({ overview: o }: { overview: AdminOverview }) {
           value={fmtUsd(o.cost.shared?.monthToDateUsd)}
           note="resources not tagged to an app"
         />
-      </div>
+      </Stats>
       <AccountCost overview={o} />
       <EdgeFloor />
       <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-2">
@@ -141,7 +141,7 @@ function EdgeFloorBody({ edge: e }: { edge: EdgeFloorResponse }) {
       actions={<StatusPill tone={on ? 'warn' : 'muted'}>{on ? 'On' : 'Off'}</StatusPill>}
       bodyClassName="flex flex-col gap-4"
     >
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <Stats>
         <Stat
           label="State"
           value={on ? 'On' : 'Off'}
@@ -151,28 +151,20 @@ function EdgeFloorBody({ edge: e }: { edge: EdgeFloorResponse }) {
               ? `since ${fmtDateTime(since)}`
               : `turns on at ${e.threshold === undefined ? '—' : fmtNum(e.threshold)} requests a minute`
           }
-          className="bg-background"
         />
         <Stat
           label="Limit"
           value={e.limit === undefined ? '—' : e.limit.toLocaleString('en')}
           note="requests per client per app per minute"
-          className="bg-background"
         />
         <Stat
           label="Blocked, 24h"
           value={fmtNum(e.totals.blocked)}
           tone={e.totals.blocked ? 'warn' : undefined}
           note={seen ? `${fmtPct(e.totals.blocked / seen, 2)} of requests seen` : 'nothing seen'}
-          className="bg-background"
         />
-        <Stat
-          label="Allowed, 24h"
-          value={fmtNum(e.totals.allowed)}
-          note="requests the web ACL let through"
-          className="bg-background"
-        />
-      </div>
+        <Stat label="Allowed, 24h" value={fmtNum(e.totals.allowed)} note="requests the web ACL let through" />
+      </Stats>
       {why && since && (
         <p className="text-sm text-muted-foreground">
           {on ? 'Turned on' : 'Turned off'} {relTime(since)}: {why}.
@@ -192,14 +184,14 @@ function EdgeFloorBody({ edge: e }: { edge: EdgeFloorResponse }) {
         <p className="text-sm text-muted-foreground">No requests reached the floor in the last 24 hours.</p>
       )}
       {on && (
-        <div className="-mx-4 border-t">
+        <div className="-mx-5 border-t">
           <DataTable
             columns={sampleColumns}
             data={e.samples.slice(0, 20)}
             getRowId={(s, i) => `${s.at}:${s.client}:${s.path}:${i}`}
             dense
             empty={
-              <p className="px-4 py-6 text-sm text-muted-foreground">
+              <p className="px-5 py-6 text-sm text-muted-foreground">
                 Nothing blocked in the last three hours.
               </p>
             }
@@ -243,7 +235,7 @@ const memberColumns = member.columns([
         href={`https://github.com/${getValue()}`}
         target="_blank"
         rel="noreferrer"
-        className="font-medium hover:underline"
+        className="rounded-sm font-medium outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
       >
         @{getValue()}
       </a>
@@ -265,6 +257,12 @@ function Members({ overview: o }: { overview: AdminOverview }) {
       flush
       title="Members"
       description={`${o.members.length} ${o.members.length === 1 ? 'member' : 'members'}`}
+      footer={
+        <span>
+          Invite someone by adding their GitHub username to <Mono>members</Mono> in{' '}
+          <Mono>platform.config.ts</Mono> and deploying the platform.
+        </span>
+      }
     >
       <DataTable
         columns={memberColumns}
@@ -272,10 +270,6 @@ function Members({ overview: o }: { overview: AdminOverview }) {
         getRowId={(m) => m.github}
         initialSorting={[{ id: 'github', desc: false }]}
       />
-      <p className="border-t px-4 pt-3 pb-2 text-xs text-muted-foreground">
-        Invite someone by adding their GitHub username to <Mono>members</Mono> in{' '}
-        <Mono>platform.config.ts</Mono> and deploying the platform.
-      </p>
     </Panel>
   );
 }
@@ -307,7 +301,7 @@ function Limits({ limits: l }: { limits: AdminOverview['limits'] }) {
         {rows.map(([label, value, note]) => (
           <div
             key={label}
-            className="grid grid-cols-[1fr_auto] items-baseline gap-x-4 border-t px-4 py-2.5 first:border-t-0"
+            className="grid grid-cols-[1fr_auto] items-baseline gap-x-4 border-t px-5 py-3 first:border-t-0"
           >
             <dt className="text-sm">
               {label}
