@@ -1,13 +1,17 @@
 import { type ChildProcess, execFile } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
   APPSYNC_SUBPROTOCOL,
   type CapturedEmail,
   channelPath,
+  DEV_UPLOAD_PATH,
   EMAIL_INBOX_PATH,
   publicStores,
   REALTIME_PATH,
@@ -22,6 +26,7 @@ import { emulatorClientConfig, type LocalStage, localEnv, startLocalStage } from
 import { createInbox, localMailUrl } from '../src/dev/mail.ts';
 import { type LocalRouterState, localRouteRecord, startLocalRouter } from '../src/dev/router.ts';
 import { spawnService } from '../src/dev/services.ts';
+import { relayUpload } from '../src/dev/upload-relay.ts';
 import {
   type Dispatcher,
   type LocalWorker,
@@ -426,5 +431,79 @@ describe.skipIf(!findEmulatorBinary())('local public stores on the AWS Emulator'
   it('answers 404 for missing files and private stores', async () => {
     expect((await fetch(`${base}${STORAGE_PATH}snapshots/fires/nope.json`)).status).toBe(404);
     expect((await fetch(`${base}${STORAGE_PATH}uploads/a.json`)).status).toBe(404);
+  });
+
+  it('takes a browser upload through the router’s relay, which the emulator refuses straight', async () => {
+    // Signed as the SDK signs upload URLs.
+    const s3 = new S3Client({ ...emulatorClientConfig(stage.conn), forcePathStyle: true });
+    const key = `${stage.bindings.storage!.prefix}uploads/covers/a.png`;
+    const signed = await getSignedUrl(
+      s3,
+      new PutObjectCommand({ Bucket: stage.bindings.storage!.bucket, Key: key, ContentType: 'image/png' }),
+      { expiresIn: 300 },
+    );
+    let relayPort = 0;
+    const relayRouter = await startLocalRouter({
+      port: 0,
+      state: () => ({
+        record: localRouteRecord({
+          app: 'basic-app',
+          stage: 'test',
+          deploymentId: 'd',
+          hasServer: false,
+          hasStatic: false,
+          serverRoutes: [],
+          spa: false,
+        }),
+      }),
+      intercept: [
+        async (req, res, url) => {
+          if (url.pathname !== DEV_UPLOAD_PATH) return false;
+          await relayUpload(req, res, url, {
+            endpoint: stage.conn.endpoint,
+            ca: readFileSync(stage.conn.caFile),
+            port: relayPort,
+          });
+          return true;
+        },
+      ],
+    });
+    relayPort = (relayRouter.address() as AddressInfo).port;
+    const origin = `http://basic-app.localhost:${relayPort}`;
+    const body = new Uint8Array([137, 80, 78, 71]);
+    try {
+      // What a browser sends straight to the presigned URL: the emulator refuses its Origin.
+      const straight = await new Promise<number>((resolve, reject) => {
+        const req = httpsRequest(
+          signed,
+          {
+            method: 'PUT',
+            headers: { origin, 'content-type': 'image/png' },
+            ca: readFileSync(stage.conn.caFile),
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.once('error', reject);
+        req.end(body);
+      });
+      expect(straight).toBe(403);
+
+      const relayed = await fetch(
+        `http://127.0.0.1:${relayPort}${DEV_UPLOAD_PATH}?to=${encodeURIComponent(signed)}`,
+        { method: 'PUT', headers: { origin, 'content-type': 'image/png' }, body },
+      );
+      expect(relayed.status).toBe(200);
+      expect(relayed.headers.get('access-control-allow-origin')).toBe(origin);
+      const stored = await s3.send(
+        new GetObjectCommand({ Bucket: stage.bindings.storage!.bucket, Key: key }),
+      );
+      expect(stored.ContentType).toBe('image/png');
+      expect(await stored.Body!.transformToByteArray()).toEqual(body);
+    } finally {
+      relayRouter.close();
+    }
   });
 });

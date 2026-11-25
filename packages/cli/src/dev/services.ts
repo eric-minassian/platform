@@ -122,15 +122,14 @@ export function startDevService(
     write: (s: string) => void;
     warn: (msg: string) => void;
     backoff?: typeof DEV_RESTART_BACKOFF;
+    /** More environment for the service process. */
+    env?: Record<string, string>;
   },
 ): DevService {
-  const { child, token } = spawnService(
-    stage,
-    manifest,
-    root,
-    name,
-    opts.workerUrl ? { workerUrl: opts.workerUrl } : {},
-  );
+  const { child, token } = spawnService(stage, manifest, root, name, {
+    ...(opts.workerUrl ? { workerUrl: opts.workerUrl } : {}),
+    ...(opts.env ? { env: opts.env } : {}),
+  });
   const label = pc.magenta(`${name.padEnd(6)}│`);
   const out = prefixer(label, opts.write, { spans: opts.spans });
   const err = prefixer(label, opts.write, { spans: opts.spans });

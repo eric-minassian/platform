@@ -79,6 +79,8 @@ export async function startLocalWorker(
     mailUrl?: string;
     /** `PLATFORM_LOCAL_WORKER_URL`: the dispatcher, where the worker's retries and sends go. */
     jobsUrl?: string;
+    /** More environment for the worker process. */
+    env?: Record<string, string>;
   } = {},
 ): Promise<LocalWorker> {
   if (!manifest.worker) throw new Error('manifest has no worker');
@@ -94,6 +96,7 @@ export async function startLocalWorker(
     PLATFORM_LOG_PRETTY: '1',
     ...(opts.mailUrl ? { [LOCAL_MAIL_URL_ENV]: opts.mailUrl } : {}),
     ...(opts.jobsUrl ? { PLATFORM_LOCAL_WORKER_URL: opts.jobsUrl } : {}),
+    ...opts.env,
   });
   const child = spawn(process.execPath, tsxArgs('worker-host', opts.watch !== false), {
     cwd: root,

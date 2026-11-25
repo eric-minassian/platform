@@ -1,3 +1,4 @@
+import { DEV_UPLOAD_PATH, DEV_UPLOAD_RELAY_ENV } from '@ericminassian/platform-core';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { newContext, runWithContext } from '../src/runtime/context.ts';
 import { events } from '../src/runtime/events.ts';
@@ -180,6 +181,37 @@ describe('queue / events / storage / secrets', () => {
     );
     expect(() => snapshots.publicUrl('a/../b')).toThrow(/can't be served/);
     expect(() => storage('uploads').publicUrl('a')).toThrow(/isn't public/);
+  });
+
+  it('hands out presigned upload URLs, through the router’s relay only under plat dev', async () => {
+    // Presigning runs locally: a real client with throwaway credentials, no network.
+    const saved = { id: process.env.AWS_ACCESS_KEY_ID, secret: process.env.AWS_SECRET_ACCESS_KEY };
+    process.env.AWS_ACCESS_KEY_ID = 'AKIDEXAMPLE';
+    process.env.AWS_SECRET_ACCESS_KEY = 'secret';
+    try {
+      const url = new URL(await storage('uploads').uploadUrl('covers/a.png', { contentType: 'image/png' }));
+      expect(url.pathname).toContain('todo/test/uploads/covers/a.png');
+      expect(url.searchParams.has('X-Amz-Signature')).toBe(true);
+
+      // Under `plat dev`, the browser uploads through the router's relay, which forwards to that URL.
+      useTestBindings({
+        app: 'todo',
+        url: 'http://todo.localhost:3000',
+        storage: { bucket: 'storage-bucket', prefix: 'todo/local/', stores: ['uploads'] },
+      });
+      process.env[DEV_UPLOAD_RELAY_ENV] = '1';
+      const relay = new URL(await storage('uploads').uploadUrl('covers/a.png', { contentType: 'image/png' }));
+      expect(`${relay.origin}${relay.pathname}`).toBe(`http://todo.localhost:3000${DEV_UPLOAD_PATH}`);
+      const to = new URL(relay.searchParams.get('to')!);
+      expect(to.pathname).toContain('todo/local/uploads/covers/a.png');
+      expect(to.searchParams.has('X-Amz-Signature')).toBe(true);
+    } finally {
+      delete process.env[DEV_UPLOAD_RELAY_ENV];
+      if (saved.id === undefined) delete process.env.AWS_ACCESS_KEY_ID;
+      else process.env.AWS_ACCESS_KEY_ID = saved.id;
+      if (saved.secret === undefined) delete process.env.AWS_SECRET_ACCESS_KEY;
+      else process.env.AWS_SECRET_ACCESS_KEY = saved.secret;
+    }
   });
 
   it('reads secrets with shared fallback and caching', async () => {

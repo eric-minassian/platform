@@ -447,7 +447,11 @@ browser  GET /__platform/storage/exports/fires/1105.json              (storageUr
   app: an endpoint that hands out `uploadUrl` for a public store should be
   rate-limited, since whatever is uploaded is served to anyone.
 - **`plat dev`** serves public stores from the emulator's bucket with the same
-  headers, `Range` and `If-None-Match`.
+  headers, `Range` and `If-None-Match`, and relays browser uploads: the
+  emulator refuses a presigned request that carries an `Origin` header, which
+  every browser upload sends, so under `plat dev` (only) `uploadUrl` points at
+  the router's `/__plat_dev/upload?to=<presigned URL>`, which forwards the PUT
+  without it. Only presigned URLs on the emulator's endpoint are relayed.
 
 ## Jobs
 
@@ -903,20 +907,21 @@ in CI.
 Emulator coverage, tested against v1.0.385 on 2026-11-14 (AppSync Events on
 2026-11-15, ECS, ECR, one-shot schedules and function URLs on 2026-11-16):
 
-| Works                                                                               | Missing, so the wrapper fills in                                                                    |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server   |
-| SQS; SQS → Lambda ESM (checks role permissions); async invoke configs, destinations | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally  |
-| EventBridge → SQS/Lambda (checks resource policies), rule targets' DLQs             | Scheduler never fires: local cron runner, and the CLI's dispatcher waits out jobs' delays           |
-| Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                        |
-| S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                       |
-| Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                    |
-| AppSync Events: Event APIs, namespaces, API keys, IAM publish, handlers, wildcards  | Lambda authorizer never invoked (any token passes): signed-in subscribe tokens go unchecked locally |
-| ECS (Fargate tasks simulated once the VPC has an internet route), ECR layer uploads | Default VPC has no internet gateway: `ensureLocalPlatform` adds one and a default route             |
-| Scheduler one-shot schedules with universal targets (`ecs:updateService`)           | ECS timestamps carry 9 decimals, which the JS SDK rejects: engine compat middleware                 |
-| SESv2: identities, configuration sets, tenants and their associations               | `SendEmail` as a tenant is NotImplemented and sent mail can't be read back: the CLI's inbox         |
-| Lambda versions, aliases, function URLs and their permissions                       | Function URLs answer 502 for a streaming handler: `plat dev` runs the server                        |
-|                                                                                     | In-memory only: re-provisioned on each start (seconds)                                              |
+| Works                                                                               | Missing, so the wrapper fills in                                                                                 |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| DynamoDB (GSIs, TTL, transactions)                                                  | Web Function endpoints (`CreateWebFunctionEndpoint` = NotImplemented): `plat dev` runs the server                |
+| SQS; SQS → Lambda ESM (checks role permissions); async invoke configs, destinations | Lambda `nodejs24.x` is a JS sandbox without networking modules: `plat dev` runs the worker locally               |
+| EventBridge → SQS/Lambda (checks resource policies), rule targets' DLQs             | Scheduler never fires: local cron runner, and the CLI's dispatcher waits out jobs' delays                        |
+| Lambda control plane (create/update, ESMs, permissions); logs reach CloudWatch Logs | Cognito hosted UI (404): local sign-in page in the SDK, real emulator tokens                                     |
+| S3 (presigned URLs, CORS), SSM SecureString, IAM/STS                                | CloudFront edge: local router                                                                                    |
+| Cognito tokens (RS256) + JWKS on the emulator endpoint                              | lambda-web timestamps break the JS SDK: engine compat middleware                                                 |
+| AppSync Events: Event APIs, namespaces, API keys, IAM publish, handlers, wildcards  | Lambda authorizer never invoked (any token passes): signed-in subscribe tokens go unchecked locally              |
+| ECS (Fargate tasks simulated once the VPC has an internet route), ECR layer uploads | Default VPC has no internet gateway: `ensureLocalPlatform` adds one and a default route                          |
+| Scheduler one-shot schedules with universal targets (`ecs:updateService`)           | ECS timestamps carry 9 decimals, which the JS SDK rejects: engine compat middleware                              |
+| SESv2: identities, configuration sets, tenants and their associations               | `SendEmail` as a tenant is NotImplemented and sent mail can't be read back: the CLI's inbox                      |
+| Lambda versions, aliases, function URLs and their permissions                       | Function URLs answer 502 for a streaming handler: `plat dev` runs the server                                     |
+|                                                                                     | A presigned request with an `Origin` header is refused (`InvalidAccessKeyId`): the router relays browser uploads |
+|                                                                                     | In-memory only: re-provisioned on each start (seconds)                                                           |
 
 As the emulator fills gaps (it releases several times a day), the wrapper
 drops each stand-in.

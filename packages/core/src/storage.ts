@@ -45,6 +45,17 @@ export const STORAGE_CACHE_HOST = '__storage';
 export const STORAGE_DEFAULT_CACHE_CONTROL = 'no-cache';
 
 /**
+ * `plat dev` only: where its router relays browser uploads to the AWS Emulator,
+ * with the presigned URL in `?to=`. The emulator refuses a presigned request
+ * that carries an `Origin` header (`InvalidAccessKeyId`), which every browser
+ * upload sends and S3 accepts; the router forwards the PUT without it. The SDK
+ * returns relay URLs when `DEV_UPLOAD_RELAY_ENV` is set, which only `plat dev`
+ * does (`plat test` and deployed stages get the presigned URL itself).
+ */
+export const DEV_UPLOAD_PATH = '/__plat_dev/upload';
+export const DEV_UPLOAD_RELAY_ENV = 'PLATFORM_DEV_UPLOAD_RELAY';
+
+/**
  * Whether the edge serves `key` (as it appears in a URL path, so still
  * percent-encoded): not empty, and without `.` or `..` segments. S3 decodes
  * the key once, so `%2e` counts as a dot and `%2f` as a slash. The router
