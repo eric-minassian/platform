@@ -64,13 +64,6 @@ export interface FoundationStackProps extends StackProps {
   dnsDelegationRoleArn: string;
   /** Subscribed to the alerts topic. Unset means no subscription. */
   alertEmail?: string;
-  /**
-   * Who sends the user pool's mail (sign-up codes, password resets): `ses` sends from
-   * `login@mail.<zone>` through the platform's SES domain, `cognito` uses Cognito's own sender
-   * (`no-reply@verificationemail.com`, at most 50 messages a day). app.ts picks `ses` once SES
-   * can deliver to anyone.
-   */
-  userPoolEmail: 'ses' | 'cognito';
 }
 
 /**
@@ -495,6 +488,8 @@ export class FoundationStack extends Stack {
       featurePlan: cognito.FeaturePlan.ESSENTIALS,
       deletionProtection: true,
       removalPolicy: RemovalPolicy.RETAIN,
+      // Sign-up and reset codes come from login@ the mail domain, not Cognito's
+      // own sender (no-reply@verificationemail.com, 50 a day for the pool).
       // DEVELOPER email from an identity in this account and region needs no
       // sending-authorization policy (that's for Cognito's own sender with a
       // custom From): Cognito sends with its service-linked role
@@ -502,21 +497,17 @@ export class FoundationStack extends Stack {
       // the first such update with the deploying credentials, CloudFormation's
       // execution role. Without a configuration set or tenant, these count
       // against the account, not any app.
-      ...(props.userPoolEmail === 'ses'
-        ? {
-            email: cognito.UserPoolEmail.withSES({
-              fromEmail: `${EMAIL_LOGIN_LOCAL_PART}@${mailDomain}`,
-              // Quoted: a display name with a dot isn't a plain phrase (RFC 5322).
-              fromName: `"${config.domain}"`,
-              sesRegion: this.region,
-              sesVerifiedDomain: mailDomain,
-            }),
-          }
-        : {}),
+      email: cognito.UserPoolEmail.withSES({
+        fromEmail: `${EMAIL_LOGIN_LOCAL_PART}@${mailDomain}`,
+        // Quoted: a display name with a dot isn't a plain phrase (RFC 5322).
+        fromName: `"${config.domain}"`,
+        sesRegion: this.region,
+        sesVerifiedDomain: mailDomain,
+      }),
     });
     tag(users, 'identity');
     // The pool names the identity by ARN, which CloudFormation can't see as a reference.
-    if (props.userPoolEmail === 'ses') users.node.addDependency(mail);
+    users.node.addDependency(mail);
     const login = users.addDomain('Login', {
       customDomain: { domainName: config.loginHost, certificate: zoneCertificate },
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,

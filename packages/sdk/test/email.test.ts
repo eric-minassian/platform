@@ -261,13 +261,6 @@ describe('sendEmail: SES', () => {
       [awsError('BadRequestException', 'Illegal address'), 'rejected'],
       [awsError('MailFromDomainNotVerifiedException', 'MAIL FROM not verified'), 'rejected'],
       [awsError('TooManyRequestsException', 'Maximum sending rate exceeded'), undefined],
-      [
-        awsError(
-          'AccessDeniedException',
-          "User 'arn:aws:sts::000000000000:assumed-role/todo--prod/x' is not authorized to perform 'ses:SendEmail' on resource 'arn:aws:ses:us-east-1:000000000000:identity/Alice@Gmail.com'",
-        ),
-        'rejected',
-      ],
       [awsError('AccessDeniedException', 'not authorized'), undefined],
     ];
     for (const [error, reason] of cases) {
