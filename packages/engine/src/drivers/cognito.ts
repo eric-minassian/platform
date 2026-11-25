@@ -53,10 +53,9 @@ export async function ensureUserPool(
 export interface UserPoolClientSpec {
   userPoolId: string;
   name: string;
+  /** Where managed login returns after sign-in and sign-out (AWS only). */
   callbackUrls: string[];
   logoutUrls: string[];
-  /** Also allow password flows (the local sign-in page under `plat dev`). */
-  passwordFlows?: boolean;
 }
 
 export async function findUserPoolClient(
@@ -79,20 +78,31 @@ export async function findUserPoolClient(
   return undefined;
 }
 
-/** Public app client (no secret) for the authorization-code + PKCE flow. */
+/**
+ * Public app client (no secret). On AWS it signs in through managed login
+ * (authorization code + PKCE). The emulator has no managed login, and `plat
+ * dev`'s own sign-in page uses password flows instead, so its client has no
+ * OAuth settings. It couldn't have them anyway: like Cognito, the emulator
+ * (1.0.610 at least) refuses http callback URLs other than localhost's, and a
+ * local app is on `http://<app>.localhost`.
+ */
 export async function ensureUserPoolClient(ctx: EngineContext, spec: UserPoolClientSpec): Promise<string> {
   const cognito = ctx.clients.cognito;
   const flows: ExplicitAuthFlowsType[] = ['ALLOW_REFRESH_TOKEN_AUTH'];
-  if (spec.passwordFlows) flows.push('ALLOW_USER_PASSWORD_AUTH', 'ALLOW_ADMIN_USER_PASSWORD_AUTH');
+  if (ctx.target !== 'aws') flows.push('ALLOW_USER_PASSWORD_AUTH', 'ALLOW_ADMIN_USER_PASSWORD_AUTH');
   const config = {
     UserPoolId: spec.userPoolId,
     ClientName: spec.name,
     ExplicitAuthFlows: flows,
-    AllowedOAuthFlows: ['code' as const],
-    AllowedOAuthScopes: [...AUTH_SCOPES],
-    AllowedOAuthFlowsUserPoolClient: true,
-    CallbackURLs: spec.callbackUrls,
-    LogoutURLs: spec.logoutUrls,
+    ...(ctx.target === 'aws'
+      ? {
+          AllowedOAuthFlows: ['code' as const],
+          AllowedOAuthScopes: [...AUTH_SCOPES],
+          AllowedOAuthFlowsUserPoolClient: true,
+          CallbackURLs: spec.callbackUrls,
+          LogoutURLs: spec.logoutUrls,
+        }
+      : {}),
     SupportedIdentityProviders: ['COGNITO'],
     PreventUserExistenceErrors: 'ENABLED' as const,
     EnableTokenRevocation: true,

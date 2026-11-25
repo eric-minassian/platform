@@ -137,10 +137,28 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
               startFromHead: true,
             }),
           );
-          for (const e of ev.events ?? []) if (e.message?.includes('PLATFORM_TEST')) out.push(e.message);
+          for (const e of ev.events ?? []) {
+            const line = loggedMessage(e.message ?? '');
+            if (line.includes('PLATFORM_TEST')) out.push(line);
+          }
         }
       }
       return out;
+    }
+
+    /**
+     * What the worker logged. The engine sets Lambda's JSON log format, which wraps console
+     * output in an envelope's `message` (the emulator applies it too since 1.0.610).
+     */
+    function loggedMessage(event: string): string {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event);
+      } catch {
+        return event;
+      }
+      const message = (parsed as { message?: unknown } | null)?.message;
+      return typeof message === 'string' ? message : event;
     }
 
     async function waitForLine(match: string, timeoutMs = 60_000): Promise<string> {

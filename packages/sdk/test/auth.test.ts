@@ -46,11 +46,11 @@ describe('token issuers', () => {
     ).toBe(cognito);
   });
 
-  it("takes Cognito's or the emulator's own issuer locally", () => {
+  it("takes Cognito's or either of the emulator's issuers locally", () => {
     const emulator = `https://127.0.0.1:4566/${pool}`;
     expect(
       acceptedIssuers({ mode: 'local', issuer: cognito, jwksUri: `${emulator}/.well-known/jwks.json` }),
-    ).toEqual([cognito, emulator]);
+    ).toEqual([cognito, emulator, `https://cognito-idp.us-east-1.localhost:4566/${pool}`]);
   });
 });
 

@@ -300,7 +300,6 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
       name: names.userPoolClient(app, stage),
       callbackUrls: [`${url}${AUTH_ROUTES.callback}`],
       logoutUrls: [`${url}/`],
-      passwordFlows: platform.target === 'emulator',
     });
     auth = {
       mode: platform.target === 'emulator' ? 'local' : 'cognito',

@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+import {
+  DeleteWebFunctionRevisionCommand,
+  ListWebFunctionRevisionsCommand,
+} from '@aws-sdk/client-lambda-web';
 import { names, type PlatformRuntimeConfig } from '@ericminassian/platform-core';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -13,9 +18,11 @@ import {
   policies,
   startEmulator,
 } from '../../src/index.ts';
+import { isNotImplemented } from '../../src/util.ts';
 
-// The emulator implements Web Functions and revisions (but not endpoints yet);
-// this exercises the driver and the timestamp compat middleware.
+// The emulator implements Web Functions, revisions and (since after 1.0.385)
+// endpoints and revision deletion; this exercises the driver and the
+// timestamp compat middleware.
 describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
   'Web Function revisions on the emulator',
   () => {
@@ -69,9 +76,25 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
       expect(again).toEqual({ arn: created.arn });
 
       const ids: string[] = created.initialRevisionId ? [created.initialRevisionId] : [];
-      while (ids.length < 3) ids.push(await createRevision(ctx, await revision(ids.length)));
-      expect(new Set(ids).size).toBe(3);
-      await pruneRevisions(ctx, fnName, { keepNewest: 2, keep: [] });
+      while (ids.length < 4) ids.push(await createRevision(ctx, await revision(ids.length)));
+      expect(new Set(ids).size).toBe(4);
+      const lw = ctx.clients.lambdaWeb;
+
+      // The first revision serves the endpoint, so it's kept the way a stage keeps
+      // its endpoints' revisions: AWS refuses to delete one serving traffic.
+      const [serving, , ...newest] = ids as [string, string, string, string];
+      await pruneRevisions(ctx, fnName, { keepNewest: 2, keep: [serving] });
+      const after = (await lw.send(new ListWebFunctionRevisionsCommand({ functionName: fnName }))).revisions;
+      // Emulator 1.0.385 doesn't implement deleting revisions, so pruning leaves them all there.
+      const deletes = await lw
+        .send(new DeleteWebFunctionRevisionCommand({ functionName: fnName, revisionId: randomUUID() }))
+        .then(
+          () => true,
+          (e: unknown) => !isNotImplemented(e),
+        );
+      expect((after ?? []).map((r) => r.revisionId ?? '').toSorted()).toEqual(
+        (deletes ? [serving, ...newest] : ids).toSorted(),
+      );
     });
   },
 );
