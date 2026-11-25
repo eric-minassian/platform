@@ -1,12 +1,15 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { resolve } from 'node:path';
 import {
+  DEV_UPLOAD_PATH,
+  DEV_UPLOAD_RELAY_ENV,
   EMAIL_INBOX_PATH,
   LOCAL_MAIL_URL_ENV,
   LOCAL_STAGE,
-  publicStores,
   type ResolvedManifest,
+  publicStores,
 } from '@ericminassian/platform-core';
 import { EMULATOR_INSTALL_HINT } from '@ericminassian/platform-engine';
 import pc from 'picocolors';
@@ -22,6 +25,7 @@ import { formatMail, prefixer } from './pretty.ts';
 import { killTree } from './proc.ts';
 import { type Interceptor, type LocalRouterState, localRouteRecord, startLocalRouter } from './router.ts';
 import { startDevService } from './services.ts';
+import { relayUpload } from './upload-relay.ts';
 import { startWebDev } from './web-dev.ts';
 import { type Dispatcher, startLocalWorker, startWorkerDispatch } from './worker.ts';
 
@@ -35,6 +39,9 @@ export interface DevOptions {
 }
 
 export const DEV_CONTROL_PREFIX = '/__plat_dev/';
+
+/** Environment for `plat dev`'s processes: upload URLs go through the router's relay (see `DEV_UPLOAD_PATH`). */
+const DEV_UPLOADS = { [DEV_UPLOAD_RELAY_ENV]: '1' };
 
 /**
  * `plat dev`: the whole app locally against the AWS Emulator.
@@ -137,6 +144,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
     const worker = await startLocalWorker(stage, manifest, root, {
       mailUrl,
       jobsUrl: `http://127.0.0.1:${jobsPort}/`,
+      env: DEV_UPLOADS,
     });
     children.push(worker.child);
     const out = prefixer(pc.yellow('worker│'), (s) => process.stdout.write(s), { spans: opts.spans });
@@ -180,6 +188,7 @@ export async function runDev(opts: DevOptions): Promise<void> {
     const services = Object.keys(manifest.services).map((name) =>
       startDevService(stage, manifest, root, name, {
         ...(workerUrl ? { workerUrl } : {}),
+        env: DEV_UPLOADS,
         ...(opts.spans ? { spans: true } : {}),
         write: (s) => process.stdout.write(s),
         warn,
@@ -239,7 +248,17 @@ export async function runDev(opts: DevOptions): Promise<void> {
   }
 
   // ------------------------------------------------------------ router
+  const emulatorCa = readFileSync(stage.conn.caFile);
   const intercept: Interceptor[] = [
+    async (req, res, url) => {
+      if (url.pathname !== DEV_UPLOAD_PATH) return false;
+      await relayUpload(req, res, url, {
+        endpoint: stage.conn.endpoint,
+        ca: emulatorCa,
+        port: opts.port,
+      });
+      return true;
+    },
     async (req, res, url) => {
       if (!url.pathname.startsWith(DEV_CONTROL_PREFIX)) return false;
       const cron = /^\/__plat_dev\/cron\/([^/]+)$/.exec(url.pathname);
@@ -299,6 +318,7 @@ export async function spawnWebServer(
   const env = localEnv(stage, manifest, {
     AWS_LAMBDA_HTTP_ENDPOINT: `127.0.0.1:${port}`,
     PLATFORM_LOG_PRETTY: '1',
+    ...DEV_UPLOADS,
     PLATFORM_ENTRY: resolve(root, manifest.web.server),
     PLATFORM_SDK_SERVER: resolveFromApp(root, SDK_SERVER),
     // Queue sends and `Jobs.invoke` locally: the SDK posts to the dispatcher instead of invoking the

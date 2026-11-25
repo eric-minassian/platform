@@ -276,6 +276,9 @@ importers:
         specifier: ^4.23.15
         version: 4.23.15
     devDependencies:
+      '@aws-sdk/s3-request-presigner':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       effect:
         specifier: ^4.1.4
         version: 4.1.4

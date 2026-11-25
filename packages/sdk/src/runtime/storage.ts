@@ -1,5 +1,11 @@
 import type { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
-import { APP_CONFIG_FILE, contentTypeFor, storagePath } from '@ericminassian/platform-core';
+import {
+  APP_CONFIG_FILE,
+  contentTypeFor,
+  DEV_UPLOAD_PATH,
+  DEV_UPLOAD_RELAY_ENV,
+  storagePath,
+} from '@ericminassian/platform-core';
 import type { StoreName } from '../register.ts';
 import { getBindings } from './bindings.ts';
 import { client } from './clients.ts';
@@ -62,6 +68,12 @@ async function s3() {
 async function sign(command: GetObjectCommand | PutObjectCommand, expiresIn: number): Promise<string> {
   const [{ getSignedUrl }, c] = await Promise.all([import('@aws-sdk/s3-request-presigner'), client('s3')]);
   return getSignedUrl(c, command, { expiresIn });
+}
+
+/** Under `plat dev`, the router's upload relay for a presigned PUT (see `DEV_UPLOAD_PATH`); elsewhere the URL itself. */
+function forBrowser(signed: string): string {
+  if (!process.env[DEV_UPLOAD_RELAY_ENV]) return signed;
+  return `${getBindings().url}${DEV_UPLOAD_PATH}?to=${encodeURIComponent(signed)}`;
 }
 
 export function objectKey(prefix: string, key: string): string {
@@ -146,7 +158,7 @@ export function storage(name: StoreName): Store {
           ...(opts?.contentType ? { ContentType: opts.contentType } : {}),
           ...(opts?.cacheControl ? { CacheControl: opts.cacheControl } : {}),
         });
-        return sign(cmd, opts?.expiresInSeconds ?? 900);
+        return forBrowser(await sign(cmd, opts?.expiresInSeconds ?? 900));
       }),
     downloadUrl: (key, opts) =>
       span('storage.sign', name, async () => {
