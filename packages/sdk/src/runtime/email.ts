@@ -173,7 +173,7 @@ async function deliverWithSes(b: Bindings, e: EmailBindings, m: Normalized): Pro
     return { id: out.MessageId ?? randomUUID() };
   } catch (err) {
     await returnRecipients(b, e, day, to.length);
-    throw sesFailure(err, e.tenant, b.stage, to);
+    throw sesFailure(err, e.tenant, b.stage);
   }
 }
 
@@ -181,21 +181,9 @@ async function deliverWithSes(b: Bindings, e: EmailBindings, m: Normalized): Pro
 const TAG_VALUE = /^[A-Za-z0-9_-]{1,256}$/;
 
 /** SES's answer as `EmailRefused` when the app can act on it; anything else stays a defect. */
-function sesFailure(err: unknown, tenant: string, stage: string, to: readonly string[]): unknown {
+function sesFailure(err: unknown, tenant: string, stage: string): unknown {
   const name = (err as { name?: unknown } | null)?.name;
   const message = err instanceof Error ? err.message : String(err);
-  // In the SES sandbox every recipient must be a verified identity, and SES authorizes the stage
-  // role against each one, so an unverified recipient is AccessDenied on `identity/<address>`
-  // rather than a refusal (verified 2026-11-15). The role's own grant is fine: say so.
-  if (name === 'AccessDeniedException') {
-    const lower = message.toLowerCase();
-    const unverified = to.find((a) => lower.includes(`:identity/${a.toLowerCase()}`));
-    if (unverified !== undefined)
-      return new EmailRefused(
-        'rejected',
-        `email.send: SES refused ${unverified}: the platform's SES account is still in the sandbox, where SES delivers only to addresses verified in it. That ends when AWS grants it production access (docs/SETUP.md).`,
-      );
-  }
   // A paused tenant is `MessageRejected: Sending disabled for <tenant ARN>…` (verified 2026-11-15).
   if (
     (name === 'MessageRejected' && /sending disabled/i.test(message)) ||

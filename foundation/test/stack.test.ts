@@ -11,7 +11,7 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import config from '../../platform.config.ts';
-import { FOUNDATION_STACK, FoundationStack, type FoundationStackProps } from '../src/stack.ts';
+import { FOUNDATION_STACK, FoundationStack } from '../src/stack.ts';
 
 const account = '123456789012';
 const delegationRole = 'arn:aws:iam::210987654321:role/route53-delegation-platform-ericminassian-com';
@@ -20,19 +20,12 @@ const { context } = JSON.parse(readFileSync(new URL('../cdk.json', import.meta.u
   context: Record<string, unknown>;
 };
 
-function synth(
-  opts: {
-    alertEmail?: string;
-    userPoolEmail?: FoundationStackProps['userPoolEmail'];
-    config?: PlatformConfig;
-  } = {},
-): Template {
+function synth(opts: { alertEmail?: string; config?: PlatformConfig } = {}): Template {
   const stack = new FoundationStack(new App({ context }), FOUNDATION_STACK, {
     env: { account, region: config.region },
     config: opts.config ?? config,
     dnsDelegationRoleArn: delegationRole,
     ...(opts.alertEmail ? { alertEmail: opts.alertEmail } : {}),
-    userPoolEmail: opts.userPoolEmail ?? 'cognito',
   });
   return Template.fromStack(stack);
 }
@@ -410,32 +403,18 @@ describe('foundation stack', () => {
       });
     });
 
-    /** The template's one user pool, as far as these tests read it. */
-    const userPools = (t: Template) =>
-      t.findResources('AWS::Cognito::UserPool') as Record<
-        string,
-        { Properties: { EmailConfiguration?: unknown }; DependsOn?: string[] }
-      >;
-
-    it("keeps Cognito's sender until SES can deliver to anyone", () => {
-      const pool = Object.values(userPools(template))[0]!;
-      expect(pool.Properties.EmailConfiguration).toBeUndefined();
-      expect(pool.DependsOn).toBeUndefined();
-    });
-
-    it('then sends sign-up mail from login@ the mail domain through SES', () => {
-      const ses = synth({ userPoolEmail: 'ses' });
-      const [id, pool] = Object.entries(userPools(ses))[0]!;
-      expect(pool.Properties.EmailConfiguration).toEqual({
+    it('sends sign-up mail from login@ the mail domain through SES', () => {
+      const [pool] = Object.values(template.findResources('AWS::Cognito::UserPool')) as Array<{
+        Properties: { EmailConfiguration?: unknown };
+        DependsOn?: string[];
+      }>;
+      expect(pool!.Properties.EmailConfiguration).toEqual({
         EmailSendingAccount: 'DEVELOPER',
         From: `"${config.domain}" <login@${mailDomain}>`,
         SourceArn: `arn:aws:ses:${config.region}:${account}:identity/${mailDomain}`,
       });
       // The ARN is a literal, so only this makes the identity come first.
-      const identityId = Object.keys(ses.findResources('AWS::SES::EmailIdentity'))[0];
-      expect(pool.DependsOn).toEqual([identityId]);
-      // The same pool either way: switching updates it in place.
-      expect(id).toBe(Object.keys(template.findResources('AWS::Cognito::UserPool'))[0]);
+      expect(pool!.DependsOn).toEqual(Object.keys(template.findResources('AWS::SES::EmailIdentity')));
     });
   });
 

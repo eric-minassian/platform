@@ -203,36 +203,25 @@ exists, so:
 
 ## 11. Email: SES production access
 
-A new account's SES is in the sandbox: 200 emails a day, and only to
-addresses verified in SES. Apps that declare `email` deploy and send, but a
-send to anyone else fails with `EmailNotSent` (`rejected`), and the user pool
-keeps Cognito's own sender (50 emails a day for the whole pool).
-
-After the foundation deploy has verified `mail.platform.ericminassian.com`,
-ask AWS for production access:
+Granted for `platform-prod` in November 2026. A new account's SES is in the
+sandbox: it delivers only to addresses verified in SES, so apps' mail and the
+user pool's sign-up codes reach nobody else. Production access needs a
+verified identity in the region, which `mail.platform.ericminassian.com` is a
+few minutes after the first deploy. Then ask for it:
 
 ```sh
 aws sesv2 put-account-details --profile platform-prod --region us-east-1 \
   --production-access-enabled --mail-type TRANSACTIONAL \
   --website-url https://platform.ericminassian.com --contact-language EN \
   --use-case-description '<who receives mail, how bounces and complaints are handled, volume>'
-aws sesv2 get-account --profile platform-prod --region us-east-1 --query Details.ReviewDetails
+aws sesv2 get-account --profile platform-prod --region us-east-1 --query '[ProductionAccessEnabled, Details.ReviewDetails]'
 ```
 
-AWS answers in the account's Support Center case (the `CaseId` above). It
-may ask for the site, the kinds of email, daily volume, how recipients opt
-in, how bounces and complaints are handled, and a sample email: answer all of
-them in one reply. The API can show the review as `DENIED` while that case
-is open. Access needs a verified identity in the region, which the domain is
-once the foundation deploy has run. Once `ProductionAccessEnabled` is true,
-the next platform deploy moves the user pool's mail to SES
-(`login@mail.platform.ericminassian.com`).
-
-While in the sandbox, verify an address to test with:
-
-```sh
-aws sesv2 create-email-identity --profile platform-prod --region us-east-1 --email-identity you@example.com
-```
+AWS answers in the account's Support Center case (the `CaseId`). It may ask
+for the site, the kinds of email, daily volume, how recipients opt in, how
+bounces and complaints are handled, and a sample email: answer all of them
+in one reply. The API can show the review as `DENIED` while that case is
+open.
 
 ## 12. Smoke test
 

@@ -631,9 +631,8 @@ control plane   reads them on demand: console Email page, `plat email`; the ping
   findings are still open). The 5-minute pinger alerts when a prod stage's
   sending is paused or resumes.
 - **The user pool** sends its own mail (sign-up and reset codes) through SES
-  from `login@mail.<zone>` once the account has production access. Until
-  then Cognito's own sender (50 emails a day for the whole pool) stays: in
-  the SES sandbox, Cognito could only mail verified addresses.
+  from `login@mail.<zone>`, not Cognito's own sender (50 emails a day for the
+  whole pool). It has no tenant: it counts against the account.
 - **Lifecycle.** Deploy creates the configuration set and tenant and
   associates both with the domain before any code that sends. Removing
   `email` keeps them (the suppression list and any pause live there), as
@@ -1320,15 +1319,11 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
     was AccessDenied.
   - A paused tenant answers `MessageRejected: Sending disabled for <tenant>`.
   - Tenant metrics carry both `TenantId` and `TenantName` dimensions.
-  - In the SES sandbox SES authorizes each recipient as an identity, so an
-    unverified recipient is AccessDenied on `identity/<address>`; the SDK
-    reports that as `rejected` with the reason.
-  - SES production access was requested the same day. Within half an hour
-    the API reported the review as `DENIED`, but the support case asked for
-    more detail and a verified identity in the region, which the account
-    gets with the foundation deploy. Until AWS grants it, apps can only mail
-    verified addresses and the user pool keeps Cognito's sender. See
-    `docs/SETUP.md` step 11.
+  - Cognito creates a user pool whose SES identity doesn't exist yet
+    (checked 2026-11-25 on a throwaway pool), so a new account's first
+    deploy doesn't wait for the mail domain to verify.
+  - SES production access (`docs/SETUP.md` step 11) was granted in
+    November 2026: 50,000 emails a day at 14 a second.
 - **The edge floor counts IPv6 clients per address.** WAF can't group by
   prefix, so a client rotating through its /64 gets a budget per address;
   apps' own limits group by /64 (`clientInfo().network`).
@@ -1402,7 +1397,6 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | Email on SES with a tenant per stage                                                  | Tenants give each stage its own suppression list, metrics and reputation pause, so one app can't spoil mail for the rest, with nothing for the platform to process: no bounce notifications, no suppression table. The issue's first plan (SNS notifications into a control-plane suppression list) predates tenant-level suppression lists (June 2026).                                                                                                                                                                                                 |
 | The daily email limit is counted by the SDK; the tenant pause is the backstop         | One conditional write per send is exact and immediate, and its failure is typed for the app. A control-plane pause driven by telemetry couldn't be bypassed, but would act minutes late; IAM still pins the role to its own tenant, whose reputation pause applies whatever the code does.                                                                                                                                                                                                                                                               |
 | One sender per stage, `<app>@mail.<zone>`, with a display name                        | Custom local parts on one shared domain would be a namespace across every app. Per-app subdomains would avoid that but add length for little gain; the display name carries the app's name.                                                                                                                                                                                                                                                                                                                                                              |
-| The user pool's mail moves to SES only with production access                         | In the sandbox SES delivers only to verified addresses, so switching earlier would stop every sign-up code. `foundation/src/app.ts` checks at synth time, so the first deploy after approval switches it.                                                                                                                                                                                                                                                                                                                                                |
 | Rate limits: a sliding window in the stage's table                                    | One conditional write per check in the app's own table is exact under concurrency, needs no new infrastructure and bills the app. A sliding window avoids fixed windows' 2× burst at boundaries, at the same cost. Not Effect's `persistence/RateLimiter`: its store must also keep token buckets and adaptive state, which DynamoDB can't update atomically.                                                                                                                                                                                            |
 | An edge floor on AWS WAF, per client and host                                         | Eric's call (2026-11-16), after rate limits shipped without it. Floods of static files never reach a function, so only the edge can stop them. Keyed per host so one app's busy client or a shared CI runner doesn't lose the others.                                                                                                                                                                                                                                                                                                                    |
 | Public stores under `_public/` in the storage bucket, served by the router            | No Web Function invocation, memory or response-size cap per edge miss, and no DNS, certificate or CORS (same origin). A per-store grant in the bucket policy would be one document every deploy rewrites with no conditional write; a separate bucket would isolate as well, with one more bucket and runtime-config field.                                                                                                                                                                                                                              |
