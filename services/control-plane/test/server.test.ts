@@ -1,23 +1,20 @@
 import { assert, describe, it } from '@effect/vitest';
 import {
   type AppRecord,
-  type Dashboard,
   type LogLine,
   MIN_SDK_VERSION,
   parseManifest,
   type ResolvedManifest,
-  type SavedQuery,
 } from '@ericminassian/platform-core';
 import { Conflict } from '@ericminassian/platform-core/platform-api';
 import type { ControlServiceInput } from '@ericminassian/platform-engine';
 import { captureTelemetry, resetPlatform, useTestBindings } from '@ericminassian/platform/testing';
-import { Effect, Layer, Ref, Stream } from 'effect';
+import { Effect, Ref, Stream } from 'effect';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach } from 'vitest';
 import { AwsError } from '../src/aws.ts';
 import { DeployFailed } from '../src/deploy.ts';
 import { WorkerJobFailed } from '../src/jobs/call.ts';
-import { Library } from '../src/library.ts';
 import type { DeploymentItem, StageItem } from '../src/store.ts';
 import { api, ciToken, githubApp, memoryStore, type TestServices, testServices } from './support.ts';
 
@@ -1367,242 +1364,6 @@ describe('logs, traces and Logs Insights', () => {
         { filters: { outcome: 'error', minMs: 500 }, limit: 50, span: 3_600_000 },
         { fingerprint: '0a1b2c3d', span: 7 * 86_400_000 },
       ]);
-    }),
-  );
-});
-
-describe('saved queries and dashboards', () => {
-  const ops: AppRecord = { ...shop, name: 'ops', repo: 'ada/ops', owners: ['ada'], createdBy: 'ada' };
-  const errorsChart = {
-    kind: 'metrics',
-    chart: 'line',
-    queries: [{ id: 'a', metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } }],
-  };
-
-  it.effect('keeps an app’s saved queries for whoever can see the app', () =>
-    Effect.gen(function* () {
-      const { request, signIn } = yield* setup({ store: memoryStore({ apps: [shop, ops] }) });
-      const bob = yield* signIn('bob');
-      const created = yield* request('/v1/apps/shop/queries', {
-        method: 'POST',
-        headers: bob,
-        json: { name: ' 5xx rate ', view: errorsChart, range: '24h' },
-      });
-      assert.strictEqual(created.status, 201);
-      const query = (yield* json(created)) as SavedQuery;
-      assert.strictEqual(query.name, '5xx rate');
-      assert.strictEqual(query.app, 'shop');
-      assert.strictEqual(query.createdBy, 'bob');
-      assert.match(query.id, /^q[0-9a-z]{26}$/);
-
-      const updated = yield* request(`/v1/apps/shop/queries/${query.id}`, {
-        method: 'PUT',
-        headers: yield* signIn('ada'),
-        json: { name: 'errors', view: { kind: 'logs', filters: { levels: ['error'] } } },
-      });
-      const after = (yield* json(updated)) as SavedQuery;
-      assert.deepStrictEqual(
-        [after.id, after.name, after.range, after.createdBy, after.view.kind],
-        [query.id, 'errors', undefined, 'bob', 'logs'],
-      );
-      const listed = (yield* json(yield* request('/v1/apps/shop/queries', { headers: bob }))) as SavedQuery[];
-      assert.deepStrictEqual(listed, [after]);
-
-      // An app bob can't see is "not found", queries and all.
-      assert.strictEqual((yield* request('/v1/apps/ops/queries', { headers: bob })).status, 404);
-      const missing = yield* request('/v1/apps/shop/queries/qnope', { method: 'DELETE', headers: bob });
-      assert.strictEqual(missing.status, 404);
-      const removed = yield* request(`/v1/apps/shop/queries/${query.id}`, { method: 'DELETE', headers: bob });
-      assert.strictEqual(removed.status, 204);
-      assert.deepStrictEqual(yield* json(yield* request('/v1/apps/shop/queries', { headers: bob })), []);
-    }),
-  );
-
-  it.effect('refuses views that couldn’t run, and more than 100 saved queries', () =>
-    Effect.gen(function* () {
-      const full = Layer.effect(
-        Library,
-        Effect.gen(function* () {
-          const library = yield* Library;
-          for (let i = 0; i < 100; i++)
-            yield* library.putQuery({
-              id: `q${i}`,
-              app: 'shop',
-              name: `q${i}`,
-              view: { kind: 'logs' },
-              createdBy: 'bob',
-              createdAt: '2026-11-16T00:00:00.000Z',
-              updatedAt: '2026-11-16T00:00:00.000Z',
-            });
-          return library;
-        }),
-      ).pipe(Layer.provide(Library.memory()));
-      const { request, signIn } = yield* setup({ store: memoryStore({ apps: [shop] }), library: full });
-      const bob = yield* signIn('bob');
-      const save = (view: unknown) =>
-        Effect.flatMap(
-          request('/v1/apps/shop/queries', { method: 'POST', headers: bob, json: { name: 'x', view } }),
-          json,
-        );
-      assert.deepStrictEqual(
-        yield* save({ ...errorsChart, queries: [{ id: 'a', metric: 'jobs', stat: 'p95' }] }),
-        { error: { code: 'bad_request', message: 'a: jobs answers count, rate, percent, not p95' } },
-      );
-      assert.deepStrictEqual(
-        yield* save({ kind: 'logs', insights: 'SOURCE logGroups() | fields @message' }),
-        {
-          error: {
-            code: 'bad_request',
-            message:
-              'queries run on the stage’s own log groups: SOURCE isn’t allowed (quote a field named source as `source`)',
-          },
-        },
-      );
-      assert.deepStrictEqual(yield* save({ kind: 'traces', filters: { routes: ['/x'] } }), {
-        error: {
-          code: 'bad_request',
-          message: 'route "/x" must be METHOD /pattern, e.g. GET /api/items/:id',
-        },
-      });
-      assert.deepStrictEqual(yield* save({ kind: 'logs' }), {
-        error: { code: 'limit', message: 'an app keeps up to 100 saved queries' },
-      });
-    }),
-  );
-
-  it.effect('shows each member the dashboards of apps they can see, and every cross-app one', () =>
-    Effect.gen(function* () {
-      const { request, signIn } = yield* setup({ store: memoryStore({ apps: [shop, ops] }) });
-      const bob = yield* signIn('bob');
-      const ada = yield* signIn('ada');
-      const widget = (id: string, x = 0) => ({ id, title: 'Errors', x, y: 0, w: 6, h: 4, view: errorsChart });
-      const create = (headers: Record<string, string>, body: Record<string, unknown>) =>
-        Effect.flatMap(request('/v1/dashboards', { method: 'POST', headers, json: body }), (res) =>
-          Effect.map(json(res), (b) => ({ status: res.status, body: b as Dashboard })),
-        );
-      const across = yield* create(bob, {
-        name: 'Everything',
-        widgets: [widget('w1'), { ...widget('w2', 6), app: 'ops' }],
-      });
-      assert.strictEqual(across.status, 201);
-      assert.strictEqual(across.body.app, undefined);
-      const shopBoard = yield* create(bob, { name: 'Shop', app: 'shop', widgets: [] });
-      const opsBoard = yield* create(ada, { name: 'Ops', app: 'ops', widgets: [] });
-      assert.strictEqual((yield* create(bob, { name: 'Sneaky', app: 'ops', widgets: [] })).status, 404);
-
-      const names = (res: unknown) => (res as Dashboard[]).map((d) => d.name);
-      assert.deepStrictEqual(names(yield* json(yield* request('/v1/dashboards', { headers: bob }))), [
-        'Shop',
-        'Everything',
-      ]);
-      assert.deepStrictEqual(names(yield* json(yield* request('/v1/dashboards', { headers: ada }))), [
-        'Ops',
-        'Shop',
-        'Everything',
-      ]);
-      assert.deepStrictEqual(
-        names(yield* json(yield* request('/v1/dashboards?app=shop', { headers: bob }))),
-        ['Shop', 'Everything'],
-      );
-      const hidden = yield* request(`/v1/dashboards/${opsBoard.body.id}`, { headers: bob });
-      assert.deepStrictEqual(yield* json(hidden), {
-        error: { code: 'not_found', message: `dashboard ${opsBoard.body.id} not found` },
-      });
-
-      // Any member edits a cross-app dashboard; the last write wins.
-      const edited = yield* request(`/v1/dashboards/${across.body.id}`, {
-        method: 'PUT',
-        headers: ada,
-        json: { name: 'Everything, edited', widgets: [] },
-      });
-      const after = (yield* json(edited)) as Dashboard;
-      assert.deepStrictEqual(
-        [after.name, after.createdBy, after.updatedBy, after.createdAt],
-        ['Everything, edited', 'bob', 'ada', across.body.createdAt],
-      );
-      // Moving a dashboard to an app needs access to that app.
-      const moved = yield* request(`/v1/dashboards/${shopBoard.body.id}`, {
-        method: 'PUT',
-        headers: bob,
-        json: { name: 'Shop', app: 'ops', widgets: [] },
-      });
-      assert.strictEqual(moved.status, 404);
-      assert.strictEqual(
-        (yield* request(`/v1/dashboards/${opsBoard.body.id}`, { method: 'DELETE', headers: bob })).status,
-        404,
-      );
-      assert.strictEqual(
-        (yield* request(`/v1/dashboards/${shopBoard.body.id}`, { method: 'DELETE', headers: bob })).status,
-        204,
-      );
-    }),
-  );
-
-  it.effect('refuses dashboards whose widgets overlap ids, overflow the grid or couldn’t run', () =>
-    Effect.gen(function* () {
-      const { request, signIn } = yield* setup({ store: memoryStore({ apps: [shop] }) });
-      const bob = yield* signIn('bob');
-      const widget = { id: 'w', title: '', x: 0, y: 0, w: 4, h: 4, view: { kind: 'logs' } };
-      const save = (widgets: unknown[]) =>
-        Effect.flatMap(
-          request('/v1/dashboards', {
-            method: 'POST',
-            headers: bob,
-            json: { name: 'd', app: 'shop', widgets },
-          }),
-          json,
-        );
-      const message = (body: unknown) => (body as { error: { message: string } }).error.message;
-      assert.strictEqual(message(yield* save([widget, widget])), 'two widgets are named w');
-      assert.strictEqual(
-        message(yield* save([{ ...widget, x: 10 }])),
-        "widget w runs past the grid's 12 columns",
-      );
-      assert.strictEqual(
-        message(yield* save([{ ...widget, view: { kind: 'logs', filters: { revs: ['d1 or'] } } }])),
-        'widget w: rev "d1 or" isn\'t a deployment id',
-      );
-      assert.strictEqual(
-        message(
-          yield* save([
-            {
-              ...widget,
-              view: { kind: 'metrics', chart: 'line', queries: [{ id: 'a', metric: 'custom', stat: 'sum' }] },
-            },
-          ]),
-        ),
-        'widget w: a: a custom metric query names its metric, or groups by name',
-      );
-    }),
-  );
-
-  it.effect('deletes an app’s saved queries and dashboards with the app', () =>
-    Effect.gen(function* () {
-      const { request, signIn } = yield* setup({ store: memoryStore({ apps: [shop] }) });
-      const bob = yield* signIn('bob');
-      yield* request('/v1/apps/shop/queries', {
-        method: 'POST',
-        headers: bob,
-        json: { name: 'q', view: { kind: 'logs' } },
-      });
-      yield* request('/v1/dashboards', {
-        method: 'POST',
-        headers: bob,
-        json: { name: 'Shop', app: 'shop', widgets: [] },
-      });
-      yield* request('/v1/dashboards', {
-        method: 'POST',
-        headers: bob,
-        json: { name: 'Across', widgets: [] },
-      });
-      assert.strictEqual((yield* request('/v1/apps/shop', { method: 'DELETE', headers: bob })).status, 204);
-      yield* request('/v1/apps', { method: 'POST', headers: bob, json: { name: 'shop', repo: 'bob/shop' } });
-      assert.deepStrictEqual(yield* json(yield* request('/v1/apps/shop/queries', { headers: bob })), []);
-      const boards = (yield* json(yield* request('/v1/dashboards', { headers: bob }))) as Dashboard[];
-      assert.deepStrictEqual(
-        boards.map((d) => d.name),
-        ['Across'],
-      );
     }),
   );
 });

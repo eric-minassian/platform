@@ -4,23 +4,23 @@
  * open while the action runs and closes once it succeeds; on failure it
  * stays open so the viewer can retry or cancel (the action reports why).
  */
-import { type MouseEvent, type ReactElement, type ReactNode, useState } from 'react';
 import {
   AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
+  AlertDialogBackdrop,
+  AlertDialogClose,
   AlertDialogContent,
   AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
   AlertDialogTitle,
   AlertDialogTrigger,
-} from '../ui/alert-dialog.tsx';
-import { Button } from '../ui/button.tsx';
+} from '@ui-sdk/react/alert-dialog';
+import { cn } from 'cn';
+import type { MouseEvent, ReactElement, ReactNode } from 'react';
+import { Button, buttonVariants } from '../ui/button.tsx';
+import { backdrop, dialogSurface } from '../ui/dialog.tsx';
 
 /**
- * Clicks in the dialog's portal still bubble through React's tree, so in a
- * clickable table row its trigger and its buttons would also click the row.
+ * Popups render in place, so clicks inside one bubble through the elements
+ * around it: in a clickable row they'd also click the row.
  */
 const stop = (e: MouseEvent) => e.stopPropagation();
 
@@ -44,6 +44,7 @@ export function ConfirmAction({
   description?: ReactNode;
   /** Anything between the description and the buttons, such as a confirmation field. */
   body?: ReactNode;
+  /** Say what it does ("Destroy pr-41"), in words the trigger doesn't use alone. */
   confirmLabel: string;
   destructive?: boolean;
   canConfirm?: boolean;
@@ -52,15 +53,8 @@ export function ConfirmAction({
   onConfirm: () => Promise<boolean>;
   onOpenChange?: (open: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const change = (next: boolean) => {
-    if (busy) return;
-    setOpen(next);
-    onOpenChange?.(next);
-  };
   return (
-    <AlertDialog open={open} onOpenChange={change}>
+    <AlertDialog onOpenChange={(open) => onOpenChange?.(open)}>
       <AlertDialogTrigger
         disabled={disabled}
         render={trigger ?? <Button variant={destructive ? 'destructive' : 'outline'} size="sm" />}
@@ -68,32 +62,35 @@ export function ConfirmAction({
       >
         {children}
       </AlertDialogTrigger>
-      <AlertDialogContent className="data-[size=default]:sm:max-w-md" onClick={stop}>
-        <AlertDialogHeader>
-          <AlertDialogTitle>{title}</AlertDialogTitle>
-          {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
-        </AlertDialogHeader>
-        {body}
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            variant={destructive ? 'destructive' : 'default'}
-            disabled={busy || !canConfirm}
-            onClick={() =>
-              void (async () => {
-                setBusy(true);
-                const done = await onConfirm();
-                setBusy(false);
-                if (done) {
-                  setOpen(false);
-                  onOpenChange?.(false);
-                }
-              })()
-            }
+      <AlertDialogBackdrop className={backdrop} />
+      <AlertDialogContent className={cn(dialogSurface, '[--dialog-width:28rem]')} onClick={stop}>
+        <div className="flex flex-col gap-1.5 px-6 pt-5 pb-4">
+          <AlertDialogTitle className="m-0 text-base font-semibold tracking-tight">{title}</AlertDialogTitle>
+          {description && (
+            <AlertDialogDescription className="m-0 text-sm text-pretty text-muted-foreground">
+              {description}
+            </AlertDialogDescription>
+          )}
+          {body && <div className="pt-3">{body}</div>}
+        </div>
+        <div className="flex justify-end gap-2 border-t bg-muted px-6 py-3">
+          <AlertDialogClose className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+            Cancel
+          </AlertDialogClose>
+          <AlertDialogClose
+            value="confirm"
+            // An agent can open this, but agreeing takes a person.
+            data-agent-confirm={confirmLabel}
+            disabled={!canConfirm}
+            className={buttonVariants({ variant: destructive ? 'destructive' : 'default', size: 'sm' })}
+            action={async () => {
+              // A rejection keeps the dialog open; the action has already said why.
+              if (!(await onConfirm())) throw new Error('not done');
+            }}
           >
             {confirmLabel}
-          </AlertDialogAction>
-        </AlertDialogFooter>
+          </AlertDialogClose>
+        </div>
       </AlertDialogContent>
     </AlertDialog>
   );

@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import tailwindcss from '@tailwindcss/vite';
+import { preferencesScript } from '@ui-sdk/core';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
+import { colorScheme } from './src/lib/color-scheme.ts';
 
 // The local API (`pnpm api:dev` or `pnpm web:demo`); another port when worktrees run side by side.
 const api = process.env.PLATFORM_DEV_API ?? 'http://127.0.0.1:8787';
@@ -39,9 +41,19 @@ function agentGuide(): Plugin {
   };
 }
 
+/** Applies the saved color scheme as the page loads, before the app's JavaScript, so a dark choice never flashes light. */
+function colorSchemeScript(): Plugin {
+  return {
+    name: 'color-scheme-script',
+    transformIndexHtml: () => [
+      { tag: 'script', children: preferencesScript([colorScheme]), injectTo: 'head-prepend' },
+    ],
+  };
+}
+
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
-  plugins: [react(), tailwindcss(), agentGuide()],
+  plugins: [react(), tailwindcss(), agentGuide(), colorSchemeScript()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
   build: {
     outDir: 'dist',

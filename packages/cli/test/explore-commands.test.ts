@@ -1,10 +1,6 @@
-import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
-import type { Dashboard, SavedQuery } from '@ericminassian/platform-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClient } from '../src/api.ts';
-import { dashboardInput, describeView, formatDashboard, formatQueries } from '../src/commands/explore.ts';
 import {
   collectList,
   formatContext,
@@ -22,41 +18,6 @@ import { tempDir } from './helpers.ts';
 const plain = stripVTControlCharacters;
 
 const at = '2026-11-16T10:00:00.000Z';
-const dashboard: Dashboard = {
-  id: 'db1',
-  name: 'Shop',
-  app: 'shop',
-  widgets: [
-    {
-      id: 'errors',
-      title: 'Errors',
-      x: 0,
-      y: 0,
-      w: 6,
-      h: 4,
-      view: {
-        kind: 'metrics',
-        chart: 'line',
-        queries: [{ id: 'a', metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } }],
-      },
-    },
-    {
-      id: 'logs',
-      title: 'Errors',
-      x: 6,
-      y: 0,
-      w: 6,
-      h: 4,
-      view: { kind: 'logs', filters: { levels: ['error'] } },
-      stage: 'pr-1',
-    },
-  ],
-  createdBy: 'bob',
-  createdAt: at,
-  updatedAt: at,
-  updatedBy: 'ada',
-};
-
 describe('log filter options', () => {
   it('builds the structured filters, checking levels and status classes', () => {
     expect(
@@ -153,45 +114,6 @@ describe('output', () => {
       'd2          4    ',
     ]);
   });
-
-  it('describes what saved queries and widgets read', () => {
-    expect(describeView(dashboard.widgets[0]!.view)).toBe('5xx % of requests');
-    expect(describeView({ kind: 'logs', q: 'timeout', filters: { levels: ['error'], routes: ['/a'] } })).toBe(
-      'logs: "timeout" · error · /a',
-    );
-    expect(
-      describeView({ kind: 'traces', filters: { routes: ['GET /a'], outcome: 'error', recorded: true } }),
-    ).toBe('traces: GET /a · failed · recorded');
-    expect(plain(formatDashboard(dashboard)).split('\n')).toEqual([
-      'Shop db1 · shop',
-      'widget  title   at       reads             ',
-      'errors  Errors  0,0 6×4  5xx % of requests ',
-      'logs    Errors  6,0 6×4  logs: error (pr-1)',
-    ]);
-    const query: SavedQuery = {
-      id: 'q1',
-      app: 'shop',
-      name: 'slow',
-      view: { kind: 'traces', filters: { minMs: 1000 } },
-      range: '24h',
-      createdBy: 'bob',
-      createdAt: at,
-      updatedAt: at,
-    };
-    expect(plain(formatQueries([query])).split('\n')[1]).toMatch(
-      /^q1\s+slow\s+traces: ≥ 1000ms\s+24h\s+2026-11-16 10:00:00Z\s+bob$/,
-    );
-  });
-
-  it('takes a dashboard’s JSON as `show --json` prints it, without what the API adds', () => {
-    expect(dashboardInput(JSON.stringify(dashboard))).toEqual({
-      id: 'db1',
-      request: { name: 'Shop', app: 'shop', widgets: dashboard.widgets },
-    });
-    expect(dashboardInput('{"name":"New"}')).toEqual({ request: { name: 'New', widgets: [] } });
-    expect(() => dashboardInput('[]')).toThrow(/JSON object/);
-    expect(() => dashboardInput('{')).toThrow(/isn't JSON/);
-  });
 });
 
 describe('requests', () => {
@@ -216,12 +138,6 @@ describe('requests', () => {
     await api.logContext('shop', { stage: 'prod', stream: 'web', ts: 5, before: 1, after: 2 });
     await api.insights('shop', { stage: 'prod', query: 'fields @message' });
     await api.errorOccurrences('shop', '0a1b2c3d', { stage: 'prod', from: 1, to: 2 });
-    await api.listQueries('shop');
-    await api.deleteQuery('shop', 'q1');
-    await api.listDashboards('shop');
-    await api.createDashboard({ name: 'd', widgets: [] });
-    await api.updateDashboard('db1', { name: 'd', widgets: [] });
-    await api.deleteDashboard('db1');
     expect(calls).toEqual([
       'GET https://api.test/v1/apps/shop/logs?stage=prod&from=1&to=2&f={"levels":["error"]}',
       'GET https://api.test/v1/apps/shop/logs?stage=prod&from=1',
@@ -230,12 +146,6 @@ describe('requests', () => {
       'GET https://api.test/v1/apps/shop/logs/context?stage=prod&stream=web&ts=5&before=1&after=2',
       'POST https://api.test/v1/apps/shop/insights {"stage":"prod","query":"fields @message"}',
       'GET https://api.test/v1/apps/shop/errors/0a1b2c3d/occurrences?stage=prod&from=1&to=2',
-      'GET https://api.test/v1/apps/shop/queries',
-      'DELETE https://api.test/v1/apps/shop/queries/q1',
-      'GET https://api.test/v1/dashboards?app=shop',
-      'POST https://api.test/v1/dashboards {"name":"d","widgets":[]}',
-      'PUT https://api.test/v1/dashboards/db1 {"name":"d","widgets":[]}',
-      'DELETE https://api.test/v1/dashboards/db1',
     ]);
   });
 });
@@ -274,9 +184,7 @@ describe('commands', () => {
               ? { res: '1h', timestamps: [], counts: [], revs: [] }
               : path.endsWith('/context')
                 ? { lines: [], anchor: 0 }
-                : path.startsWith('/v1/dashboards')
-                  ? { ...dashboard, ...(init?.method === 'POST' ? { id: 'db2' } : {}) }
-                  : {};
+                : {};
       return new Response(JSON.stringify(body));
     });
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -379,25 +287,5 @@ describe('commands', () => {
     await run('errors', '0a1b2c3d', '--occurrences', '--since', '1d', '--app', 'shop', '--json');
     expect(calls[0]?.url.pathname).toBe('/v1/apps/shop/errors/0a1b2c3d/occurrences');
     expect(JSON.parse(out)).toEqual({ res: '1h', timestamps: [], counts: [], revs: [] });
-  });
-
-  it('applies a dashboard from JSON: creates it, or replaces the one its id names', async () => {
-    const file = join(dir, 'dashboard.json');
-    writeFileSync(file, JSON.stringify({ name: 'New', widgets: [] }));
-    await run('dashboards', 'apply', '--file', file);
-    expect([calls[0]?.method, calls[0]?.url.pathname, calls[0]?.body]).toEqual([
-      'POST',
-      '/v1/dashboards',
-      { name: 'New', widgets: [] },
-    ]);
-    expect(plain(out)).toContain('created dashboard db2 (Shop)');
-
-    writeFileSync(file, JSON.stringify(dashboard));
-    await run('dashboards', 'apply', '--file', file);
-    expect([calls[1]?.method, calls[1]?.url.pathname]).toEqual(['PUT', '/v1/dashboards/db1']);
-    expect(calls[1]?.body).toEqual({ name: 'Shop', app: 'shop', widgets: dashboard.widgets });
-
-    await run('dashboards', '--app', 'shop');
-    expect(calls[2]?.url.search).toBe('?app=shop');
   });
 });

@@ -5,9 +5,10 @@
  */
 import { useAtomSet } from '@effect/atom-react';
 import type { InsightsResponse } from '@ericminassian/platform-core';
+import { shortcuts, useShortcut, useShortcutHint } from '@ui-sdk/react/shortcuts';
 import { Exit } from 'effect';
-import { Play } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { Play, SquareTerminal } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiClient, errorMessage } from '../../client.ts';
 import { fmtBytes, fmtNum } from '../../format.ts';
 import { chartOf } from '../../lib/insights.ts';
@@ -15,7 +16,8 @@ import type { TimeSearch } from '../../lib/time.ts';
 import { apiTime } from '../../lib/time.ts';
 import { keyed } from '../../lib/utils.ts';
 import { TimeChart } from '../charts/time-chart.tsx';
-import { EmptyState, ErrorNotice } from '../page.tsx';
+import { columns, DataTable } from '../data-table.tsx';
+import { EmptyState, ErrorNotice, Panel } from '../page.tsx';
 import { Button } from '../ui/button.tsx';
 import { Kbd } from '../ui/kbd.tsx';
 import { Spinner } from '../ui/spinner.tsx';
@@ -27,6 +29,75 @@ export const SAMPLE_QUERY = `fields @timestamp, @message
 | limit 100`;
 
 const runInsights = ApiClient.mutation('observe', 'insights');
+
+interface ResultRow {
+  readonly key: string;
+  readonly cells: ReadonlyArray<string | null>;
+}
+
+const col = columns<ResultRow>();
+
+function Results({ result }: { result: InsightsResponse }) {
+  const chart = useMemo(() => chartOf(result), [result]);
+  const rows = useMemo(
+    () => keyed(result.rows, (row) => row.join('\u0000')).map(({ key, item }) => ({ key, cells: item })),
+    [result],
+  );
+  const defs = useMemo(
+    () =>
+      col.columns(
+        result.columns.map((name, i) =>
+          col.accessor((r) => r.cells[i] ?? '', {
+            id: `${i}:${name}`,
+            header: name,
+            meta: { className: 'max-w-[48rem] align-top font-mono text-[12px] break-words' },
+          }),
+        ),
+      ),
+    [result],
+  );
+  return (
+    <Panel
+      flush
+      title="Results"
+      description={`${fmtNum(result.recordsMatched)} matched of ${fmtNum(result.recordsScanned)} scanned · ${fmtBytes(result.bytesScanned)}`}
+      actions={
+        chart && chart.series.length > 1 ? (
+          <ul aria-label="Series" className="flex flex-wrap gap-3 text-xs text-muted-foreground">
+            {chart.series.map((s) => (
+              <li key={s.key} className="flex items-center gap-1.5">
+                <span aria-hidden className="size-2 rounded-full" style={{ background: s.color }} />
+                {s.label}
+              </li>
+            ))}
+          </ul>
+        ) : undefined
+      }
+    >
+      {chart && (
+        <div className="px-5 pb-4">
+          <TimeChart
+            timestamps={chart.timestamps}
+            stepMs={chart.stepMs}
+            series={chart.series}
+            kind="bar"
+            format={fmtNum}
+            height={200}
+            ariaLabel="Query result over time"
+          />
+        </div>
+      )}
+      <DataTable
+        columns={defs}
+        data={rows}
+        getRowId={(r) => r.key}
+        dense
+        className="border-t"
+        empty={<EmptyState title="No rows">The query matched nothing in this window.</EmptyState>}
+      />
+    </Panel>
+  );
+}
 
 export function Insights({
   app,
@@ -46,9 +117,10 @@ export function Insights({
   const [error, setError] = useState<string>();
   const [running, setRunning] = useState(false);
   const run = useAtomSet(runInsights, { mode: 'promiseExit' });
-  const chart = useMemo(() => (result ? chartOf(result) : undefined), [result]);
+  const hint = useShortcutHint('mod+enter');
 
   const execute = async () => {
+    if (running || !draft.trim()) return;
     onQueryChange(draft);
     setRunning(true);
     setError(undefined);
@@ -57,95 +129,59 @@ export function Insights({
     if (Exit.isFailure(exit)) setError(errorMessage(exit.cause));
     else setResult(exit.value);
   };
+  useShortcut('mod+enter', () => void execute(), {
+    scope: 'insights-query',
+    allowInInput: true,
+    description: 'Run the query',
+  });
+  useEffect(() => () => shortcuts.setScope('insights-query', false), []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b p-4">
+    <>
+      <Panel
+        bodyClassName="p-0"
+        className="has-[textarea:focus-visible]:border-ring has-[textarea:focus-visible]:ring-3 has-[textarea:focus-visible]:ring-ring/20"
+        footer={
+          <>
+            <Button
+              size="sm"
+              disabled={running || !draft.trim()}
+              aria-keyshortcuts={hint.ariaKeyshortcuts}
+              onClick={() => void execute()}
+            >
+              {running ? <Spinner className="text-primary-foreground" /> : <Play />}
+              Run query
+            </Button>
+            <span>
+              <Kbd>{hint.text}</Kbd> runs it over the page's time window, on {stage}'s log groups.
+            </span>
+          </>
+        }
+      >
         <Textarea
           aria-label="Logs Insights query"
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void execute();
-            }
-          }}
+          onValueChange={setDraft}
+          onFocus={() => shortcuts.setScope('insights-query', true)}
+          onBlur={() => shortcuts.setScope('insights-query', false)}
           spellCheck={false}
-          rows={Math.min(10, Math.max(4, draft.split('\n').length))}
-          className="font-mono text-[12.5px] leading-relaxed"
+          rows={Math.min(14, Math.max(5, draft.split('\n').length + 1))}
+          className="resize-y rounded-t-xl rounded-b-none border-0 bg-transparent px-5 py-4 font-mono text-[13px] leading-relaxed hover:border-0 focus-visible:ring-0"
         />
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          <Button size="sm" disabled={running || !draft.trim()} onClick={() => void execute()}>
-            {running ? <Spinner /> : <Play />}
-            Run query
-          </Button>
-          <span className="text-xs text-muted-foreground">
-            <Kbd>⌘</Kbd> <Kbd>Enter</Kbd> runs it over the page's time window, on {stage}'s log groups.
-          </span>
-          {result && (
-            <span className="ml-auto text-xs text-muted-foreground tabular">
-              {fmtNum(result.recordsMatched)} matched of {fmtNum(result.recordsScanned)} scanned ·{' '}
-              {fmtBytes(result.bytesScanned)}
-            </span>
-          )}
-        </div>
-      </div>
-      {error && <ErrorNotice error={error} className="m-4" />}
-      {!result && !error && (
-        <EmptyState title="Run a query to see its results">
-          Logs Insights reads the raw lines, so it can filter, parse and aggregate anything. It costs $0.005
-          per GB it scans.
-        </EmptyState>
+      </Panel>
+      {error && <ErrorNotice error={error} />}
+      {result ? (
+        <Results result={result} />
+      ) : (
+        !error && (
+          <Panel>
+            <EmptyState icon={<SquareTerminal />} title="Run a query to see its results">
+              Logs Insights reads the raw lines, so it can filter, parse and aggregate anything. It costs
+              $0.005 per GB it scans.
+            </EmptyState>
+          </Panel>
+        )
       )}
-      {result && (
-        <div className="min-h-0 flex-1 overflow-auto">
-          {chart && (
-            <div className="border-b p-4">
-              <TimeChart
-                timestamps={chart.timestamps}
-                stepMs={chart.stepMs}
-                series={chart.series}
-                kind="bar"
-                format={fmtNum}
-                height={200}
-                ariaLabel="Query result over time"
-              />
-            </div>
-          )}
-          {result.rows.length === 0 ? (
-            <EmptyState title="No rows" />
-          ) : (
-            <table className="w-full text-[12px]">
-              <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
-                <tr className="border-b">
-                  {result.columns.map((c) => (
-                    <th key={c} className="px-4 py-2 text-left font-medium whitespace-nowrap">
-                      {c}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="font-mono">
-                {keyed(result.rows, (row) => row.join('\u0000')).map(({ key, item: row }) => {
-                  return (
-                    <tr key={key} className="border-b last:border-0 hover:bg-accent/40">
-                      {row.map((cell, i) => (
-                        <td
-                          key={result.columns[i]}
-                          className="max-w-[48rem] px-4 py-1.5 align-top break-words"
-                        >
-                          {cell ?? ''}
-                        </td>
-                      ))}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-    </div>
+    </>
   );
 }

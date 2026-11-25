@@ -25,13 +25,14 @@ import { Eye, EyeOff, Plus, X } from 'lucide-react';
 import { useState } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { family } from '../../data/atoms.ts';
+import { fmtNum } from '../../format.ts';
 import { parseExpr } from '../../lib/expr.ts';
 import { apiTime, type TimeSearch } from '../../lib/time.ts';
 import { cn } from '../../lib/utils.ts';
 import { Button } from '../ui/button.tsx';
 import { Input } from '../ui/input.tsx';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select.tsx';
-import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip.tsx';
+import { Tip } from '../ui/tooltip.tsx';
 import { type PickerOption, ValuePicker } from '../value-picker.tsx';
 
 export const METRIC_LABELS: Record<SeriesMetric, string> = {
@@ -123,19 +124,19 @@ const knownValuesAtom = family((k: { app: string; stage: string; time: TimeSearc
       options(fresh(ApiClient.query('observe', 'routes', { params, query, timeToLive })), (routes) =>
         routes
           .toSorted((a, b) => b.req - a.req)
-          .map((r) => ({ value: `${r.method} ${r.route}`, hint: r.req })),
+          .map((r) => ({ value: `${r.method} ${r.route}`, hint: fmtNum(r.req) })),
       ),
     jobs: () =>
       options(fresh(ApiClient.query('observe', 'jobs', { params, query, timeToLive })), (r) =>
-        r.jobs.map((j) => ({ value: `${j.kind}:${j.name}`, hint: j.ok + j.error })),
+        r.jobs.map((j) => ({ value: `${j.kind}:${j.name}`, hint: fmtNum(j.ok + j.error) })),
       ),
     custom: () =>
       options(fresh(ApiClient.query('observe', 'customMetrics', { params, query, timeToLive })), (r) =>
-        r.metrics.map((m) => ({ value: m.name, hint: m.count })),
+        r.metrics.map((m) => ({ value: m.name, hint: fmtNum(m.count) })),
       ),
     limits: () =>
       options(fresh(ApiClient.query('observe', 'limits', { params, query, timeToLive })), (r) =>
-        r.limits.map((l) => ({ value: l.name, hint: l.allowed + l.denied })),
+        r.limits.map((l) => ({ value: l.name, hint: fmtNum(l.allowed + l.denied) })),
       ),
     services: () =>
       options(fresh(ApiClient.query('observe', 'services', { params, query, timeToLive })), (r) =>
@@ -153,6 +154,50 @@ function useKnownValues(
 ): PickerOption[] {
   const result = useAtomValue(kind ? knownValuesAtom({ app, stage, time, kind }) : nothing);
   return Option.getOrElse(AsyncResult.value(result), (): PickerOption[] => []);
+}
+
+/** A select of a few labeled choices, sized for an editor row. */
+function Choice<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  className,
+}: {
+  label: string;
+  value: T;
+  options: ReadonlyArray<{ readonly value: T; readonly label: string }>;
+  onChange: (value: T) => void;
+  className?: string;
+}) {
+  return (
+    <Select items={[...options]} value={value} onValueChange={(next) => next !== null && onChange(next)}>
+      <SelectTrigger size="sm" aria-label={label} className={className}>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {options.map((o) => (
+          <SelectItem key={o.value} value={o.value}>
+            {o.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+}
+
+/** A query's or expression's id, as expressions refer to it. */
+function IdChip({ id, dashed = false }: { id: string; dashed?: boolean }) {
+  return (
+    <span
+      className={cn(
+        'grid h-6 min-w-6 shrink-0 place-items-center rounded-md px-1.5 font-mono text-xs font-medium text-muted-foreground',
+        dashed ? 'border border-dashed border-border-strong' : 'bg-accent',
+      )}
+    >
+      {id}
+    </span>
+  );
 }
 
 export function QueryRow({
@@ -190,11 +235,12 @@ export function QueryRow({
     onChange(Object.keys(next).length ? { ...rest, filter: next } : rest);
   };
   // Only the values the current metric filters on are fetched.
-  const known = useKnownValues(query.app ?? app, query.stage ?? stage, time, KNOWN_KIND[query.metric]);
+  const known = useKnownValues(app, query.stage ?? stage, time, KNOWN_KIND[query.metric]);
   const problem = checkSeriesQuery(query, { alert: !grouping });
   const groups = METRIC_GROUP_BY[query.metric];
-  const outcomes =
+  const outcomes: ReadonlyArray<NonNullable<SeriesFilter['outcome']>> =
     query.metric === 'jobs' ? ['ok', 'error'] : query.metric === 'rate_limit' ? ['allowed', 'denied'] : [];
+  const of = ` of ${query.id}`;
 
   return (
     <div
@@ -203,37 +249,26 @@ export function QueryRow({
         query.hidden && 'opacity-60',
       )}
     >
-      <span className="grid size-6 shrink-0 place-items-center rounded-md border bg-secondary font-mono text-xs font-medium uppercase">
-        {query.id}
-      </span>
-      <Select value={query.metric} onValueChange={(v) => onChange(resetFor(query, v as SeriesMetric))}>
-        <SelectTrigger size="sm" aria-label="Metric" className="min-w-36">
-          <SelectValue>{METRIC_LABELS[query.metric]}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {metrics.map((m) => (
-            <SelectItem key={m} value={m}>
-              {METRIC_LABELS[m]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Select value={query.stat} onValueChange={(v) => onChange({ ...query, stat: v as SeriesStat })}>
-        <SelectTrigger size="sm" aria-label="Statistic" className="min-w-28">
-          <SelectValue>{STAT_LABELS[query.stat]}</SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {METRIC_STATS[query.metric].map((s) => (
-            <SelectItem key={s} value={s}>
-              {STAT_LABELS[s]}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <IdChip id={query.id} />
+      <Choice
+        label={`Metric${of}`}
+        value={query.metric}
+        options={metrics.map((m) => ({ value: m, label: METRIC_LABELS[m] }))}
+        onChange={(m) => onChange(resetFor(query, m))}
+        className="min-w-36"
+      />
+      <Choice
+        label={`Statistic${of}`}
+        value={query.stat}
+        options={METRIC_STATS[query.metric].map((s) => ({ value: s, label: STAT_LABELS[s] }))}
+        onChange={(stat) => onChange({ ...query, stat })}
+        className="min-w-28"
+      />
 
       {(query.metric === 'requests' || query.metric === 'latency' || query.metric === 'cold_starts') && (
         <ValuePicker
           label="All routes"
+          name={`Routes${of}`}
           options={known}
           selected={f.routes ?? []}
           onChange={(v) => setFilter({ routes: v })}
@@ -243,6 +278,7 @@ export function QueryRow({
       {query.metric === 'requests' && (
         <ValuePicker
           label="Any status"
+          name={`Status classes${of}`}
           options={STATUS_CLASSES.map((s) => ({ value: s }))}
           selected={f.status ?? []}
           onChange={(v) => setFilter({ status: v as SeriesFilter['status'] })}
@@ -251,6 +287,7 @@ export function QueryRow({
       {(query.metric === 'jobs' || query.metric === 'job_duration') && (
         <ValuePicker
           label="All jobs"
+          name={`Jobs${of}`}
           options={known}
           selected={f.jobs ?? []}
           onChange={(v) => setFilter({ jobs: v })}
@@ -258,103 +295,80 @@ export function QueryRow({
         />
       )}
       {outcomes.length > 0 && (
-        <ValuePicker
-          label="Any outcome"
-          multiple={false}
-          options={outcomes.map((o) => ({ value: o }))}
-          selected={f.outcome ? [f.outcome] : []}
-          onChange={(v) => setFilter({ outcome: v[0] as SeriesFilter['outcome'] })}
+        <Choice
+          label={`Outcome${of}`}
+          value={f.outcome ?? 'any'}
+          options={[{ value: 'any', label: 'any outcome' }, ...outcomes.map((o) => ({ value: o, label: o }))]}
+          onChange={(o) => setFilter({ outcome: o === 'any' ? undefined : o })}
         />
       )}
-      {query.metric === 'custom' && (
+      {(query.metric === 'custom' || query.metric === 'rate_limit' || query.metric === 'service') && (
         <ValuePicker
-          label="Pick a metric"
+          label={
+            query.metric === 'custom'
+              ? 'Pick a metric'
+              : query.metric === 'rate_limit'
+                ? 'All limits'
+                : 'All services'
+          }
+          name={`${query.metric === 'custom' ? 'Metrics' : query.metric === 'rate_limit' ? 'Limits' : 'Services'}${of}`}
           options={known}
           selected={f.names ?? []}
           onChange={(v) => setFilter({ names: v })}
-          allowCustom
-        />
-      )}
-      {query.metric === 'rate_limit' && (
-        <ValuePicker
-          label="All limits"
-          options={known}
-          selected={f.names ?? []}
-          onChange={(v) => setFilter({ names: v })}
-          allowCustom
-        />
-      )}
-      {query.metric === 'service' && (
-        <ValuePicker
-          label="All services"
-          options={known}
-          selected={f.names ?? []}
-          onChange={(v) => setFilter({ names: v })}
+          allowCustom={query.metric !== 'service'}
         />
       )}
       {(query.metric === 'realtime' || query.metric === 'service') && (
-        <Select value={f.measure ?? ''} onValueChange={(v) => setFilter({ measure: String(v) })}>
-          <SelectTrigger size="sm" aria-label="Measure" className="min-w-28">
-            <SelectValue>{f.measure}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            {(query.metric === 'realtime' ? REALTIME_MEASURES : SERVICE_MEASURES).map((m) => (
-              <SelectItem key={m} value={m}>
-                {m}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <Choice
+          label={`Measure${of}`}
+          value={f.measure ?? ''}
+          options={(query.metric === 'realtime' ? REALTIME_MEASURES : SERVICE_MEASURES).map((m) => ({
+            value: m,
+            label: m,
+          }))}
+          onChange={(measure) => setFilter({ measure })}
+          className="min-w-28"
+        />
       )}
 
       {grouping && groups.length > 0 && (
-        <Select
+        <Choice
+          label={`Group by${of}`}
           value={query.groupBy ?? 'none'}
-          onValueChange={(v) => {
+          options={[
+            { value: 'none', label: 'no grouping' },
+            ...groups.map((g) => ({ value: g, label: `by ${GROUP_LABELS[g]}` })),
+          ]}
+          onChange={(g) => {
             const { groupBy: _drop, ...rest } = query;
-            onChange(v === 'none' ? rest : { ...rest, groupBy: v as SeriesGroupBy });
+            onChange(g === 'none' ? rest : { ...rest, groupBy: g });
           }}
-        >
-          <SelectTrigger size="sm" aria-label="Group by" className="min-w-32">
-            <SelectValue>{query.groupBy ? `by ${GROUP_LABELS[query.groupBy]}` : 'no grouping'}</SelectValue>
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">no grouping</SelectItem>
-            {groups.map((g) => (
-              <SelectItem key={g} value={g}>
-                by {GROUP_LABELS[g]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          className="min-w-32"
+        />
       )}
 
       {problem && <span className="text-xs text-warn">{problem}</span>}
 
-      <div className="ml-auto flex items-center gap-1">
+      <div className="ml-auto flex items-center gap-0.5">
         {hideable && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label={query.hidden ? `Show ${query.id}` : `Hide ${query.id}`}
-                  onClick={() => onChange({ ...query, hidden: !query.hidden })}
-                />
-              }
+          <Tip label={query.hidden ? 'Hidden: used by expressions only' : 'Hide from the chart'}>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={query.hidden ? `Show ${query.id}` : `Hide ${query.id}`}
+              aria-pressed={query.hidden ?? false}
+              onClick={() => onChange({ ...query, hidden: !query.hidden })}
             >
               {query.hidden ? <EyeOff /> : <Eye />}
-            </TooltipTrigger>
-            <TooltipContent>
-              {query.hidden ? 'Hidden: used by expressions only' : 'Hide from the chart'}
-            </TooltipContent>
-          </Tooltip>
+            </Button>
+          </Tip>
         )}
         {removable && onRemove && (
-          <Button variant="ghost" size="icon-sm" aria-label={`Remove ${query.id}`} onClick={onRemove}>
-            <X />
-          </Button>
+          <Tip label="Remove">
+            <Button variant="ghost" size="icon-sm" aria-label={`Remove ${query.id}`} onClick={onRemove}>
+              <X />
+            </Button>
+          </Tip>
         )}
       </div>
     </div>
@@ -379,45 +393,58 @@ function ExpressionRow({
     problem = error instanceof Error ? error.message : String(error);
   }
   const commit = () => {
-    if (!problem && draft.trim())
-      onChange({ ...expression, expr: draft.trim(), ...(label.trim() ? { label: label.trim() } : {}) });
+    if (problem || !draft.trim()) return;
+    const { label: _drop, ...rest } = expression;
+    onChange({ ...rest, expr: draft.trim(), ...(label.trim() ? { label: label.trim() } : {}) });
   };
+  const onEnter = (e: { key: string }) => e.key === 'Enter' && commit();
   return (
-    <div className="flex flex-wrap items-center gap-2 border-t px-4 py-2.5">
-      <span className="grid h-6 shrink-0 place-items-center rounded-md border border-dashed px-1.5 font-mono text-xs font-medium">
-        {expression.id}
-      </span>
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-2 border-t px-4 py-2.5',
+        expression.hidden && 'opacity-60',
+      )}
+    >
+      <IdChip id={expression.id} dashed />
       <Input
+        size="sm"
         aria-label={`Expression ${expression.id}`}
+        aria-invalid={problem ? true : undefined}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onValueChange={setDraft}
         onBlur={commit}
-        onKeyDown={(e) => e.key === 'Enter' && commit()}
+        onKeyDown={onEnter}
         placeholder="e.g. 100 * b / a"
-        className="h-7 w-64 font-mono text-[12px]"
+        className="w-64 font-mono text-[12px]"
       />
       <Input
+        size="sm"
         aria-label={`Label for ${expression.id}`}
         value={label}
-        onChange={(e) => setLabel(e.target.value)}
+        onValueChange={setLabel}
         onBlur={commit}
-        onKeyDown={(e) => e.key === 'Enter' && commit()}
+        onKeyDown={onEnter}
         placeholder="Label"
-        className="h-7 w-44"
+        className="w-44"
       />
       {problem && <span className="text-xs text-warn">{problem}</span>}
-      <div className="ml-auto flex items-center gap-1">
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={expression.hidden ? `Show ${expression.id}` : `Hide ${expression.id}`}
-          onClick={() => onChange({ ...expression, hidden: !expression.hidden })}
-        >
-          {expression.hidden ? <EyeOff /> : <Eye />}
-        </Button>
-        <Button variant="ghost" size="icon-sm" aria-label={`Remove ${expression.id}`} onClick={onRemove}>
-          <X />
-        </Button>
+      <div className="ml-auto flex items-center gap-0.5">
+        <Tip label={expression.hidden ? 'Show on the chart' : 'Hide from the chart'}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={expression.hidden ? `Show ${expression.id}` : `Hide ${expression.id}`}
+            aria-pressed={expression.hidden ?? false}
+            onClick={() => onChange({ ...expression, hidden: !expression.hidden })}
+          >
+            {expression.hidden ? <EyeOff /> : <Eye />}
+          </Button>
+        </Tip>
+        <Tip label="Remove">
+          <Button variant="ghost" size="icon-sm" aria-label={`Remove ${expression.id}`} onClick={onRemove}>
+            <X />
+          </Button>
+        </Tip>
       </div>
     </div>
   );
@@ -437,13 +464,13 @@ export function QueryEditor({
   onChange: (view: MetricsView) => void;
 }) {
   const expressions = view.expressions ?? [];
-  const setQuery = (i: number, q: NamedSeriesQuery) =>
-    onChange({ ...view, queries: view.queries.map((x, j) => (j === i ? q : x)) });
-  const setExpression = (i: number, e: SeriesExpression) =>
-    onChange({ ...view, expressions: expressions.map((x, j) => (j === i ? e : x)) });
+  const setQuery = (id: string, q: NamedSeriesQuery) =>
+    onChange({ ...view, queries: view.queries.map((x) => (x.id === id ? q : x)) });
+  const setExpression = (id: string, e: SeriesExpression) =>
+    onChange({ ...view, expressions: expressions.map((x) => (x.id === id ? e : x)) });
   return (
-    <div className="rounded-lg border bg-card">
-      {view.queries.map((q, i) => (
+    <section aria-label="Queries" className="rounded-xl border bg-card">
+      {view.queries.map((q) => (
         <QueryRow
           key={q.id}
           query={q}
@@ -451,19 +478,20 @@ export function QueryEditor({
           stage={stage}
           time={time}
           removable={view.queries.length > 1}
-          onChange={(next) => setQuery(i, next)}
-          onRemove={() => onChange({ ...view, queries: view.queries.filter((_, j) => j !== i) })}
+          hideable={expressions.length > 0 || q.hidden === true}
+          onChange={(next) => setQuery(q.id, next)}
+          onRemove={() => onChange({ ...view, queries: view.queries.filter((x) => x.id !== q.id) })}
         />
       ))}
-      {expressions.map((e, i) => (
+      {expressions.map((e) => (
         <ExpressionRow
           key={e.id}
           expression={e}
-          onChange={(next) => setExpression(i, next)}
-          onRemove={() => onChange({ ...view, expressions: expressions.filter((_, j) => j !== i) })}
+          onChange={(next) => setExpression(e.id, next)}
+          onRemove={() => onChange({ ...view, expressions: expressions.filter((x) => x.id !== e.id) })}
         />
       ))}
-      <div className="flex flex-wrap items-center gap-2 border-t px-4 py-2.5">
+      <div className="flex flex-wrap items-center gap-2 rounded-b-xl border-t bg-muted px-4 py-2.5">
         <Button
           variant="outline"
           size="sm"
@@ -495,6 +523,6 @@ export function QueryEditor({
           Expressions combine queries by id per bucket; a grouped query stands for the sum of its groups.
         </span>
       </div>
-    </div>
+    </section>
   );
 }

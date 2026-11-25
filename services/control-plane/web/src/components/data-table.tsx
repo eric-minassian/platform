@@ -80,7 +80,7 @@ export function DataTable<Row extends RowData>({
     initialState: { sorting: initialSorting ?? [] },
   });
   const rows = table.getRowModel().rows;
-  const cellY = dense ? 'py-1.5' : 'py-2.5';
+  const cellY = dense ? 'py-1.5' : 'py-3';
   return (
     <div className={cn('min-w-0 overflow-x-auto', className)}>
       <table className="w-full border-collapse text-sm">
@@ -96,7 +96,7 @@ export function DataTable<Row extends RowData>({
                     scope="col"
                     aria-sort={sorted === 'asc' ? 'ascending' : sorted === 'desc' ? 'descending' : undefined}
                     className={cn(
-                      'h-9 px-3 text-xs font-medium whitespace-nowrap text-muted-foreground first:pl-4 last:pr-4',
+                      'h-10 px-3 text-xs font-medium whitespace-nowrap text-muted-foreground first:pl-5 last:pr-5',
                       meta?.numeric ? 'text-right' : 'text-left',
                       meta?.headerClassName,
                     )}
@@ -106,7 +106,7 @@ export function DataTable<Row extends RowData>({
                         type="button"
                         onClick={header.column.getToggleSortingHandler()}
                         className={cn(
-                          'inline-flex items-center gap-1 rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring',
+                          'inline-flex cursor-default items-center gap-1 rounded-sm outline-hidden hover:text-foreground focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring',
                           meta?.numeric && 'flex-row-reverse',
                           sorted && 'text-foreground',
                         )}
@@ -135,9 +135,21 @@ export function DataTable<Row extends RowData>({
               key={row.id}
               data-selected={isSelected?.(row.original) || undefined}
               onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+              // A clickable row also opens from the keyboard; controls inside it keep their own keys.
+              tabIndex={onRowClick ? 0 : undefined}
+              onKeyDown={
+                onRowClick
+                  ? (e) => {
+                      if (e.target !== e.currentTarget || (e.key !== 'Enter' && e.key !== ' ')) return;
+                      e.preventDefault();
+                      onRowClick(row.original);
+                    }
+                  : undefined
+              }
               className={cn(
-                'border-b last:border-0 data-selected:bg-accent',
-                onRowClick && 'cursor-pointer hover:bg-accent/60',
+                'border-b transition-colors last:border-0 data-selected:bg-accent',
+                onRowClick &&
+                  'cursor-pointer outline-hidden hover:bg-muted focus-visible:bg-muted focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring',
               )}
             >
               {row.getAllCells().map((cell) => {
@@ -146,7 +158,7 @@ export function DataTable<Row extends RowData>({
                   <td
                     key={cell.id}
                     className={cn(
-                      'px-3 align-middle first:pl-4 last:pr-4',
+                      'px-3 align-middle first:pl-5 last:pr-5',
                       cellY,
                       meta?.numeric && 'text-right tabular',
                       meta?.className,

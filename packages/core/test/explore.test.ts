@@ -69,7 +69,7 @@ describe('checkSeriesQuery', () => {
     expect(
       checkSeriesQuery({ metric: 'requests', stat: 'count', groupBy: 'route' }, { alert: true }),
     ).toMatch(/one series/);
-    expect(checkSeriesQuery({ ...ok, app: 'other' }, { alert: true })).toMatch(/own app/);
+    expect(checkSeriesQuery({ ...ok, stage: 'dev' }, { alert: true })).toMatch(/own stage/);
   });
 });
 
@@ -86,8 +86,8 @@ describe('describeQuery', () => {
       'requests by status',
     );
     expect(
-      describeQuery({ metric: 'custom', stat: 'sum', filter: { names: ['signups'] }, app: 'atlas' }),
-    ).toBe('sum of signups (atlas)');
+      describeQuery({ metric: 'custom', stat: 'sum', filter: { names: ['signups'] }, stage: 'dev' }),
+    ).toBe('sum of signups (dev)');
   });
   function ok(): SeriesQuery {
     return { metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } };
@@ -147,5 +147,12 @@ describe('schemas', () => {
         chart: 'line',
       }),
     ).not.toThrow();
+    expect(() =>
+      Schema.decodeUnknownSync(MetricsView)({
+        kind: 'metrics',
+        queries: [{ id: 'a', metric: 'requests', stat: 'count' }],
+        chart: 'number',
+      }),
+    ).toThrow(/chart/);
   });
 });

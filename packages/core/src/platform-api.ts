@@ -80,11 +80,7 @@ import {
   AlertHistoryResponse,
   AlertRule,
   AlertRuleInput,
-  Dashboard,
   LogFilters,
-  SaveDashboardRequest,
-  SavedQuery,
-  SaveQueryRequest,
   SeriesQuery,
   TraceFilters,
 } from './explore.ts';
@@ -556,70 +552,6 @@ export class ObserveApi extends HttpApiGroup.make('observe')
   )
   .middleware(Authenticated) {}
 
-/** Named explorer, log and trace queries of an app, shared by everyone who can see it. */
-export class QueriesApi extends HttpApiGroup.make('queries')
-  .add(
-    HttpApiEndpoint.get('list', '/apps/:app/queries', {
-      params: app,
-      success: Schema.Array(SavedQuery),
-      error: errors,
-    }),
-    HttpApiEndpoint.post('create', '/apps/:app/queries', {
-      params: app,
-      payload: SaveQueryRequest,
-      success: SavedQuery.pipe(HttpApiSchema.status(201)),
-      error: errors,
-    }),
-    HttpApiEndpoint.put('update', '/apps/:app/queries/:id', {
-      params: { ...app, id: Schema.String },
-      payload: SaveQueryRequest,
-      success: SavedQuery,
-      error: errors,
-    }),
-    HttpApiEndpoint.delete('remove', '/apps/:app/queries/:id', {
-      params: { ...app, id: Schema.String },
-      success: HttpApiSchema.NoContent,
-      error: errors,
-    }),
-  )
-  .middleware(Authenticated) {}
-
-/**
- * Dashboards: widgets on a 12-column grid. One with an `app` belongs to that
- * app (members who can see it); one without spans apps, and each widget's
- * data still needs access to its own app.
- */
-export class DashboardsApi extends HttpApiGroup.make('dashboards')
-  .add(
-    HttpApiEndpoint.get('list', '/dashboards', {
-      query: { app: Schema.optional(Schema.String) },
-      success: Schema.Array(Dashboard),
-      error: errors,
-    }),
-    HttpApiEndpoint.post('create', '/dashboards', {
-      payload: SaveDashboardRequest,
-      success: Dashboard.pipe(HttpApiSchema.status(201)),
-      error: errors,
-    }),
-    HttpApiEndpoint.get('get', '/dashboards/:id', {
-      params: { id: Schema.String },
-      success: Dashboard,
-      error: errors,
-    }),
-    HttpApiEndpoint.put('update', '/dashboards/:id', {
-      params: { id: Schema.String },
-      payload: SaveDashboardRequest,
-      success: Dashboard,
-      error: errors,
-    }),
-    HttpApiEndpoint.delete('remove', '/dashboards/:id', {
-      params: { id: Schema.String },
-      success: HttpApiSchema.NoContent,
-      error: errors,
-    }),
-  )
-  .middleware(Authenticated) {}
-
 /** Alert rules on an app's stages, evaluated every minute by the control plane. */
 export class AlertsApi extends HttpApiGroup.make('alerts')
   .add(
@@ -805,8 +737,6 @@ export class PlatformApi extends HttpApi.make('platform')
   .add(StagesApi)
   .add(DeploymentsApi)
   .add(ObserveApi)
-  .add(QueriesApi)
-  .add(DashboardsApi)
   .add(AlertsApi)
   .add(ManageApi)
   .add(AdminApi)

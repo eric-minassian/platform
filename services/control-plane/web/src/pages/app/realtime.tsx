@@ -9,7 +9,7 @@ import type { MetricsView, RealtimeStatsResponse } from '@ericminassian/platform
 import type { ReactElement } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
 import { ChartMenu } from '../../components/metrics/chart-panel.tsx';
-import { EmptyState, Loaded, Loading, Mono, PageHeader, Panel, Stat } from '../../components/page.tsx';
+import { EmptyState, Loaded, Loading, Mono, PageHeader, Panel, Stat, Stats } from '../../components/page.tsx';
 import { type PointSeries, PointsChart } from '../../components/points/points-chart.tsx';
 import { family } from '../../data/atoms.ts';
 import { fmtNum } from '../../format.ts';
@@ -38,7 +38,7 @@ const SUBSCRIBED: readonly PointSeries<'subscribes' | 'errors'>[] = [
   { key: 'errors', label: 'Errors', color: 'var(--s5xx)' },
 ];
 
-/** The same lines as series queries, for the charts' menus (Metrics, dashboards). */
+/** The same lines as series queries, for the charts' menus (Metrics, alerts). */
 const measureView = (measures: ReadonlyArray<{ measure: string; label: string }>): MetricsView => ({
   kind: 'metrics',
   queries: measures.map((m, i) => ({
@@ -72,7 +72,7 @@ export function RealtimePage(): ReactElement {
       <Loaded result={result} loading={<Loading />}>
         {(r) =>
           r.enabled ? (
-            <RealtimeStage app={app} stage={stage} stats={r} />
+            <RealtimeStage app={app} stats={r} />
           ) : (
             <Panel>
               <EmptyState title={`No realtime channels on ${stage}`}>
@@ -86,23 +86,15 @@ export function RealtimePage(): ReactElement {
   );
 }
 
-function RealtimeStage({
-  app,
-  stage,
-  stats: r,
-}: {
-  app: string;
-  stage: string;
-  stats: RealtimeStatsResponse;
-}) {
+function RealtimeStage({ app, stats: r }: { app: string; stats: RealtimeStatsResponse }) {
   return (
-    <div className="flex flex-col gap-4">
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+    <div className="flex flex-col gap-5">
+      <Stats>
         <Stat
           label="Channels"
           value={
             r.channels.length ? (
-              <span className="flex flex-wrap gap-x-3 font-mono text-lg font-medium">
+              <span className="flex flex-wrap gap-x-3 font-mono text-lg leading-8 font-medium tracking-normal">
                 {r.channels.map((c) => (
                   <span key={c}>{c}</span>
                 ))}
@@ -127,14 +119,12 @@ function RealtimeStage({
           tone={r.totals.errors > 0 ? 'warn' : undefined}
           note="publishes and subscribes refused or failed"
         />
-      </div>
+      </Stats>
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Panel
           title="Published"
           description="Events, and the requests that carried them (up to 5 each)"
-          actions={
-            <ChartMenu app={app} stage={stage} title="Realtime events published" view={PUBLISHED_VIEW} />
-          }
+          actions={<ChartMenu app={app} title="Realtime events published" view={PUBLISHED_VIEW} />}
         >
           <PointsChart
             points={r.points}
@@ -148,14 +138,7 @@ function RealtimeStage({
         <Panel
           title="Subscribes and errors"
           description="Subscriptions accepted, and publishes or subscribes refused"
-          actions={
-            <ChartMenu
-              app={app}
-              stage={stage}
-              title="Realtime subscribes and errors"
-              view={SUBSCRIBED_VIEW}
-            />
-          }
+          actions={<ChartMenu app={app} title="Realtime subscribes and errors" view={SUBSCRIBED_VIEW} />}
         >
           <PointsChart
             points={r.points}
@@ -167,7 +150,7 @@ function RealtimeStage({
           />
         </Panel>
       </div>
-      <p className="text-xs text-muted-foreground">
+      <p className="text-[13px] text-muted-foreground">
         AppSync reports deliveries to subscribers and open connections only for the whole platform, so neither
         is shown per app.
       </p>

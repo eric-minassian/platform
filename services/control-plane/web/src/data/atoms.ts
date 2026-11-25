@@ -88,31 +88,8 @@ export const deploymentsAtom = family((k: { app: string; stage: string }) =>
 );
 
 // ---------------------------------------------------------------------------
-// Saved queries, dashboards and alert rules
+// Alert rules
 // ---------------------------------------------------------------------------
-
-export const queriesChanged = (app: string) => [`queries:${app}`];
-export const savedQueriesAtom = Atom.family((app: string) =>
-  fresh(
-    ApiClient.query('queries', 'list', { params: { app }, reactivityKeys: queriesChanged(app), timeToLive }),
-  ),
-);
-
-export const dashboardsChanged = ['dashboards'];
-export const dashboardsAtom = family((k: { app?: string | undefined }) =>
-  fresh(
-    ApiClient.query('dashboards', 'list', {
-      query: k.app ? { app: k.app } : {},
-      reactivityKeys: dashboardsChanged,
-      timeToLive,
-    }),
-  ),
-);
-export const dashboardAtom = Atom.family((id: string) =>
-  fresh(
-    ApiClient.query('dashboards', 'get', { params: { id }, reactivityKeys: dashboardsChanged, timeToLive }),
-  ),
-);
 
 export const alertsChanged = (app: string) => [`alerts:${app}`];
 export const alertRulesAtom = family((k: { app: string; stage?: string | undefined }) =>

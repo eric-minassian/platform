@@ -7,11 +7,11 @@
  */
 import { useAtomSet, useAtomValue } from '@effect/atom-react';
 import type { StoredObjectInfo } from '@ericminassian/platform-core';
+import { Link } from '@tanstack/react-router';
 import { Exit } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
-import { Download, Search, X } from 'lucide-react';
-import { Fragment, type ReactElement, useCallback, useMemo, useState } from 'react';
-import { toast } from 'sonner';
+import { Download, Search } from 'lucide-react';
+import { Fragment, type ReactElement, type ReactNode, useCallback, useMemo, useState } from 'react';
 import { ApiClient, errorMessage, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import {
@@ -25,12 +25,8 @@ import {
   StatusPill,
 } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
-import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupInput,
-} from '../../components/ui/input-group.tsx';
+import { InputClear, InputGroup, InputGroupAddon, InputGroupInput } from '../../components/ui/input.tsx';
+import { toast } from '../../components/ui/overlays.tsx';
 import {
   Select,
   SelectContent,
@@ -38,9 +34,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../../components/ui/select.tsx';
+import { Tip } from '../../components/ui/tooltip.tsx';
 import { family } from '../../data/atoms.ts';
 import { fmtBytes, fmtDateTime, fmtNum, relTime } from '../../format.ts';
 import { useStage } from '../../lib/hooks.ts';
+import { cn } from '../../lib/utils.ts';
 import { appRoute, storageRoute } from '../../router.tsx';
 
 const storesAtom = family((k: { app: string; stage: string }) =>
@@ -143,12 +141,8 @@ function Objects({
       if (Exit.isSuccess(exit)) window.open(exit.value.url, '_blank', 'noopener');
       else toast.error(errorMessage(exit.cause));
     };
-    return objectColumns(
-      prefix,
-      (p) => go({ prefix: p }),
-      (key) => void download(key),
-    );
-  }, [prefix, app, stage, store, objectUrl, go]);
+    return objectColumns(app, prefix, (key) => void download(key));
+  }, [prefix, app, stage, store, objectUrl]);
 
   return (
     <Panel
@@ -168,15 +162,18 @@ function Objects({
       actions={
         <>
           {stores.length > 1 && (
-            <Select value={store} onValueChange={(v) => v && go({ store: v, prefix: '' })}>
-              <SelectTrigger size="sm" className="min-w-36" aria-label="Store">
+            <Select
+              value={store}
+              onValueChange={(v) => typeof v === 'string' && go({ store: v, prefix: '' })}
+            >
+              <SelectTrigger className="min-w-36 font-mono text-[13px]" aria-label="Store">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {stores.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
-                    {served.includes(s) && <span className="text-muted-foreground">public</span>}
+                  <SelectItem key={s} value={s} label={s}>
+                    <span className="font-mono text-[13px]">{s}</span>
+                    {served.includes(s) && <span className="ml-auto text-xs text-subtle">public</span>}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -189,34 +186,29 @@ function Objects({
               go({ prefix: draft.trim() });
             }}
           >
-            <InputGroup className="h-8">
+            <InputGroup>
               <InputGroupAddon>
                 <Search />
               </InputGroupAddon>
               <InputGroupInput
                 aria-label="Key prefix"
+                className="font-mono text-[13px] placeholder:font-sans placeholder:text-sm"
                 placeholder="Key prefix, e.g. uploads/"
+                spellCheck={false}
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onValueChange={(value, details) => {
+                  setDraft(value);
+                  if (details.reason === 'clear-press') go({ prefix: '' });
+                }}
               />
-              {prefix && (
-                <InputGroupAddon align="inline-end">
-                  <InputGroupButton
-                    size="icon-xs"
-                    aria-label="Clear prefix"
-                    onClick={() => go({ prefix: '' })}
-                  >
-                    <X />
-                  </InputGroupButton>
-                </InputGroupAddon>
-              )}
+              <InputClear label="Clear prefix" />
             </InputGroup>
           </form>
         </>
       }
     >
-      {prefix && <PrefixPath prefix={prefix} onGo={(p) => go({ prefix: p })} />}
-      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-4 mb-3" />}
+      {prefix && <PrefixPath app={app} prefix={prefix} />}
+      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-5 mb-3" />}
       {AsyncResult.isInitial(result) ? (
         <Loading rows={6} />
       ) : (
@@ -237,7 +229,7 @@ function Objects({
         />
       )}
       {more && (
-        <div className="border-t px-4 py-2.5">
+        <div className="border-t px-5 py-2.5">
           <Button variant="outline" size="sm" onClick={() => loadMore()} disabled={result.waiting}>
             {result.waiting ? 'Loading…' : 'Load more'}
           </Button>
@@ -247,17 +239,44 @@ function Objects({
   );
 }
 
+/** A link to the listing under `prefix`, keeping the store and the rest of the URL. */
+function PrefixLink({
+  app,
+  prefix,
+  className,
+  children,
+}: {
+  app: string;
+  prefix: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <Link
+      to="/apps/$app/storage"
+      params={{ app }}
+      search={(prev) => ({ ...prev, prefix: prefix || undefined })}
+      className={cn(
+        'rounded-sm text-muted-foreground outline-hidden hover:text-foreground hover:underline focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-ring',
+        className,
+      )}
+    >
+      {children}
+    </Link>
+  );
+}
+
 /** The prefix as a path: each folder in it narrows back out to that folder. */
-function PrefixPath({ prefix, onGo }: { prefix: string; onGo: (prefix: string) => void }) {
+function PrefixPath({ app, prefix }: { app: string; prefix: string }) {
   const parts = prefix.split('/');
   return (
     <nav
       aria-label="Prefix"
-      className="flex flex-wrap items-center gap-1 border-b px-4 pb-2.5 font-mono text-xs"
+      className="flex flex-wrap items-center gap-1 border-b px-5 pb-3 font-mono text-xs"
     >
-      <button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => onGo('')}>
+      <PrefixLink app={app} prefix="">
         all files
-      </button>
+      </PrefixLink>
       {parts.map((part, i) => {
         if (part === '' && i === parts.length - 1) return null;
         const to = `${parts.slice(0, i + 1).join('/')}${i < parts.length - 1 ? '/' : ''}`;
@@ -266,15 +285,11 @@ function PrefixPath({ prefix, onGo }: { prefix: string; onGo: (prefix: string) =
           <Fragment key={to}>
             <span className="text-subtle">/</span>
             {current ? (
-              <span>{part}</span>
+              <span aria-current="location">{part}</span>
             ) : (
-              <button
-                type="button"
-                className="text-muted-foreground hover:text-foreground"
-                onClick={() => onGo(to)}
-              >
+              <PrefixLink app={app} prefix={to}>
                 {part}
-              </button>
+              </PrefixLink>
             )}
           </Fragment>
         );
@@ -285,17 +300,13 @@ function PrefixPath({ prefix, onGo }: { prefix: string; onGo: (prefix: string) =
 
 const object = columns<StoredObjectInfo>();
 
-function objectColumns(
-  prefix: string,
-  onFolder: (prefix: string) => void,
-  onDownload: (key: string) => void,
-) {
+function objectColumns(app: string, prefix: string, onDownload: (key: string) => void) {
   return object.columns([
     object.accessor('key', {
       header: 'Key',
       sortFn: 'alphanumeric',
       meta: { className: 'max-w-[40rem]' },
-      cell: ({ getValue }) => <KeyPath fullKey={getValue()} prefix={prefix} onFolder={onFolder} />,
+      cell: ({ getValue }) => <KeyPath app={app} fullKey={getValue()} prefix={prefix} />,
     }),
     object.accessor('size', {
       header: 'Size',
@@ -320,47 +331,36 @@ function objectColumns(
       header: () => <span className="sr-only">Download</span>,
       meta: { className: 'w-0 text-right' },
       cell: ({ row }) => (
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          aria-label={`Download ${row.original.key}`}
-          title="Download"
-          onClick={() => onDownload(row.original.key)}
-        >
-          <Download />
-        </Button>
+        <Tip label="Download">
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label={`Download ${row.original.key}`}
+            onClick={() => onDownload(row.original.key)}
+          >
+            <Download />
+          </Button>
+        </Tip>
       ),
     }),
   ]);
 }
 
-/** A key below the prefix, its folders buttons that narrow the listing to them. */
-function KeyPath({
-  fullKey,
-  prefix,
-  onFolder,
-}: {
-  fullKey: string;
-  prefix: string;
-  onFolder: (prefix: string) => void;
-}) {
+/** A key below the prefix, its folders links that narrow the listing to them. */
+function KeyPath({ app, fullKey, prefix }: { app: string; fullKey: string; prefix: string }) {
   const rest = fullKey.startsWith(prefix) ? fullKey.slice(prefix.length) : fullKey;
   const base = fullKey.startsWith(prefix) ? prefix : '';
   const parts = rest.split('/');
   const name = parts.pop() ?? '';
   return (
-    <span className="flex min-w-0 items-baseline font-mono text-[0.8125rem]">
+    <span className="flex min-w-0 items-baseline font-mono text-[13px]">
       {parts.map((folder, i) => {
         const to = `${base}${parts.slice(0, i + 1).join('/')}/`;
         return (
           <Fragment key={to}>
-            <button
-              type="button"
-              className="shrink-0 text-muted-foreground hover:text-foreground hover:underline"
-              onClick={() => onFolder(to)}
-            >
+            <PrefixLink app={app} prefix={to} className="shrink-0">
               {folder}
-            </button>
+            </PrefixLink>
             <span className="text-subtle">/</span>
           </Fragment>
         );

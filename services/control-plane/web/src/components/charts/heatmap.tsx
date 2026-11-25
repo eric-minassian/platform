@@ -14,6 +14,7 @@ import { scaleSequential, scaleTime, scaleUtc } from 'd3-scale';
 import { useMemo } from 'react';
 import { fmtMs, fmtNum, fmtPct } from '../../format.ts';
 import { axisTimeFormat, bucketFormat } from '../../lib/time.ts';
+import { useResolvedScheme } from '../../lib/use-scheme.ts';
 import { useChartGroup } from './chart-group.tsx';
 import { ChartOverlay, usePlotGeometry, useZoomDrag } from './overlay.tsx';
 
@@ -23,25 +24,40 @@ export const LATENCY_BIN_LABELS: readonly string[] = [
   `> ${fmtMs(LATENCY_BUCKETS_MS.at(-1) ?? 30_000)}`,
 ];
 
-/** The validated sequential ramp, dark (few) to light (many), on the card surface. */
-const RAMP: ReadonlyArray<readonly [number, readonly [number, number, number]]> = [
-  [0, [21, 32, 46]],
-  [0.35, [28, 79, 143]],
-  [0.7, [57, 135, 229]],
-  [1, [183, 211, 246]],
-];
+type Ramp = ReadonlyArray<readonly [number, readonly [number, number, number]]>;
 
-export function rampColor(t: number): string {
+/**
+ * The validated sequential blue ramp, few to many: on the dark surface it
+ * climbs from near the surface to light, on the light one from pale to dark,
+ * so in both a busier cell stands further from the background.
+ */
+const RAMPS: Record<'light' | 'dark', Ramp> = {
+  dark: [
+    [0, [21, 32, 46]],
+    [0.35, [28, 79, 143]],
+    [0.7, [57, 135, 229]],
+    [1, [183, 211, 246]],
+  ],
+  light: [
+    [0, [205, 226, 251]],
+    [0.35, [109, 167, 236]],
+    [0.7, [37, 106, 191]],
+    [1, [13, 54, 107]],
+  ],
+};
+
+export function rampColor(t: number, scheme: 'light' | 'dark' = 'dark'): string {
+  const ramp = RAMPS[scheme];
   const clamped = Math.min(Math.max(t, 0), 1);
-  for (let i = 1; i < RAMP.length; i++) {
-    const [t1, b] = RAMP[i]!;
-    const [t0, a] = RAMP[i - 1]!;
+  for (let i = 1; i < ramp.length; i++) {
+    const [t1, b] = ramp[i]!;
+    const [t0, a] = ramp[i - 1]!;
     if (clamped <= t1) {
       const u = (clamped - t0) / (t1 - t0);
       return `rgb(${a.map((v, j) => Math.round(v + (b[j]! - v) * u)).join(',')})`;
     }
   }
-  return 'rgb(183,211,246)';
+  return `rgb(${ramp.at(-1)![1].join(',')})`;
 }
 
 interface Cell {
@@ -76,6 +92,7 @@ export function LatencyHeatmap({
   ariaLabel: string;
 }) {
   const group = useChartGroup();
+  const scheme = useResolvedScheme();
   const [geometry, onRender] = usePlotGeometry();
   const zoom = useZoomDrag(geometry, group.onZoom);
 
@@ -133,7 +150,7 @@ export function LatencyHeatmap({
           },
         },
       },
-      color: { scale: () => scaleSequential(rampColor), domain: [0, 1] },
+      color: { scale: () => scaleSequential((t: number) => rampColor(t, scheme)), domain: [0, 1] },
       theme: { grid: 'var(--chart-grid)', muted: 'var(--subtle)', foreground: 'var(--muted-foreground)' },
       ...(group.cursor
         ? {
@@ -153,7 +170,7 @@ export function LatencyHeatmap({
             title: c ? bucket(c.t0) : '',
             rows: c
               ? [
-                  { label: `requests ${c.bin}`, value: fmtNum(c.count), color: rampColor(c.shade) },
+                  { label: `requests ${c.bin}`, value: fmtNum(c.count), color: rampColor(c.shade, scheme) },
                   { label: 'share of the bucket', value: fmtPct(c.share) },
                 ]
               : [],
@@ -161,7 +178,7 @@ export function LatencyHeatmap({
         },
       },
     });
-  }, [timestamps, stepMs, histogram, group.utc, group.cursor]);
+  }, [timestamps, stepMs, histogram, group.utc, group.cursor, scheme]);
 
   return (
     <div className="relative select-none" style={{ height }} {...zoom.handlers}>

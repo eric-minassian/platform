@@ -1,24 +1,51 @@
 /**
  * One trace as a waterfall: the request or job that started it, every call
- * it made nested under its caller, its log lines and errors on the same
- * timeline, and what a selected row carried.
+ * it made nested under its caller on one time axis, what the selected span
+ * carried beside it, and the trace's log lines below.
  */
 import { useAtomValue } from '@effect/atom-react';
-import { SLOW_TRACE_MS, TRACE_SAMPLE_RATE } from '@ericminassian/platform-core';
+import { SLOW_TRACE_MS, TRACE_SAMPLE_RATE, type TelemetryEvent } from '@ericminassian/platform-core';
 import { Link } from '@tanstack/react-router';
-import { Copy, ScrollText } from 'lucide-react';
-import { useState } from 'react';
-import { toast } from 'sonner';
+import {
+  createWaterfallController,
+  visibleWaterfallRows,
+  Waterfall,
+  WaterfallAxis,
+  WaterfallBar,
+  WaterfallCell,
+  WaterfallColumnHeader,
+  WaterfallHeaderRow,
+  WaterfallIndicator,
+  WaterfallMark,
+  WaterfallRow,
+  WaterfallRowHeader,
+  WaterfallTick,
+} from '@ui-sdk/react/waterfall';
+import { ChevronRight, ChevronsDownUp, ChevronsUpDown, Copy, ScrollText } from 'lucide-react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
-import { stackFrames } from '../../components/logs/log-drawer.tsx';
-import { EmptyState, Loaded, Mono, PageHeader, Panel, StatusPill } from '../../components/page.tsx';
+import { stackFrames } from '../../components/logs/stack.tsx';
+import {
+  EmptyState,
+  Fact,
+  Facts,
+  Loaded,
+  Mono,
+  PageHeader,
+  Panel,
+  StatusPill,
+  StatusText,
+  type Tone,
+} from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
+import { toast } from '../../components/ui/overlays.tsx';
+import { Tip } from '../../components/ui/tooltip.tsx';
 import { family } from '../../data/atoms.ts';
 import { fmtMs, fmtNum, shortId } from '../../format.ts';
 import { useStage } from '../../lib/hooks.ts';
 import { usePrefs } from '../../lib/prefs.tsx';
 import { timeFormat } from '../../lib/time.ts';
-import { layoutTrace, type TraceRow } from '../../lib/trace.ts';
+import { layoutTrace, type TraceLayout, type TraceLine, type TraceSpan } from '../../lib/trace.ts';
 import { cn } from '../../lib/utils.ts';
 import { traceRoute } from '../../router.tsx';
 
@@ -30,30 +57,27 @@ const traceAtom = family((k: { app: string; stage: string; trace: string }) =>
       query: { stage: k.stage, range: '7d' },
       timeToLive,
     }),
-    {
-      staleTime: '10 minutes',
-    },
+    { staleTime: '10 minutes' },
   ),
 );
 
-const BAR: Record<TraceRow['kind'], string> = {
-  req: 'bg-[#4a5568]',
-  job: 'bg-[#4a5568]',
-  span: 'bg-[var(--chart-1)]',
-  log: 'bg-subtle',
-  err: 'bg-bad-mark',
-  other: 'bg-subtle',
-};
+const copyId = (trace: string) =>
+  void navigator.clipboard.writeText(trace).then(
+    () => toast.success('Copied the trace id'),
+    () => toast.error("Couldn't copy to the clipboard"),
+  );
 
-/** Round tick steps for the ruler: about five across the trace. */
-function ticks(total: number): number[] {
-  const raw = total / 5;
-  const p = 10 ** Math.floor(Math.log10(raw));
-  const step = [1, 2, 2.5, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? raw;
-  const out: number[] = [];
-  for (let t = 0; t <= total; t += step) out.push(t);
-  return out;
-}
+const toneOf = (s: TraceSpan): Tone => (s.failed ? 'bad' : 'ok');
+
+/** How a span's status reads: a request's code, else OK or Failed. */
+const statusWord = (s: TraceSpan) => (s.event.t === 'req' ? s.status : s.failed ? 'Failed' : 'OK');
+
+const LEVEL_TEXT: Record<string, string> = {
+  error: 'text-bad',
+  warn: 'text-warn',
+  info: 'text-muted-foreground',
+  debug: 'text-subtle',
+};
 
 export function TracePage() {
   const { app, trace } = traceRoute.useParams();
@@ -64,7 +88,7 @@ export function TracePage() {
       {(t) =>
         t.events.length === 0 ? (
           <>
-            <PageHeader title={<Mono className="text-xl">{trace}</Mono>} />
+            <PageHeader title={<Mono className="truncate text-xl">{trace}</Mono>} />
             <Panel>
               <EmptyState title="No events with this trace id in the last 7 days">
                 Check the stage (traces are per stage), or that the id is complete.
@@ -86,13 +110,11 @@ function TraceView({
 }: {
   app: string;
   trace: string;
-  events: Parameters<typeof layoutTrace>[0];
+  events: readonly TelemetryEvent[];
 }) {
   const { utc } = usePrefs();
-  const layout = layoutTrace(events);
-  const root = layout.rows.find((r) => r.kind === 'req' || r.kind === 'job') ?? layout.rows[0]!;
-  const [selectedKey, setSelectedKey] = useState(root.key);
-  const selected = layout.rows.find((r) => r.key === selectedKey) ?? root;
+  const layout = useMemo(() => layoutTrace(events), [events]);
+  const root = layout.root;
   const when = timeFormat(utc, {
     year: 'numeric',
     month: 'short',
@@ -101,18 +123,28 @@ function TraceView({
     minute: '2-digit',
     second: '2-digit',
     fractionalSecondDigits: 3,
+    hourCycle: 'h23',
   });
-  const recorded = layout.rows.some((r) => r.kind === 'span');
-  const logs = layout.rows.filter((r) => r.kind === 'log' || r.kind === 'err');
+  const [selected, setSelected] = useState(root?.value ?? null);
+  const span = (selected ? layout.byValue.get(selected) : undefined) ?? root;
 
   return (
-    <>
+    <div className="flex flex-col gap-5">
       <PageHeader
         title={
+          root ? (
+            <>
+              <span className="shrink-0 font-mono text-base font-medium text-subtle">{root.op}</span>
+              <span className="min-w-0 truncate font-mono text-xl">{root.name}</span>
+              <StatusPill tone={toneOf(root)}>{statusWord(root)}</StatusPill>
+            </>
+          ) : (
+            <Mono className="truncate text-xl">{trace}</Mono>
+          )
+        }
+        description={
           <>
-            <span className="font-mono text-base font-medium text-muted-foreground">{root.op}</span>
-            <span className="min-w-0 truncate">{root.label}</span>
-            <StatusPill tone={root.failed ? 'bad' : 'ok'}>{root.failed ? 'failed' : 'ok'}</StatusPill>
+            Trace <Mono className="text-foreground">{trace}</Mono>
           </>
         }
         actions={
@@ -120,7 +152,6 @@ function TraceView({
             <Button
               variant="outline"
               size="sm"
-              nativeButton={false}
               render={
                 <Link
                   to="/apps/$app/logs"
@@ -130,184 +161,389 @@ function TraceView({
               }
             >
               <ScrollText />
-              Its logs
+              Logs
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() =>
-                void navigator.clipboard.writeText(trace).then(
-                  () => toast.success('Copied the trace id'),
-                  () => toast.error("Couldn't copy to the clipboard"),
-                )
-              }
-            >
+            <Button variant="outline" size="sm" onClick={() => copyId(trace)}>
               <Copy />
               Copy id
             </Button>
           </>
         }
-      >
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-          <Mono className="text-foreground">{trace}</Mono>
-          <span className="text-subtle">·</span>
-          <span>{when(layout.t0)}</span>
-          <span className="text-subtle">·</span>
-          <span className="tabular">{fmtMs(layout.total)}</span>
-          <span className="text-subtle">·</span>
-          <span>
-            deployment <Mono>{shortId(root.event.rev)}</Mono>
-          </span>
-        </div>
-      </PageHeader>
+      />
 
-      <div className="grid grid-cols-1 gap-4 2xl:grid-cols-[1fr_24rem]">
-        <Panel
-          flush
-          title="Waterfall"
-          description={`${fmtNum(layout.rows.length)} events over ${fmtMs(layout.total)}`}
-        >
-          <div className="px-4 pb-2">
-            <div className="grid grid-cols-[minmax(14rem,2fr)_3fr_4.5rem] items-end gap-3 border-b pb-1.5 text-[11px] text-muted-foreground">
-              <span>Event</span>
-              <div className="relative h-4">
-                {ticks(layout.total).map((t) => (
-                  <span
-                    key={t}
-                    className="absolute top-0 -translate-x-1/2 font-mono tabular first:translate-x-0"
-                    style={{ left: `${(t / layout.total) * 100}%` }}
-                  >
-                    {t === 0 ? '0' : fmtMs(t)}
-                  </span>
-                ))}
-              </div>
-              <span className="text-right">Duration</span>
-            </div>
-            <ul aria-label="Trace events">
-              {layout.rows.map((r) => (
-                <li key={r.key}>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedKey(r.key)}
-                    aria-current={r.key === selected.key || undefined}
-                    className="grid w-full grid-cols-[minmax(14rem,2fr)_3fr_4.5rem] items-center gap-3 rounded-sm py-1 text-left outline-none hover:bg-accent/50 focus-visible:bg-accent aria-current:bg-accent"
-                  >
-                    <span
-                      className="flex min-w-0 items-center gap-1.5 text-[13px]"
-                      style={{ paddingLeft: r.depth * 14 }}
-                    >
-                      {r.depth > 0 && (
-                        <span aria-hidden className="-mt-2 h-3 w-2 shrink-0 border-b border-l border-input" />
-                      )}
-                      <span
-                        className={cn(
-                          'shrink-0 font-mono text-[11.5px]',
-                          r.failed ? 'text-bad' : 'text-muted-foreground',
-                        )}
-                      >
-                        {r.op}
-                      </span>
-                      <span className="truncate">{r.label}</span>
-                    </span>
-                    <span className="relative h-3.5 rounded-sm bg-[repeating-linear-gradient(90deg,transparent_0,transparent_calc(20%-1px),var(--chart-grid)_calc(20%-1px),var(--chart-grid)_20%)]">
-                      {r.dur > 0 ? (
-                        <span
-                          className={cn(
-                            'absolute top-0.5 h-2.5 rounded-[2px]',
-                            r.failed && r.kind === 'span' ? 'bg-bad-mark' : BAR[r.kind],
-                          )}
-                          style={{
-                            left: `${(r.start / layout.total) * 100}%`,
-                            width: `max(2px, ${(r.dur / layout.total) * 100}%)`,
-                          }}
-                        />
-                      ) : (
-                        <span
-                          aria-hidden
-                          className={cn(
-                            'absolute top-0.5 size-2.5 -translate-x-1/2 rotate-45 rounded-[1px]',
-                            r.kind === 'err' ? 'bg-bad' : 'bg-muted-foreground',
-                          )}
-                          style={{ left: `${(r.start / layout.total) * 100}%` }}
-                        />
-                      )}
-                    </span>
-                    <span className="text-right font-mono text-[12px] text-muted-foreground tabular">
-                      {r.dur > 0 ? fmtMs(r.dur) : ''}
-                    </span>
-                  </button>
-                  {r.unrecorded && (
-                    <p
-                      className="pb-1 text-xs text-muted-foreground"
-                      style={{ paddingLeft: (r.depth + 1) * 14 + 12 }}
-                    >
-                      {fmtNum(r.unrecorded.calls)} {r.unrecorded.calls === 1 ? 'call' : 'calls'},{' '}
-                      {fmtMs(r.unrecorded.ms)}, not kept
-                    </p>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {!recorded && (
-              <p className="border-t pt-2 text-xs text-muted-foreground">
-                This trace kept no spans: they are kept for failures, for requests and jobs taking{' '}
-                {SLOW_TRACE_MS / 1000}s or longer, and for 1 in {Math.round(1 / TRACE_SAMPLE_RATE)} traces.
-              </p>
-            )}
-          </div>
-        </Panel>
-        <Panel
-          title={`${selected.op} ${selected.label}`}
-          description={`at ${fmtMs(selected.start)}${selected.dur ? `, for ${fmtMs(selected.dur)}` : ''}`}
-        >
-          <dl className="grid grid-cols-[6.5rem_1fr] font-mono text-[12px]">
-            {Object.entries(selected.event)
-              .filter(([k]) => !['_p', 'app', 'stage', 'stack', 'trace'].includes(k))
-              .map(([k, v]) => (
-                <div key={k} className="contents">
-                  <dt className="border-b py-1.5 text-muted-foreground">{k}</dt>
-                  <dd className="min-w-0 border-b py-1.5 break-all">
-                    {k === 'ts' && typeof v === 'number'
-                      ? when(v)
-                      : typeof v === 'string'
-                        ? v
-                        : JSON.stringify(v)}
-                  </dd>
-                </div>
-              ))}
-          </dl>
-          {'stack' in selected.event && typeof selected.event.stack === 'string' && (
-            <pre className="mt-3 overflow-x-auto rounded-md border bg-background p-3 font-mono text-[11.5px] leading-relaxed">
-              {stackFrames(selected.event.stack).map(({ key, frame, own }) => (
-                <span key={key} className={cn('block', own ? 'text-foreground' : 'text-subtle')}>
-                  {frame}
-                </span>
-              ))}
-            </pre>
+      <dl className="grid min-w-0 grid-cols-2 overflow-hidden rounded-xl border bg-card md:grid-cols-4 [&>div]:-mt-px [&>div]:-ml-px [&>div]:border-t [&>div]:border-l">
+        <HeaderFact label="Outcome">
+          {root ? (
+            <StatusText tone={toneOf(root)}>
+              {root.event.t === 'req' ? `${root.status}${root.failed ? ' error' : ''}` : statusWord(root)}
+            </StatusText>
+          ) : (
+            '–'
           )}
-        </Panel>
+        </HeaderFact>
+        <HeaderFact label="Duration">
+          <span className="tabular">{fmtMs(root?.duration ?? layout.total)}</span>
+        </HeaderFact>
+        <HeaderFact label="Started">
+          <span className="tabular">{when(layout.t0)}</span>
+        </HeaderFact>
+        <HeaderFact label="Deployment">
+          {root ? (
+            <Link
+              to="/apps/$app/deployments/$deployment"
+              params={{ app, deployment: root.event.rev }}
+              className="rounded-sm font-mono text-[13px] hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+            >
+              {shortId(root.event.rev)}
+            </Link>
+          ) : (
+            '–'
+          )}
+        </HeaderFact>
+      </dl>
+
+      <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_24rem]">
+        <SpanWaterfall layout={layout} selected={span?.value ?? null} onSelect={setSelected} />
+        {span && <SpanDetails layout={layout} span={span} />}
       </div>
 
-      {logs.length > 0 && (
-        <Panel flush title="Logs in this trace">
-          <ul className="font-mono text-[12px]">
-            {logs.map((r) => (
-              <li
-                key={r.key}
-                className="grid grid-cols-[6rem_3.5rem_1fr] gap-3 border-b px-4 py-1.5 last:border-0"
+      {layout.lines.length > 0 && <TraceLines layout={layout} />}
+    </div>
+  );
+}
+
+function HeaderFact({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex min-w-0 flex-col gap-1 px-5 py-3.5">
+      <dt className="text-[13px] text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 truncate text-sm font-medium">{children}</dd>
+    </div>
+  );
+}
+
+function SpanWaterfall({
+  layout,
+  selected,
+  onSelect,
+}: {
+  layout: TraceLayout;
+  selected: string | null;
+  onSelect: (value: string) => void;
+}) {
+  const branches = useMemo(
+    () => [...layout.byValue.values()].filter((s) => s.children).map((s) => s.value),
+    [layout],
+  );
+  const [controller] = useState(() => createWaterfallController());
+  // Traces are short enough to open whole.
+  const [expanded, setExpanded] = useState(branches);
+  const rows = visibleWaterfallRows(layout.spans, expanded);
+  const errors = layout.lines.filter((l) => l.event.t === 'err');
+  const spanCount = layout.byValue.size;
+  const kept = [...layout.byValue.values()].some((s) => s.event.t === 'span');
+  const unrecorded = layout.root?.unrecorded;
+
+  return (
+    <Panel
+      flush
+      title="Spans"
+      description={`${fmtNum(spanCount)} ${spanCount === 1 ? 'span' : 'spans'} over ${fmtMs(layout.total)}`}
+      actions={
+        branches.length > 0 && (
+          <>
+            <Tip label="Expand all">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Expand all spans"
+                onClick={() => controller.expandAll()}
               >
-                <span className="text-muted-foreground tabular">+{fmtMs(r.start)}</span>
-                <span className={r.failed ? 'text-bad' : 'text-muted-foreground'}>
-                  {r.kind === 'err' ? 'error' : r.op}
+                <ChevronsUpDown />
+              </Button>
+            </Tip>
+            <Tip label="Collapse all">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Collapse all spans"
+                onClick={() => controller.collapseAll()}
+              >
+                <ChevronsDownUp />
+              </Button>
+            </Tip>
+          </>
+        )
+      }
+      footer={
+        !kept ? (
+          <span>
+            This trace kept no spans
+            {unrecorded
+              ? `: ${fmtNum(unrecorded.calls)} ${unrecorded.calls === 1 ? 'call' : 'calls'} (${fmtMs(unrecorded.ms)}) weren't written`
+              : ''}
+            . Spans are kept for failures, for requests and jobs taking {SLOW_TRACE_MS / 1000}s or longer, and
+            for 1 in {Math.round(1 / TRACE_SAMPLE_RATE)} traces.
+          </span>
+        ) : undefined
+      }
+    >
+      <div className="overflow-x-auto">
+        <Waterfall
+          aria-label="Spans of this trace"
+          items={layout.spans}
+          range={[0, layout.total]}
+          controller={controller}
+          expanded={expanded}
+          onExpandedChange={setExpanded}
+          value={selected}
+          onValueChange={(next) => next !== null && onSelect(next)}
+          format={fmtMs}
+          getBarLabel={(item, { start, duration }) => {
+            const s = layout.byValue.get(item.value);
+            return `${s ? statusWord(s) : ''}, starts at ${start}, takes ${duration}`;
+          }}
+          className="relative grid min-w-[40rem] grid-cols-[minmax(13rem,2fr)_4.5rem_minmax(0,3fr)] overflow-hidden text-[13px]"
+        >
+          <WaterfallHeaderRow className="col-span-full grid h-8 grid-cols-subgrid items-center gap-x-3 border-b px-5 text-xs text-muted-foreground">
+            <WaterfallColumnHeader>Span</WaterfallColumnHeader>
+            <WaterfallColumnHeader className="text-right">Duration</WaterfallColumnHeader>
+            <WaterfallColumnHeader aria-label="Timeline" className="relative h-full">
+              <WaterfallAxis maxTicks={6} className="absolute inset-0">
+                {({ ticks }) =>
+                  ticks.map((tick) => (
+                    <WaterfallTick
+                      key={tick.time}
+                      time={tick.time}
+                      className="absolute inset-y-0 start-(--waterfall-tick) flex items-center font-mono text-[11px] text-subtle tabular after:absolute after:start-0 after:top-full after:h-[200vh] after:w-px after:bg-(--chart-grid) [&:not(:first-child)]:-translate-x-1/2"
+                    >
+                      {tick.label}
+                    </WaterfallTick>
+                  ))
+                }
+              </WaterfallAxis>
+              {errors.map((e) => (
+                <WaterfallMark
+                  key={e.key}
+                  time={e.at}
+                  aria-hidden
+                  title={e.text}
+                  className="pointer-events-none absolute start-(--waterfall-mark) top-1/2 h-[200vh] w-px bg-bad-mark/70 data-outside:hidden"
+                />
+              ))}
+            </WaterfallColumnHeader>
+          </WaterfallHeaderRow>
+          {rows.map(({ item }) => {
+            const s = layout.byValue.get(item.value)!;
+            return (
+              <WaterfallRow
+                key={item.value}
+                value={item.value}
+                className="col-span-full grid h-8 cursor-default grid-cols-subgrid items-center gap-x-3 px-5 hover:bg-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring focus-visible:outline-solid data-selected:bg-accent"
+              >
+                <WaterfallRowHeader className="flex min-w-0 items-center gap-1.5 ps-[calc((var(--waterfall-level)_-_1)*1rem)] focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid">
+                  {s.children ? (
+                    <WaterfallIndicator className="grid size-5 shrink-0 place-items-center rounded text-subtle hover:bg-active hover:text-foreground data-expanded:[&>svg]:rotate-90">
+                      <ChevronRight
+                        aria-hidden
+                        className="size-3.5 transition-transform motion-reduce:transition-none"
+                      />
+                    </WaterfallIndicator>
+                  ) : (
+                    <span aria-hidden className="size-5 shrink-0" />
+                  )}
+                  <span
+                    className={cn(
+                      'shrink-0 font-mono text-[11.5px]',
+                      s.failed ? 'text-bad' : s.depth === 0 ? 'text-foreground' : 'text-muted-foreground',
+                    )}
+                  >
+                    {s.op}
+                  </span>
+                  <span className="truncate">{s.name}</span>
+                </WaterfallRowHeader>
+                <WaterfallCell className="text-right font-mono text-[12px] text-muted-foreground tabular focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid">
+                  {fmtMs(s.duration)}
+                </WaterfallCell>
+                <WaterfallBar
+                  data-failed={s.failed || undefined}
+                  className="relative h-full before:absolute before:inset-y-2 before:start-(--waterfall-start) before:w-[max(2px,var(--waterfall-size))] before:rounded-[3px] before:bg-(--chart-1) focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring focus-visible:outline-solid data-failed:before:bg-bad-mark"
+                />
+              </WaterfallRow>
+            );
+          })}
+        </Waterfall>
+      </div>
+    </Panel>
+  );
+}
+
+/** Fields every event has, or that the span's facts already show. */
+const SHOWN = new Set([
+  '_p',
+  'app',
+  'stage',
+  'trace',
+  'span',
+  'parent',
+  't',
+  'ts',
+  'dur',
+  'start',
+  'rev',
+  'stack',
+]);
+const SHOWN_BY_KIND: Record<TraceSpan['event']['t'], readonly string[]> = {
+  req: ['method', 'route', 'status', 'calls', 'callMs'],
+  job: ['kind', 'name', 'status', 'calls', 'callMs'],
+  span: ['op', 'name', 'status'],
+};
+
+function attributesOf(s: TraceSpan): Array<[string, string]> {
+  const skip = new Set([...SHOWN, ...SHOWN_BY_KIND[s.event.t]]);
+  return Object.entries(s.event)
+    .filter(([k, v]) => !skip.has(k) && v !== undefined)
+    .map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]);
+}
+
+function SpanDetails({ layout, span }: { layout: TraceLayout; span: TraceSpan }) {
+  const parent = span.event.parent ? layout.byValue.get(span.event.parent) : undefined;
+  const attributes = attributesOf(span);
+  const errors = layout.lines.filter((l) => l.span === span.value && l.event.t === 'err');
+  const logs = layout.lines.filter((l) => l.span === span.value && l.event.t !== 'err').length;
+  return (
+    <Panel
+      title={
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="shrink-0 font-mono text-xs font-medium text-subtle">{span.op}</span>
+          <span className="truncate">{span.name || span.op}</span>
+        </span>
+      }
+      description={
+        span.depth === 0
+          ? span.event.t === 'req'
+            ? 'Request'
+            : 'Job'
+          : `In ${parent?.label ?? 'its caller'}`
+      }
+      actions={<StatusPill tone={toneOf(span)}>{statusWord(span)}</StatusPill>}
+      className="xl:sticky xl:top-4"
+    >
+      <div className="flex flex-col gap-5">
+        <Facts className="grid-cols-[6rem_1fr] gap-y-2 text-[13px]">
+          <Fact label="Starts">
+            <span className="tabular">+{fmtMs(span.start)}</span>
+          </Fact>
+          <Fact label="Duration">
+            <span className="tabular">{fmtMs(span.duration)}</span>
+          </Fact>
+          {span.unrecorded && (
+            <Fact label="Not kept">
+              <span className="tabular">
+                {fmtNum(span.unrecorded.calls)} {span.unrecorded.calls === 1 ? 'call' : 'calls'},{' '}
+                {fmtMs(span.unrecorded.ms)}
+              </span>
+            </Fact>
+          )}
+          {logs > 0 && (
+            <Fact label="Logs">
+              <span className="tabular">
+                {fmtNum(logs)} {logs === 1 ? 'line' : 'lines'}
+              </span>
+            </Fact>
+          )}
+          {span.event.span && (
+            <Fact label="Span id">
+              <Mono className="text-[12px] break-all">{span.event.span}</Mono>
+            </Fact>
+          )}
+        </Facts>
+
+        {attributes.length > 0 && (
+          <section className="flex flex-col gap-2">
+            <h3 className="text-xs font-medium text-muted-foreground">Attributes</h3>
+            <dl className="grid grid-cols-[6rem_1fr] rounded-lg border font-mono text-[12px]">
+              {attributes.map(([k, v]) => (
+                <div key={k} className="col-span-2 grid grid-cols-subgrid border-b px-3 py-1.5 last:border-0">
+                  <dt className="truncate text-muted-foreground">{k}</dt>
+                  <dd className="min-w-0 break-all">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        )}
+
+        {errors.map((line) => (
+          <ErrorDetail key={line.key} line={line} />
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+function ErrorDetail({ line }: { line: TraceLine }) {
+  if (line.event.t !== 'err') return null;
+  const e = line.event;
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="text-xs font-medium text-muted-foreground">
+        Error at <span className="tabular">+{fmtMs(line.at)}</span>
+      </h3>
+      <div className="overflow-hidden rounded-lg border border-bad-mark/30">
+        <p className="bg-bad-mark/8 px-3 py-2 text-[13px] break-words text-bad">
+          <span className="font-medium">{e.name}</span>: {e.message}
+        </p>
+        {e.stack && (
+          <pre className="border-t border-bad-mark/20 bg-muted px-3 py-2.5 font-mono text-[11.5px] leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {stackFrames(e.stack)
+              .slice(1)
+              .map(({ key, frame, own }) => (
+                <span key={key} className={cn('block', own ? 'text-foreground' : 'text-subtle')}>
+                  {frame.trim()}
                 </span>
-                <span className="min-w-0 break-words">
-                  {r.kind === 'err' ? `${r.op}: ${r.label}` : r.label}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Panel>
-      )}
-    </>
+              ))}
+          </pre>
+        )}
+      </div>
+    </section>
+  );
+}
+
+const LOG_BASE = new Set(['_p', 't', 'ts', 'app', 'stage', 'rev', 'trace', 'span', 'parent', 'level', 'msg']);
+
+/** A log line's own fields, after its level and message. */
+function fieldsOf(line: TraceLine): string | undefined {
+  if (line.event.t !== 'log') return undefined;
+  const rest = Object.fromEntries(Object.entries(line.event).filter(([k]) => !LOG_BASE.has(k)));
+  return Object.keys(rest).length ? JSON.stringify(rest) : undefined;
+}
+
+function TraceLines({ layout }: { layout: TraceLayout }) {
+  return (
+    <Panel
+      flush
+      title="Logs"
+      description="Lines written during the trace, with the span they were written in"
+    >
+      <ul aria-label="Log lines in this trace" className="font-mono text-[12px]">
+        {layout.lines.map((l) => {
+          const fields = fieldsOf(l);
+          const owner = l.span ? layout.byValue.get(l.span) : undefined;
+          return (
+            <li
+              key={l.key}
+              className="grid grid-cols-[5rem_3.5rem_minmax(0,1fr)] gap-x-3 border-b px-5 py-1.5 last:border-0 md:grid-cols-[5rem_3.5rem_minmax(0,1fr)_minmax(0,14rem)]"
+            >
+              <span className="text-muted-foreground tabular">+{fmtMs(l.at)}</span>
+              <span className={LEVEL_TEXT[l.level] ?? 'text-muted-foreground'}>{l.level}</span>
+              <span className="min-w-0 break-words">
+                {l.text}
+                {fields && <span className="text-subtle"> {fields}</span>}
+              </span>
+              <span className="hidden truncate text-right text-subtle md:block">{owner?.label}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </Panel>
   );
 }

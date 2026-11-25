@@ -65,10 +65,6 @@ plat metrics --since 6h
 plat metrics --metric requests --stat percent --filter status=5xx --by route
 plat alerts list|history
 plat alerts create --name "5xx" --metric requests --stat percent --filter status=5xx --op above --threshold 2 --minutes 5
-plat dashboards list
-plat dashboards show <id> --json > board.json   # edit, then
-plat dashboards apply --file board.json
-plat queries list
 plat data [collection] [--partition key=value]
 plat deployments
 plat rollback [--to <deploymentId>]

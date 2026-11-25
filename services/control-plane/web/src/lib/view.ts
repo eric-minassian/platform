@@ -32,7 +32,6 @@ export function plainQuery(q: NamedSeriesQuery): SeriesQuery {
     stat: q.stat,
     ...(q.filter ? { filter: q.filter } : {}),
     ...(q.groupBy ? { groupBy: q.groupBy } : {}),
-    ...(q.app ? { app: q.app } : {}),
     ...(q.stage ? { stage: q.stage } : {}),
   };
 }
@@ -62,7 +61,7 @@ export function resolveView(view: MetricsView, responses: readonly SeriesRespons
     if (!response) return;
     if (response.note) notes.add(response.note);
     if (q.stat === 'histogram' && response.histogram && !histogram) histogram = { query: q, response };
-    // Answers of other lengths (another app's clock, a coarser fallback) are aligned by timestamp.
+    // Answers of other lengths (a coarser fallback) are aligned by timestamp.
     const index = new Map(response.timestamps.map((t, j) => [Date.parse(t), j]));
     const aligned = (values: ReadonlyArray<number | null>) =>
       timestamps.map((t) => {

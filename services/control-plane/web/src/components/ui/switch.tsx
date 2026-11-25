@@ -1,28 +1,31 @@
-import { Switch as SwitchPrimitive } from '@base-ui/react/switch';
+import { Switch as SwitchPart, SwitchThumb } from '@ui-sdk/react/switch';
 import { cn } from 'cn';
+import type { ComponentProps } from 'react';
 
 function Switch({
   className,
   size = 'default',
   ...props
-}: SwitchPrimitive.Root.Props & {
+}: Omit<ComponentProps<typeof SwitchPart>, 'className' | 'children'> & {
+  className?: string;
   size?: 'sm' | 'default';
 }) {
   return (
-    <SwitchPrimitive.Root
-      data-slot="switch"
-      data-size={size}
+    <SwitchPart
       className={cn(
-        'peer group/switch relative inline-flex shrink-0 items-center rounded-full border border-transparent transition-all outline-none group-has-[:focus-visible]/field-label:border-transparent group-has-[:focus-visible]/field-label:ring-0 after:absolute after:-inset-x-3 after:-inset-y-2 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 data-[size=default]:h-[18.4px] data-[size=default]:w-[32px] data-[size=sm]:h-[14px] data-[size=sm]:w-[24px] dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 data-checked:bg-primary data-unchecked:bg-input dark:data-unchecked:bg-input/80 data-disabled:cursor-not-allowed data-disabled:opacity-50',
+        'group/switch inline-flex shrink-0 cursor-default items-center rounded-full border border-transparent bg-active p-0.5 transition-colors outline-hidden focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-offset-2 focus-visible:outline-ring data-checked:bg-foreground data-disabled:opacity-50',
+        size === 'sm' ? 'h-4 w-7' : 'h-5 w-9',
         className,
       )}
       {...props}
     >
-      <SwitchPrimitive.Thumb
-        data-slot="switch-thumb"
-        className="pointer-events-none block rounded-full bg-background ring-0 transition-transform group-data-[size=default]/switch:size-4 group-data-[size=sm]/switch:size-3 group-data-[size=default]/switch:data-checked:translate-x-[calc(100%-2px)] group-data-[size=sm]/switch:data-checked:translate-x-[calc(100%-2px)] dark:data-checked:bg-primary-foreground group-data-[size=default]/switch:data-unchecked:translate-x-0 group-data-[size=sm]/switch:data-unchecked:translate-x-0 dark:data-unchecked:bg-foreground"
+      <SwitchThumb
+        className={cn(
+          'pointer-events-none block rounded-full bg-background shadow-sm ring-1 ring-black/5 transition-transform duration-150 motion-reduce:transition-none',
+          size === 'sm' ? 'size-3 data-checked:translate-x-3' : 'size-4 data-checked:translate-x-4',
+        )}
       />
-    </SwitchPrimitive.Root>
+    </SwitchPart>
   );
 }
 

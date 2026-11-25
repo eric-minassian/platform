@@ -21,31 +21,31 @@ import {
   type SeriesQuery,
   seriesUnit,
 } from '@ericminassian/platform-core';
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { Option } from 'effect';
 import { AsyncResult } from 'effect/reactivity';
 import { Bell, BellOff, Pause, Pencil, Play, Plus, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { toast } from 'sonner';
-import { ApiClient, errorMessage, fresh, timeToLive } from '../../client.ts';
+import { ApiClient, fresh, timeToLive } from '../../client.ts';
+import { ConfirmAction } from '../../components/actions/confirm-action.tsx';
+import { report } from '../../components/actions/report.ts';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import { MetricView } from '../../components/metrics/metric-view.tsx';
 import { QueryRow } from '../../components/metrics/query-editor.tsx';
-import { EmptyState, Loaded, PageHeader, Panel, StatusPill, type Tone } from '../../components/page.tsx';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '../../components/ui/alert-dialog.tsx';
+import { EmptyState, Loaded, PageHeader, Panel, StatusText, type Tone } from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
-import { Field, FieldDescription, FieldLabel } from '../../components/ui/field.tsx';
+import {
+  Drawer,
+  DrawerBody,
+  DrawerContent,
+  DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
+  DrawerTitle,
+} from '../../components/ui/drawer.tsx';
+import { Field, FieldDescription, FieldLabel, FieldSet, FieldLegend } from '../../components/ui/field.tsx';
 import { Input } from '../../components/ui/input.tsx';
-import { Label } from '../../components/ui/label.tsx';
+import { NumberInput } from '../../components/ui/number-input.tsx';
 import {
   Select,
   SelectContent,
@@ -53,14 +53,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../../components/ui/select.tsx';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from '../../components/ui/sheet.tsx';
 import { Switch } from '../../components/ui/switch.tsx';
 import { alertRulesAtom, alertsChanged, appChanged, family, seriesAtom } from '../../data/atoms.ts';
 import { relTime } from '../../format.ts';
@@ -93,6 +85,8 @@ const STATE: Record<AlertRule['state'], { tone: Tone; label: string }> = {
   no_data: { tone: 'muted', label: 'No data' },
 };
 
+const CHANGE: Record<AlertRule['state'], string> = { alarm: 'Fired', ok: 'Recovered', no_data: 'No data' };
+
 /** A window of this many minutes as the bucket size that draws it. */
 const WINDOW_RES: Record<(typeof ALERT_WINDOWS)[number], QueryResolution> = {
   1: '1m',
@@ -103,66 +97,87 @@ const WINDOW_RES: Record<(typeof ALERT_WINDOWS)[number], QueryResolution> = {
   60: '1h',
 };
 
+const windowLabel = (m: number) => (m === 60 ? '1 hour' : `${m} ${m === 1 ? 'minute' : 'minutes'}`);
+
 const changedKeys = (app: string) => [...alertsChanged(app), ...appChanged(app)];
 
 /** `above 2% over 5 minutes`. */
 export function describeCondition(rule: { query: SeriesQuery; condition: AlertCondition }): string {
   const f = formatterFor(seriesUnit(rule.query));
   const c = rule.condition;
-  return `${c.op} ${f(c.threshold)} over ${c.minutes === 1 ? '1 minute' : c.minutes === 60 ? 'an hour' : `${c.minutes} minutes`}`;
+  return `${c.op} ${f(c.threshold)} over ${c.minutes === 60 ? 'an hour' : windowLabel(c.minutes)}`;
 }
 
-const value = (r: AlertRule) =>
+const valueOf = (r: AlertRule) =>
   r.value === null || r.value === undefined ? '–' : formatterFor(seriesUnit(r.query))(r.value);
 
 const col = columns<AlertRule>();
-const ruleColumns = col.columns([
-  col.accessor((r) => (r.state === 'alarm' ? 0 : r.state === 'no_data' ? 1 : 2), {
-    id: 'state',
-    header: 'State',
-    cell: ({ row }) => {
-      const r = row.original;
-      return r.enabled ? (
-        <StatusPill tone={STATE[r.state].tone}>{STATE[r.state].label}</StatusPill>
-      ) : (
-        <StatusPill tone="muted">Paused</StatusPill>
-      );
-    },
-  }),
-  col.accessor('name', {
-    header: 'Rule',
-    cell: ({ row }) => (
-      <div className="max-w-[40rem] min-w-0">
-        <div className="truncate font-medium">{row.original.name}</div>
-        <div className="truncate text-xs text-muted-foreground">
-          {describeQuery(row.original.query)} {describeCondition(row.original)}
+/** The rules table's columns; a rule's name opens it beside the list. */
+const ruleColumns = (app: string) =>
+  col.columns([
+    col.accessor((r) => (!r.enabled ? 3 : r.state === 'alarm' ? 0 : r.state === 'no_data' ? 1 : 2), {
+      id: 'state',
+      header: 'State',
+      cell: ({ row }) => {
+        const r = row.original;
+        return r.enabled ? (
+          <StatusText tone={STATE[r.state].tone}>{STATE[r.state].label}</StatusText>
+        ) : (
+          <StatusText tone="muted" className="text-muted-foreground">
+            Paused
+          </StatusText>
+        );
+      },
+    }),
+    col.accessor('name', {
+      header: 'Rule',
+      cell: ({ row }) => (
+        <div className="max-w-[40rem] min-w-0">
+          <Link
+            to="/apps/$app/alerts"
+            params={{ app }}
+            search={(prev) => ({ ...prev, rule: row.original.id })}
+            replace
+            onClick={(e) => e.stopPropagation()}
+            className="block truncate rounded-sm font-medium outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
+          >
+            {row.original.name}
+          </Link>
+          <div className="truncate text-[13px] text-muted-foreground">
+            {describeQuery(row.original.query)} {describeCondition(row.original)}
+          </div>
         </div>
-      </div>
-    ),
-  }),
-  col.accessor((r) => r.value ?? -1, {
-    id: 'value',
-    header: 'Now',
-    meta: { numeric: true },
-    cell: ({ row }) => value(row.original),
-  }),
-  col.accessor((r) => r.stateSince ?? '', {
-    id: 'since',
-    header: 'Since',
-    cell: ({ row }) => (
-      <span className="whitespace-nowrap text-muted-foreground">{relTime(row.original.stateSince)}</span>
-    ),
-  }),
-  col.accessor('notify', {
-    header: 'Email',
-    cell: ({ getValue }) =>
-      getValue() ? (
-        <Bell className="size-4 text-muted-foreground" aria-label="Emails when it fires and recovers" />
-      ) : (
-        <BellOff className="size-4 text-subtle" aria-label="No email" />
       ),
-  }),
-]);
+    }),
+    col.accessor((r) => r.value ?? -1, {
+      id: 'value',
+      header: 'Now',
+      meta: { numeric: true },
+      cell: ({ row }) => valueOf(row.original),
+    }),
+    col.accessor((r) => r.stateSince ?? '', {
+      id: 'since',
+      header: 'Since',
+      cell: ({ row }) => (
+        <span className="whitespace-nowrap text-muted-foreground">{relTime(row.original.stateSince)}</span>
+      ),
+    }),
+    col.accessor('notify', {
+      header: 'Email',
+      cell: ({ getValue }) =>
+        getValue() ? (
+          <span className="inline-flex text-muted-foreground">
+            <Bell aria-hidden className="size-4" />
+            <span className="sr-only">Emails when it fires and recovers</span>
+          </span>
+        ) : (
+          <span className="inline-flex text-subtle">
+            <BellOff aria-hidden className="size-4" />
+            <span className="sr-only">No email</span>
+          </span>
+        ),
+    }),
+  ]);
 
 export function AlertsPage() {
   const { app } = alertsRoute.useParams();
@@ -200,8 +215,14 @@ export function AlertsPage() {
           rules.length === 0 ? (
             <Panel>
               <EmptyState
+                icon={<Bell />}
                 title={`No alert rules on ${stage}`}
-                action={<Button onClick={() => setEditing('new')}>Create a rule</Button>}
+                action={
+                  <Button variant="outline" size="sm" onClick={() => setEditing('new')}>
+                    <Plus />
+                    New rule
+                  </Button>
+                }
               >
                 A rule watches one metric, such as the share of 5xx responses or a route's p95, and emails
                 when it crosses a threshold for a window of minutes. Charts' menus start one too.
@@ -210,7 +231,7 @@ export function AlertsPage() {
           ) : (
             <Panel flush>
               <DataTable
-                columns={ruleColumns}
+                columns={ruleColumns(app)}
                 data={rules}
                 getRowId={(r) => r.id}
                 initialSorting={[{ id: 'state', desc: false }]}
@@ -226,6 +247,7 @@ export function AlertsPage() {
       <div className="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         {selected && (
           <RuleDetail
+            key={selected.id}
             app={app}
             stage={stage}
             rule={selected}
@@ -235,7 +257,7 @@ export function AlertsPage() {
         )}
         <History app={app} stage={stage} time={time.search} rules={all} />
       </div>
-      <RuleSheet
+      <RuleDrawer
         app={app}
         stage={stage}
         editing={editing}
@@ -264,7 +286,6 @@ function RuleDetail({
 }) {
   const update = useAtomSet(updateRule, { mode: 'promiseExit' });
   const remove = useAtomSet(removeRule, { mode: 'promiseExit' });
-  const [confirming, setConfirming] = useState(false);
   const view: MetricsView = {
     kind: 'metrics',
     queries: [{ id: 'a', ...rule.query, label: describeQuery(rule.query) }],
@@ -272,24 +293,18 @@ function RuleDetail({
     threshold: rule.condition.threshold,
   };
   const setEnabled = (enabled: boolean) =>
-    void (async () => {
-      const exit = await update({
+    void report(
+      update({
         params: { app, id: rule.id },
         payload: { ...inputOf(rule), enabled },
         reactivityKeys: changedKeys(app),
-      });
-      if (exit._tag === 'Failure') toast.error(errorMessage(exit.cause));
-      else toast.success(enabled ? `Resumed ${rule.name}` : `Paused ${rule.name}`);
-    })();
+      }),
+      enabled ? `Resumed ${rule.name}` : `Paused ${rule.name}`,
+    );
   return (
     <Panel
       title={rule.name}
-      description={
-        <span>
-          {describeQuery(rule.query)} {describeCondition(rule)}
-          {rule.evaluatedAt ? `, checked ${relTime(rule.evaluatedAt)}` : ''}
-        </span>
-      }
+      description={`${describeQuery(rule.query)} ${describeCondition(rule)}`}
       actions={
         <>
           <Button variant="ghost" size="sm" onClick={() => setEnabled(!rule.enabled)}>
@@ -300,15 +315,34 @@ function RuleDetail({
             <Pencil />
             Edit
           </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label={`Delete ${rule.name}`}
-            onClick={() => setConfirming(true)}
+          <ConfirmAction
+            trigger={<Button variant="ghost" size="icon-sm" aria-label={`Delete ${rule.name}`} />}
+            title={`Delete ${rule.name}?`}
+            description="The rule stops being checked; its history stays for 90 days."
+            confirmLabel="Delete rule"
+            onConfirm={() =>
+              report(
+                remove({ params: { app, id: rule.id }, reactivityKeys: changedKeys(app) }),
+                `Deleted ${rule.name}`,
+              )
+            }
           >
             <Trash2 />
-          </Button>
+          </ConfirmAction>
         </>
+      }
+      footer={
+        <span>
+          {rule.evaluatedAt ? `Checked ${relTime(rule.evaluatedAt)}. ` : ''}Each point is one{' '}
+          {rule.condition.minutes === 60 ? 'hour' : `${rule.condition.minutes}-minute`} window; the dashed
+          line is the threshold. With no data the rule{' '}
+          {rule.missing === 'keep'
+            ? 'keeps its state'
+            : rule.missing === 'ok'
+              ? 'counts as OK'
+              : 'counts as firing'}
+          .
+        </span>
       }
     >
       <MetricView
@@ -320,44 +354,6 @@ function RuleDetail({
         legend={false}
         res={WINDOW_RES[rule.condition.minutes]}
       />
-      <p className="mt-2 text-xs text-muted-foreground">
-        Each point is one {rule.condition.minutes}-minute window; the dashed line is the threshold. With no
-        data the rule
-        {rule.missing === 'keep'
-          ? ' keeps its state'
-          : rule.missing === 'ok'
-            ? ' counts as OK'
-            : ' counts as firing'}
-        .
-      </p>
-      <AlertDialog open={confirming} onOpenChange={setConfirming}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete {rule.name}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              The rule stops being checked; its history stays for 90 days.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() =>
-                void (async () => {
-                  const exit = await remove({
-                    params: { app, id: rule.id },
-                    reactivityKeys: changedKeys(app),
-                  });
-                  if (exit._tag === 'Failure') toast.error(errorMessage(exit.cause));
-                  else toast.success(`Deleted ${rule.name}`);
-                })()
-              }
-            >
-              Delete
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </Panel>
   );
 }
@@ -377,7 +373,7 @@ function History({
   const result = useAtomValue(historyAtom({ app, stage, time }));
   const when = timeFormat(utc, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   return (
-    <Panel flush title="History" description="state changes in the window, newest first">
+    <Panel flush title="History" description="State changes in the window, newest first">
       <Loaded result={result} loading={<div className="h-24" />}>
         {({ events }) =>
           events.length === 0 ? (
@@ -390,17 +386,17 @@ function History({
                 return (
                   <li
                     key={`${e.rule}:${e.ts}`}
-                    className="grid grid-cols-[8.5rem_6.5rem_1fr] items-center gap-3 border-b px-4 py-2 text-sm last:border-0"
+                    className="grid grid-cols-[6.5rem_minmax(0,1fr)_auto] items-baseline gap-x-3 border-b px-5 py-2.5 text-sm last:border-0"
                   >
-                    <span className="text-muted-foreground tabular">{when(e.ts)}</span>
-                    <StatusPill tone={STATE[e.to].tone}>
-                      {e.to === 'alarm' ? 'Fired' : e.to === 'ok' ? 'Recovered' : 'No data'}
-                    </StatusPill>
-                    <span className="min-w-0 truncate">
-                      {e.name}
-                      <span className="text-muted-foreground">
-                        {e.value === null ? ', no data' : `, ${f(e.value)} against ${f(e.threshold)}`}
+                    <StatusText tone={STATE[e.to].tone}>{CHANGE[e.to]}</StatusText>
+                    <span className="min-w-0">
+                      <span className="block truncate">{e.name}</span>
+                      <span className="block truncate text-[13px] text-muted-foreground tabular">
+                        {e.value === null ? 'No data' : `${f(e.value)} against ${f(e.threshold)}`}
                       </span>
+                    </span>
+                    <span className="text-[13px] whitespace-nowrap text-muted-foreground tabular">
+                      {when(e.ts)}
                     </span>
                   </li>
                 );
@@ -425,7 +421,40 @@ const inputOf = (r: AlertRule): AlertRuleInput => ({
 
 const DEFAULT_QUERY: SeriesQuery = { metric: 'requests', stat: 'percent', filter: { status: ['5xx'] } };
 
-function RuleSheet({
+const OPS: ReadonlyArray<{ value: AlertCondition['op']; label: string }> = [
+  { value: 'above', label: 'Above' },
+  { value: 'below', label: 'Below' },
+];
+
+const WINDOWS = ALERT_WINDOWS.map((m) => ({ value: String(m), label: windowLabel(m) }));
+
+const MISSING: Record<AlertMissingData, string> = {
+  ok: 'Treat it as OK',
+  alarm: 'Treat it as firing',
+  keep: 'Keep the current state',
+};
+const MISSING_ITEMS = (Object.keys(MISSING) as AlertMissingData[]).map((m) => ({
+  value: m,
+  label: MISSING[m],
+}));
+
+/** What a threshold is in, and how finely it steps. */
+function thresholdUnit(query: SeriesQuery): { hint: string; step: number; min?: number; max?: number } {
+  switch (seriesUnit(query)) {
+    case 'percent':
+      return { hint: 'Percent, 0 to 100', step: 0.1, min: 0, max: 100 };
+    case 'ms':
+      return { hint: 'Milliseconds', step: 1, min: 0 };
+    case 'per_second':
+      return { hint: 'Per second', step: 0.01, min: 0 };
+    default:
+      return query.metric === 'custom'
+        ? { hint: 'In the metric’s own unit', step: 0.01 }
+        : { hint: 'Count', step: 1, min: 0 };
+  }
+}
+
+function RuleDrawer({
   app,
   stage,
   editing,
@@ -440,11 +469,10 @@ function RuleSheet({
   onClose: () => void;
   onSaved: (rule: AlertRule) => void;
 }) {
-  const open = editing !== null;
   return (
-    <Sheet open={open} onOpenChange={(next) => !next && onClose()}>
-      <SheetContent side="right" size="lg" className="gap-0 overflow-y-auto">
-        {open && (
+    <Drawer open={editing !== null} onOpenChange={(open) => !open && onClose()}>
+      <DrawerContent width="42rem" closeLabel="Close the rule editor">
+        {editing !== null && (
           <RuleForm
             key={editing === 'new' ? 'new' : editing.id}
             app={app}
@@ -455,8 +483,8 @@ function RuleSheet({
             onSaved={onSaved}
           />
         )}
-      </SheetContent>
-    </Sheet>
+      </DrawerContent>
+    </Drawer>
   );
 }
 
@@ -479,7 +507,7 @@ function RuleForm({
   const [name, setName] = useState(rule?.name ?? '');
   const [query, setQuery] = useState<NamedSeriesQuery>({ id: 'a', ...plainQuery({ id: 'a', ...start }) });
   const [op, setOp] = useState<AlertCondition['op']>(rule?.condition.op ?? 'above');
-  const [threshold, setThreshold] = useState(rule ? String(rule.condition.threshold) : '');
+  const [threshold, setThreshold] = useState<number | null>(rule?.condition.threshold ?? null);
   const [minutes, setMinutes] = useState<AlertCondition['minutes']>(rule?.condition.minutes ?? 5);
   const [missing, setMissing] = useState<AlertMissingData>(rule?.missing ?? 'ok');
   const [notify, setNotify] = useState(rule?.notify ?? true);
@@ -490,68 +518,72 @@ function RuleForm({
 
   const plain = plainQuery(query);
   const problem = checkSeriesQuery(plain, { alert: true });
-  const limit = Number(threshold);
-  const valid = name.trim().length > 0 && threshold.trim() !== '' && Number.isFinite(limit) && !problem;
-  const unit = seriesUnit(plain);
+  const valid = name.trim().length > 0 && threshold !== null && !problem;
+  const unit = thresholdUnit(plain);
+  const ruleStage = rule?.stage ?? stage;
 
   const save = async () => {
-    if (!valid) return;
+    if (!valid || threshold === null) return;
     setBusy(true);
     const payload: AlertRuleInput = {
       name: name.trim(),
-      stage: rule?.stage ?? stage,
+      stage: ruleStage,
       query: plain,
-      condition: { op, threshold: limit, minutes },
+      condition: { op, threshold, minutes },
       missing,
       notify,
       enabled,
     };
-    const exit = rule
-      ? await update({ params: { app, id: rule.id }, payload, reactivityKeys: changedKeys(app) })
-      : await create({ params: { app }, payload, reactivityKeys: changedKeys(app) });
+    let saved: AlertRule | undefined;
+    const ok = await report(
+      rule
+        ? update({ params: { app, id: rule.id }, payload, reactivityKeys: changedKeys(app) })
+        : create({ params: { app }, payload, reactivityKeys: changedKeys(app) }),
+      (value) => {
+        saved = value;
+        return rule ? `Saved ${value.name}` : `Created ${value.name}`;
+      },
+    );
     setBusy(false);
-    if (exit._tag === 'Failure') {
-      toast.error(errorMessage(exit.cause));
-      return;
+    if (ok && saved) {
+      onSaved(saved);
+      onClose();
     }
-    toast.success(rule ? `Saved ${exit.value.name}` : `Created ${exit.value.name}`);
-    onSaved(exit.value);
-    onClose();
   };
 
   return (
     <form
-      className="flex min-h-full flex-col"
+      className="flex min-h-0 flex-1 flex-col"
       onSubmit={(e) => {
         e.preventDefault();
         void save();
       }}
     >
-      <SheetHeader>
-        <SheetTitle>{rule ? `Edit ${rule.name}` : 'New alert rule'}</SheetTitle>
-        <SheetDescription>
-          On {rule?.stage ?? stage}. Checked every minute over the window, two minutes behind so the window's
-          telemetry has arrived.
-        </SheetDescription>
-      </SheetHeader>
-      <div className="flex flex-1 flex-col gap-5 px-4 pb-4">
+      <DrawerHeader>
+        <DrawerTitle>{rule ? `Edit ${rule.name}` : 'New alert rule'}</DrawerTitle>
+        <DrawerDescription className="whitespace-normal">
+          On {ruleStage}. Checked every minute over the window, two minutes behind so the window's telemetry
+          has arrived.
+        </DrawerDescription>
+      </DrawerHeader>
+      <DrawerBody className="grid content-start gap-6">
         <Field>
-          <FieldLabel htmlFor="rule-name">Name</FieldLabel>
+          <FieldLabel>Name</FieldLabel>
           <Input
-            id="rule-name"
             value={name}
             maxLength={80}
-            placeholder="Requests failing"
-            onChange={(e) => setName(e.target.value)}
+            placeholder={problem ? 'Requests failing' : describeQuery(plain)}
+            onValueChange={setName}
           />
         </Field>
-        <div className="grid gap-2">
-          <span className="text-sm font-medium">Watch</span>
-          <div className="-mx-4 border-y">
+
+        <FieldSet>
+          <FieldLegend>Watch</FieldLegend>
+          <div className="rounded-lg border">
             <QueryRow
               query={query}
               app={app}
-              stage={rule?.stage ?? stage}
+              stage={ruleStage}
               time={{ range: '24h' }}
               onChange={setQuery}
               removable={false}
@@ -560,80 +592,78 @@ function RuleForm({
               hideable={false}
             />
           </div>
-        </div>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        </FieldSet>
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-[8rem_minmax(0,1fr)_10rem]">
           <Field>
             <FieldLabel>When it is</FieldLabel>
-            <Select value={op} onValueChange={(v) => setOp(v as AlertCondition['op'])}>
-              <SelectTrigger aria-label="Above or below">
-                <SelectValue>{op}</SelectValue>
+            <Select items={[...OPS]} value={op} onValueChange={(v) => v && setOp(v)}>
+              <SelectTrigger>
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="above">above</SelectItem>
-                <SelectItem value="below">below</SelectItem>
+                {OPS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </Field>
           <Field>
-            <FieldLabel htmlFor="rule-threshold">Threshold</FieldLabel>
-            <Input
-              id="rule-threshold"
-              inputMode="decimal"
+            <FieldLabel>Threshold</FieldLabel>
+            <NumberInput
               value={threshold}
+              onValueChange={setThreshold}
+              step={unit.step}
+              largeStep={unit.step * 10}
+              {...(unit.min !== undefined ? { min: unit.min } : {})}
+              {...(unit.max !== undefined ? { max: unit.max } : {})}
               placeholder="0"
-              className="tabular"
-              onChange={(e) => setThreshold(e.target.value)}
             />
-            <FieldDescription>
-              {unit === 'percent'
-                ? 'percent, 0 to 100'
-                : unit === 'ms'
-                  ? 'milliseconds'
-                  : unit === 'per_second'
-                    ? 'per second'
-                    : unit}
-            </FieldDescription>
+            <FieldDescription>{unit.hint}</FieldDescription>
           </Field>
           <Field>
             <FieldLabel>Over the last</FieldLabel>
             <Select
+              items={WINDOWS}
               value={String(minutes)}
-              onValueChange={(v) => setMinutes(Number(v) as AlertCondition['minutes'])}
+              onValueChange={(v) => v && setMinutes(Number(v) as AlertCondition['minutes'])}
             >
-              <SelectTrigger aria-label="Window">
-                <SelectValue>
-                  {minutes === 60 ? 'hour' : `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`}
-                </SelectValue>
+              <SelectTrigger>
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {ALERT_WINDOWS.map((m) => (
-                  <SelectItem key={m} value={String(m)}>
-                    {m === 60 ? 'hour' : `${m} ${m === 1 ? 'minute' : 'minutes'}`}
+                {WINDOWS.map((w) => (
+                  <SelectItem key={w.value} value={w.value}>
+                    {w.label}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
           </Field>
         </div>
+
         <Preview
           app={app}
-          stage={rule?.stage ?? stage}
+          stage={ruleStage}
           query={plain}
           op={op}
-          threshold={Number.isFinite(limit) && threshold.trim() ? limit : undefined}
+          threshold={threshold ?? undefined}
           minutes={minutes}
           problem={problem}
         />
+
         <Field>
           <FieldLabel>When the window has no data</FieldLabel>
-          <Select value={missing} onValueChange={(v) => setMissing(v as AlertMissingData)}>
-            <SelectTrigger aria-label="Missing data">
-              <SelectValue>{MISSING[missing]}</SelectValue>
+          <Select items={MISSING_ITEMS} value={missing} onValueChange={(v) => v && setMissing(v)}>
+            <SelectTrigger className="w-64">
+              <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {(Object.keys(MISSING) as AlertMissingData[]).map((m) => (
-                <SelectItem key={m} value={m}>
-                  {MISSING[m]}
+              {MISSING_ITEMS.map((m) => (
+                <SelectItem key={m.value} value={m.value}>
+                  {m.label}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -643,39 +673,32 @@ function RuleForm({
             missing: none is 0.
           </FieldDescription>
         </Field>
-        <div className="flex items-center justify-between gap-4">
-          <Label htmlFor="rule-notify" className="flex-col items-start gap-1 font-normal">
-            <span className="text-sm font-medium">Email when it fires and recovers</span>
-            <span className="text-xs text-muted-foreground">
-              Sent to the platform's alerts address, like uptime alerts.
-            </span>
-          </Label>
-          <Switch id="rule-notify" checked={notify} onCheckedChange={setNotify} />
+
+        <div className="flex flex-col gap-4 border-t pt-5">
+          <Field orientation="horizontal" className="items-start justify-between">
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <FieldLabel>Email when it fires and recovers</FieldLabel>
+              <FieldDescription>Sent to the platform's alerts address, like uptime alerts.</FieldDescription>
+            </div>
+            <Switch checked={notify} onCheckedChange={setNotify} />
+          </Field>
+          <Field orientation="horizontal" className="justify-between">
+            <FieldLabel>Enabled</FieldLabel>
+            <Switch checked={enabled} onCheckedChange={setEnabled} />
+          </Field>
         </div>
-        <div className="flex items-center justify-between gap-4">
-          <Label htmlFor="rule-enabled" className="text-sm font-medium">
-            Enabled
-          </Label>
-          <Switch id="rule-enabled" checked={enabled} onCheckedChange={setEnabled} />
-        </div>
-      </div>
-      <SheetFooter className="flex-row justify-end border-t">
-        <Button type="button" variant="outline" onClick={onClose}>
+      </DrawerBody>
+      <DrawerFooter>
+        <Button variant="outline" size="sm" onClick={onClose}>
           Cancel
         </Button>
-        <Button type="submit" disabled={!valid || busy}>
+        <Button type="submit" size="sm" disabled={!valid || busy}>
           {busy ? 'Saving…' : rule ? 'Save rule' : 'Create rule'}
         </Button>
-      </SheetFooter>
+      </DrawerFooter>
     </form>
   );
 }
-
-const MISSING: Record<AlertMissingData, string> = {
-  ok: 'Treat it as OK',
-  alarm: 'Treat it as firing',
-  keep: 'Keep the current state',
-};
 
 /** The query over the last day in windows of the rule's size, and how often it would have fired. */
 function Preview({
@@ -718,15 +741,18 @@ function Preview({
     ...(threshold !== undefined ? { threshold } : {}),
   };
   return (
-    <div className="rounded-lg border bg-background p-3">
-      <MetricView view={view} app={app} stage={stage} time={time} height={170} legend={false} res={res} />
-      <p className="mt-2 text-xs text-muted-foreground">
+    <section aria-label="Preview" className="rounded-lg border">
+      <div className="px-4 pt-3 pb-4">
+        <p className="mb-2 text-[13px] font-medium">Last 24 hours</p>
+        <MetricView view={view} app={app} stage={stage} time={time} height={160} legend={false} res={res} />
+      </div>
+      <p className="rounded-b-lg border-t bg-muted px-4 py-2.5 text-[13px] text-muted-foreground">
         {fired === undefined
-          ? 'Set a threshold to see where the rule would have fired in the last 24 hours.'
+          ? 'Set a threshold to see where the rule would have fired.'
           : fired === 0
             ? 'It would not have fired in the last 24 hours.'
             : `It would have fired ${fired === 1 ? 'once' : `${fired} times`} in the last 24 hours.`}
       </p>
-    </div>
+    </section>
   );
 }

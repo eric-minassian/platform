@@ -1,7 +1,7 @@
 /**
  * Per-viewer display preferences, kept in this browser only: whether times
- * show in UTC and how often live pages refresh. Shared state (saved queries,
- * dashboards) lives on the server instead.
+ * show in UTC, how often live pages refresh and whether the sidebar is
+ * folded to icons. The color scheme is its own preference (`color-scheme.ts`).
  */
 import { createContext, type ReactNode, useCallback, useContext, useMemo, useState } from 'react';
 
@@ -17,9 +17,11 @@ interface Prefs {
   readonly utc: boolean;
   /** Milliseconds between refreshes of a relative range; 0 is off. */
   readonly refreshMs: number;
+  /** The sidebar shows icons only, giving wide pages room. */
+  readonly sidebarFolded: boolean;
 }
 
-const DEFAULTS: Prefs = { utc: false, refreshMs: 30_000 };
+const DEFAULTS: Prefs = { utc: false, refreshMs: 30_000, sidebarFolded: false };
 const KEY = 'platform-console:prefs';
 
 function load(): Prefs {
@@ -34,6 +36,7 @@ function load(): Prefs {
       refreshMs: REFRESH_INTERVALS.some((r) => r.value === p.refreshMs)
         ? (p.refreshMs as number)
         : DEFAULTS.refreshMs,
+      sidebarFolded: typeof p.sidebarFolded === 'boolean' ? p.sidebarFolded : DEFAULTS.sidebarFolded,
     };
   } catch {
     return DEFAULTS;

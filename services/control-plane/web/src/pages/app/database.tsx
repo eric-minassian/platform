@@ -1,32 +1,40 @@
 /**
  * A read-only look at an app stage's table: its collections with sampled
  * item counts, and a collection's items a page at a time, optionally within
- * one partition, each item's whole record in a side sheet. The collection
- * and partition are in the URL, so a view can be linked to.
+ * one partition, each item's key and whole record in a side panel. The
+ * collection and partition are in the URL, so a view can be linked to.
  */
 import { useAtomSet, useAtomValue } from '@effect/atom-react';
 import type { DataCollections } from '@ericminassian/platform-core';
+import { Link } from '@tanstack/react-router';
 import { AsyncResult } from 'effect/reactivity';
-import { Copy, Search, X } from 'lucide-react';
-import { type ReactElement, useMemo, useRef, useState } from 'react';
-import { toast } from 'sonner';
+import { Copy, PanelRightOpen, Search } from 'lucide-react';
+import { type ReactElement, useMemo, useState } from 'react';
 import { ApiClient, fresh, loadedPages, pages, timeToLive } from '../../client.ts';
 import { columns, DataTable } from '../../components/data-table.tsx';
-import { EmptyState, ErrorNotice, Loaded, Loading, Mono, PageHeader, Panel } from '../../components/page.tsx';
+import {
+  EmptyState,
+  ErrorNotice,
+  Fact,
+  Facts,
+  Loaded,
+  Loading,
+  Mono,
+  PageHeader,
+  Panel,
+} from '../../components/page.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupInput,
-} from '../../components/ui/input-group.tsx';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '../../components/ui/sheet.tsx';
+  Drawer,
+  DrawerBody,
+  DrawerContent,
+  DrawerDescription,
+  DrawerHeader,
+  DrawerTitle,
+} from '../../components/ui/drawer.tsx';
+import { InputClear, InputGroup, InputGroupAddon, InputGroupInput } from '../../components/ui/input.tsx';
+import { toast } from '../../components/ui/overlays.tsx';
+import { Tip } from '../../components/ui/tooltip.tsx';
 import { family } from '../../data/atoms.ts';
 import { fmtNum } from '../../format.ts';
 import { useStage } from '../../lib/hooks.ts';
@@ -57,7 +65,7 @@ const itemPages = family((k: { app: string; stage: string; collection: string; p
 
 type Item = Readonly<Record<string, unknown>>;
 
-/** Columns shown in the table; the sheet shows the rest. */
+/** Columns shown in the table; the side panel shows the rest. */
 const MAX_COLUMNS = 6;
 
 export function DatabasePage(): ReactElement {
@@ -112,34 +120,35 @@ function Browser({
   collection: string;
   partition: string;
 }) {
-  const navigate = databaseRoute.useNavigate();
-  const pick = (name: string) =>
-    void navigate({ search: (prev) => ({ ...prev, collection: name, partition: undefined }) });
   return (
     <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[240px_minmax(0,1fr)]">
-      <Panel flush title="Collections" description="Counts from a sample of the table">
-        <ul className="px-2 pb-1">
-          {collections.map((c) => (
-            <li key={c.name}>
-              <button
-                type="button"
-                onClick={() => pick(c.name)}
-                aria-current={c.name === collection || undefined}
-                className={cn(
-                  'flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-sm outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring',
-                  c.name === collection && 'bg-accent font-medium',
-                )}
-              >
-                <Mono className="truncate">{c.name}</Mono>
-                <span
-                  className="text-xs text-muted-foreground tabular"
-                  title="Sampled; large collections are undercounted"
+      <Panel flush title="Collections" description="Item counts from a sample">
+        <ul className="flex flex-col gap-px px-2 pb-1">
+          {collections.map((c) => {
+            const current = c.name === collection;
+            return (
+              <li key={c.name}>
+                <Link
+                  to="/apps/$app/database"
+                  params={{ app }}
+                  search={(prev) => ({ ...prev, collection: c.name, partition: undefined })}
+                  aria-current={current ? 'page' : undefined}
+                  className={cn(
+                    'flex h-8 items-center justify-between gap-3 rounded-md px-3 text-sm text-muted-foreground outline-hidden hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-solid focus-visible:-outline-offset-2 focus-visible:outline-ring',
+                    current && 'bg-accent font-medium text-foreground',
+                  )}
                 >
-                  {fmtNum(c.sampled)}
-                </span>
-              </button>
-            </li>
-          ))}
+                  <Mono className="truncate">{c.name}</Mono>
+                  <span
+                    className="text-xs text-subtle tabular"
+                    title="Sampled; large collections are undercounted"
+                  >
+                    {fmtNum(c.sampled)}
+                  </span>
+                </Link>
+              </li>
+            );
+          })}
         </ul>
       </Panel>
       <Items
@@ -173,7 +182,7 @@ function Items({
   const more = loaded.at(-1)?.cursor !== undefined;
   const [draft, setDraft] = useState(partition);
   const [open, setOpen] = useState<Item>();
-  const tableColumns = useMemo(() => itemColumns(rows), [rows]);
+  const tableColumns = useMemo(() => itemColumns(rows, setOpen), [rows]);
   const apply = (value: string) =>
     void navigate({ search: (prev) => ({ ...prev, partition: value.trim() || undefined }) });
   return (
@@ -193,35 +202,27 @@ function Items({
             apply(draft);
           }}
         >
-          <InputGroup className="h-8">
+          <InputGroup>
             <InputGroupAddon>
               <Search />
             </InputGroupAddon>
             <InputGroupInput
               aria-label="Partition key value"
+              className="font-mono text-[13px] placeholder:font-sans placeholder:text-sm"
               placeholder="Partition key value"
+              spellCheck={false}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onValueChange={(value, details) => {
+                setDraft(value);
+                if (details.reason === 'clear-press') apply('');
+              }}
             />
-            {partition && (
-              <InputGroupAddon align="inline-end">
-                <InputGroupButton
-                  size="icon-xs"
-                  aria-label="Clear partition"
-                  onClick={() => {
-                    setDraft('');
-                    apply('');
-                  }}
-                >
-                  <X />
-                </InputGroupButton>
-              </InputGroupAddon>
-            )}
+            <InputClear label="Clear partition" />
           </InputGroup>
         </form>
       }
     >
-      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-4 mb-3" />}
+      {result._tag === 'Failure' && <ErrorNotice error={result.cause} className="mx-5 mb-3" />}
       {AsyncResult.isInitial(result) ? (
         <Loading rows={6} />
       ) : (
@@ -244,13 +245,13 @@ function Items({
         />
       )}
       {more && (
-        <div className="border-t px-4 py-2.5">
+        <div className="border-t px-5 py-2.5">
           <Button variant="outline" size="sm" onClick={() => loadMore()} disabled={result.waiting}>
             {result.waiting ? 'Loading…' : 'Load more'}
           </Button>
         </div>
       )}
-      <ItemSheet collection={collection} item={open} onOpenChange={(o) => !o && setOpen(undefined)} />
+      <ItemDrawer collection={collection} item={open} onOpenChange={(o) => !o && setOpen(undefined)} />
     </Panel>
   );
 }
@@ -273,18 +274,26 @@ function fieldsOf(rows: readonly Item[]): string[] {
   return fields;
 }
 
-const item = columns<Item>();
+const itemColumn = columns<Item>();
 
 /**
  * One column per common field. A page of items isn't the whole collection,
  * so the columns don't sort: an order would only hold for what's loaded.
  */
-function itemColumns(rows: readonly Item[]) {
-  return item.columns(
-    fieldsOf(rows).map((field) => {
+function itemColumns(rows: readonly Item[], onOpen: (item: Item) => void) {
+  const fields = fieldsOf(rows);
+  // The row's first field names it, the way the table shows it.
+  const nameOf = (item: Item) => {
+    const first = fields[0] === undefined ? undefined : item[fields[0]];
+    if (typeof first === 'string' || typeof first === 'number' || typeof first === 'boolean')
+      return String(first);
+    return first === undefined || first === null ? 'item' : JSON.stringify(first);
+  };
+  return itemColumn.columns([
+    ...fields.map((field) => {
       const present = rows.map((row) => row[field]).filter((v) => v !== undefined && v !== null);
       const numeric = present.length > 0 && present.every((v) => typeof v === 'number');
-      return item.accessor((row) => row[field], {
+      return itemColumn.accessor((row) => row[field], {
         id: field,
         header: () => <span className="font-mono">{field}</span>,
         enableSorting: false,
@@ -292,7 +301,25 @@ function itemColumns(rows: readonly Item[]) {
         cell: ({ getValue }) => <Value value={getValue()} />,
       });
     }),
-  );
+    itemColumn.display({
+      id: 'open',
+      header: () => <span className="sr-only">Open</span>,
+      meta: { className: 'w-0' },
+      cell: ({ row }) => (
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`Open ${nameOf(row.original)}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(row.original);
+          }}
+        >
+          <PanelRightOpen />
+        </Button>
+      ),
+    }),
+  ]);
 }
 
 function Value({ value }: { value: unknown }) {
@@ -304,54 +331,93 @@ function Value({ value }: { value: unknown }) {
   return <Mono className="block truncate text-muted-foreground">{JSON.stringify(value)}</Mono>;
 }
 
-function ItemSheet({
+/** Copies text to the clipboard and says whether it worked. */
+function copy(text: string, what: string) {
+  void navigator.clipboard.writeText(text).then(
+    () => toast.success(`Copied ${what}`),
+    () => toast.error("Couldn't copy to the clipboard"),
+  );
+}
+
+function ItemDrawer({
   collection,
-  item: it,
+  item,
   onOpenChange,
 }: {
   collection: string;
   item: Item | undefined;
   onOpenChange: (open: boolean) => void;
 }) {
-  const body = useRef<HTMLPreElement>(null);
-  const json = it ? JSON.stringify(it, null, 2) : '';
+  // The item stays on screen while the panel slides out.
+  const [kept, setKept] = useState(item);
+  if (item && item !== kept) setKept(item);
+  const it = item ?? kept;
   const key = it?._key as { pk?: unknown; sk?: unknown } | undefined;
+  // `_key` is the browser's addition; the record is everything else.
+  const json = useMemo(() => {
+    if (!it) return '';
+    const { _key, ...record } = it;
+    return JSON.stringify(record, null, 2);
+  }, [it]);
   return (
-    <Sheet open={it !== undefined} onOpenChange={onOpenChange}>
-      <SheetContent initialFocus={body} className="w-full gap-0 data-[side=right]:sm:max-w-xl">
+    <Drawer open={item !== undefined} onOpenChange={onOpenChange}>
+      <DrawerContent width="36rem" initialFocus="content">
         {it && (
           <>
-            <SheetHeader className="border-b pr-12">
-              <SheetTitle className="font-mono">{collection}</SheetTitle>
-              <SheetDescription className="truncate font-mono text-xs">
-                {key ? `${String(key.pk)} · ${String(key.sk)}` : 'An item'}
-              </SheetDescription>
-            </SheetHeader>
-            <div className="flex items-center justify-end border-b px-4 py-2">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() =>
-                  void navigator.clipboard.writeText(json).then(
-                    () => toast.success('Copied the item as JSON'),
-                    () => toast.error("Couldn't copy to the clipboard"),
-                  )
-                }
-              >
-                <Copy />
-                Copy JSON
-              </Button>
-            </div>
-            <pre
-              ref={body}
-              tabIndex={-1}
-              className="min-h-0 flex-1 overflow-auto p-4 font-mono text-xs leading-relaxed outline-none"
-            >
-              {json}
-            </pre>
+            <DrawerHeader>
+              <DrawerTitle className="font-mono">{collection}</DrawerTitle>
+              <DrawerDescription className="font-mono text-[13px]">
+                {key ? `${String(key.pk)} · ${String(key.sk)}` : `${Object.keys(it).length} fields`}
+              </DrawerDescription>
+            </DrawerHeader>
+            <DrawerBody className="flex flex-col gap-6">
+              {key && (
+                <section className="flex flex-col gap-3">
+                  <h3 className="text-[13px] font-medium">Key</h3>
+                  <Facts className="items-center">
+                    <Fact label="Partition key">
+                      <KeyValue label="partition key" value={String(key.pk)} />
+                    </Fact>
+                    <Fact label="Sort key">
+                      <KeyValue label="sort key" value={String(key.sk)} />
+                    </Fact>
+                  </Facts>
+                </section>
+              )}
+              <section className="flex min-h-0 flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <h3 className="text-[13px] font-medium">Item</h3>
+                  <Button variant="outline" size="sm" onClick={() => copy(json, 'the item as JSON')}>
+                    <Copy />
+                    Copy JSON
+                  </Button>
+                </div>
+                <pre className="overflow-x-auto rounded-lg border bg-muted p-4 font-mono text-xs leading-relaxed">
+                  {json}
+                </pre>
+              </section>
+            </DrawerBody>
           </>
         )}
-      </SheetContent>
-    </Sheet>
+      </DrawerContent>
+    </Drawer>
+  );
+}
+
+function KeyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <Mono className="min-w-0 break-all">{value}</Mono>
+      <Tip label={`Copy ${label}`}>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          aria-label={`Copy ${label}`}
+          onClick={() => copy(value, `the ${label}`)}
+        >
+          <Copy />
+        </Button>
+      </Tip>
+    </span>
   );
 }

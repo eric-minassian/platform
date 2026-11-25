@@ -1,5 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
-  test: { include: ['test/**/*.test.ts'], environment: 'node' },
+  test: {
+    projects: [
+      { test: { name: 'server', include: ['test/**/*.test.ts'], environment: 'node' } },
+      './web/vitest.config.ts',
+    ],
+  },
 });
