@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   appItem,
+  appKey,
   deploymentItem,
   type StageItem,
   stageCompute,
@@ -16,12 +17,43 @@ import {
   type PlatformConfig,
   type PlatformRuntimeConfig,
   PROD_STAGE,
+  RepoVisibility,
   type ResolvedManifest,
   webComputeFor,
 } from '@ericminassian/platform-core';
 import type { Engine, EngineContext } from '@ericminassian/platform-engine';
 
 export const CONTROL_PLANE_DIR = 'services/control-plane';
+
+const isRepoVisibility = (v: unknown): v is RepoVisibility =>
+  (RepoVisibility.literals as readonly unknown[]).includes(v);
+
+/**
+ * The repository's visibility in a GitHub Actions event payload
+ * (`GITHUB_EVENT_PATH`). An app's CI deploy records it from its OIDC token
+ * through the API, which the control plane's own deploy doesn't go through,
+ * so the public directory would never link the platform's repo otherwise.
+ */
+export function repoVisibilityOf(event: unknown): RepoVisibility | undefined {
+  const repository =
+    typeof event === 'object' && event !== null ? (event as { repository?: unknown }).repository : undefined;
+  const visibility =
+    typeof repository === 'object' && repository !== null
+      ? (repository as { visibility?: unknown }).visibility
+      : undefined;
+  return isRepoVisibility(visibility) ? visibility : undefined;
+}
+
+/** The visibility of the repository this deploy runs from in GitHub Actions; none when run by hand. */
+function actionsRepoVisibility(): RepoVisibility | undefined {
+  const path = process.env.GITHUB_EVENT_PATH;
+  if (!path) return undefined;
+  try {
+    return repoVisibilityOf(JSON.parse(readFileSync(path, 'utf8')));
+  } catch {
+    return undefined;
+  }
+}
 
 type DeployResult = Awaited<ReturnType<Engine['deployStage']>>;
 
@@ -144,6 +176,17 @@ async function registerControlPlane(
     .catch((err: { name?: string }) => {
       if (err.name !== 'ConditionalCheckFailedException') throw err;
     });
+  const repoVisibility = actionsRepoVisibility();
+  if (repoVisibility) {
+    await ddb.send(
+      new UpdateCommand({
+        TableName,
+        Key: appKey(app),
+        UpdateExpression: 'SET repoVisibility = :v',
+        ExpressionAttributeValues: { ':v': repoVisibility },
+      }),
+    );
+  }
 
   const { prev } = build;
   const revisionId = result.webFunction?.revisionId;
