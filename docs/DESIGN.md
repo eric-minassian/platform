@@ -1117,7 +1117,8 @@ first deployed and when what it serves went live (a compute switch keeps its
 build's time), the uptime pinger's last result, and page views and edge
 requests for each of the 30 complete UTC days before today. Its repository
 is linked when public: the platform records `repository_visibility` from the
-GitHub OIDC token of each CI deploy, and forgets it when `repo` changes.
+GitHub OIDC token of each CI deploy (the control plane's own deploy, from its
+Actions event), and forgets it when `repo` changes.
 Nothing else is there: no owners, routes, deployments' contents or cost.
 It answers with `Cache-Control: public, max-age=300, s-maxage=900`, so the
 router answers repeat readers without waking the control plane. Eric's
