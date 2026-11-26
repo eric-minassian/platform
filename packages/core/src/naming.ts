@@ -234,6 +234,13 @@ export const platformNames = {
    * floor on, and the EventBridge rule that tells the control plane when it goes off.
    */
   edgeFloorAlarm: 'platform-edge-floor',
+  /**
+   * The router's access log (CloudFront standard logging, `EDGE_LOG_FIELDS`): its log group, and
+   * the name of the delivery source, destination, resource policy and subscription filter that
+   * feed it to the telemetry processor.
+   */
+  edgeLogGroup: '/platform/edge',
+  edgeLogDelivery: 'platform-edge',
   runtimeConfigParameter: '/platform/config/runtime',
   sessionKeyParameter: '/platform/config/session-key',
   githubAppParameterPrefix: '/platform/config/github-app/',

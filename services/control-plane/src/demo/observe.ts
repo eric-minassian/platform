@@ -25,11 +25,13 @@ import {
   type DemoRoute,
   deploymentsOf,
   diurnal,
+  EDGE_PER_SERVER_REQUEST,
   INCIDENT,
   inIncident,
   jobBucket,
   type MinuteRoute,
   noise,
+  PAGE_VIEW_SHARE,
   pct,
   routeMinute,
   T0,
@@ -131,6 +133,21 @@ export function series(
         }
       } else lines.push({ key: 'all', values: traffic.map((m) => requestValue(q, m, step)) });
     }
+  } else if (q.metric === 'page_views' || q.metric === 'edge_requests') {
+    const traffic = ts.map((t) =>
+      scaled(bucketTraffic(app, app.routes, t, step), EDGE_PER_SERVER_REQUEST * k),
+    );
+    if (q.metric === 'page_views') {
+      const views = traffic.map((m) => Math.round(m.req * PAGE_VIEW_SHARE));
+      lines.push({ key: 'all', values: q.stat === 'rate' ? views.map((v) => v / (step / 1000)) : views });
+    } else if (q.groupBy === 'status') {
+      for (const c of ['2xx', '3xx', '4xx', '5xx'] as const) {
+        lines.push({
+          key: c,
+          values: traffic.map((m) => requestValue({ ...q, filter: { ...q.filter, status: [c] } }, m, step)),
+        });
+      }
+    } else lines.push({ key: 'all', values: traffic.map((m) => requestValue(q, m, step)) });
   } else if (q.metric === 'jobs' || q.metric === 'job_duration') {
     const jobs = q.filter?.jobs?.length
       ? app.jobs.filter((j) => q.filter!.jobs!.includes(`${j.kind}:${j.name}`))

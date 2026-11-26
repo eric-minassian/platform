@@ -3,7 +3,8 @@ import type { StageJob } from './src/jobs/call.ts';
 
 const app = defineApp({
   name: 'platform',
-  description: 'The platform control plane: console, API, deployer and telemetry.',
+  // What the public directory (and ericminassian.com) says about the platform.
+  description: 'A personal platform that deploys, routes and observes every app listed here',
   web: {
     server: 'src/server.ts',
     static: 'web/dist',

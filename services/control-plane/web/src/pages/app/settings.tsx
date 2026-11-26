@@ -1,6 +1,7 @@
 /**
  * An app's record: its description, the repository CI may deploy it from,
- * and the members who own it, each saved on its own. Deleting the app
+ * and the members who own it, each saved on its own; and whether the public
+ * directory lists it, which plat.config.ts decides. Deleting the app
  * removes only that record, and only once no stage is left; it asks for the
  * app's name first.
  */
@@ -48,6 +49,7 @@ export function SettingsPage(): ReactElement {
           <DescriptionForm summary={summary} />
           <RepositoryForm summary={summary} />
           <OwnersForm summary={summary} />
+          <DirectoryPanel summary={summary} />
           <DangerZone summary={summary} />
         </div>
       ) : (
@@ -233,6 +235,36 @@ function OwnersForm({ summary }: { summary: AppSummary }) {
         </FieldError>
       )}
     </SettingCard>
+  );
+}
+
+/** Read here, not set: plat.config.ts's `listed` decides, so it changes with a deploy. */
+function DirectoryPanel({ summary }: { summary: AppSummary }) {
+  const optOut = (
+    <>
+      <Mono className="text-foreground">listed: false</Mono> in{' '}
+      <Mono className="text-foreground">plat.config.ts</Mono>
+    </>
+  );
+  return (
+    <Panel>
+      <h2 className="text-base font-semibold tracking-tight">Public directory</h2>
+      <p className="mt-1.5 text-sm text-pretty text-muted-foreground">
+        {summary.listed === undefined ? (
+          <>Prod is listed once it's deployed, unless {optOut} keeps it out.</>
+        ) : summary.listed ? (
+          <>
+            Listed: anyone can read prod's description, address and daily page views at{' '}
+            <a className="text-foreground underline-offset-4 hover:underline" href="/v1/public/apps">
+              /v1/public/apps
+            </a>
+            . {optOut} takes it out.
+          </>
+        ) : (
+          <>Not listed: {optOut} keeps it out.</>
+        )}
+      </p>
+    </Panel>
   );
 }
 

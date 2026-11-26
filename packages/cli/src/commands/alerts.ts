@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import {
+  ALERT_METRICS,
   ALERT_WINDOWS,
   type AlertCondition,
   type AlertEvent,
@@ -143,7 +144,7 @@ function withRuleFlags(cmd: Command): Command {
   return cmd
     .option('--file <path>', 'the rule as JSON (`-` for stdin); flags given as well override it')
     .option('--name <name>', 'what the rule is called')
-    .option('--metric <metric>', 'what it watches (not realtime or service)')
+    .option('--metric <metric>', `what it watches: ${ALERT_METRICS.join(', ')}`)
     .option('--stat <stat>', "how the window is summarized (default: the metric's own, e.g. count or p95)")
     .option(
       '--filter <key=value>',

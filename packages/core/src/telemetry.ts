@@ -275,6 +275,11 @@ export function bucketStart(ts: number, res: Resolution): number {
  * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum, max (and the unit); rows from
  *                                                  before November 2026 have no max
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied
+ * - `v#<app>#<stage>#<res>`  sk `<iso>`           edge traffic from the router's access log, every
+ *                                                  request to the stage's host (files, server,
+ *                                                  stores) but health checks: req, s2xx, s3xx,
+ *                                                  s4xx, s5xx, and pages (`isPageView`). Since
+ *                                                  November 2026; written up to an hour late
  * - `e#<app>#<stage>`        sk `<fingerprint>`   error groups: count, firstSeen, lastSeen, sample, status
  * - `u#<app>#<stage>`        sk `<iso>`           uptime: ok, source (`traffic`: req, s5xx; `check`, or none on
  *                                                  rows before traffic counted: status, ms)
@@ -287,6 +292,7 @@ export const telemetryKeys = {
   job: (app: string, stage: string, res: Resolution) => `j#${app}#${stage}#${res}`,
   metric: (app: string, stage: string, res: Resolution) => `c#${app}#${stage}#${res}`,
   limit: (app: string, stage: string, res: Resolution) => `l#${app}#${stage}#${res}`,
+  edge: (app: string, stage: string, res: Resolution) => `v#${app}#${stage}#${res}`,
   errors: (app: string, stage: string) => `e#${app}#${stage}`,
   uptime: (app: string, stage: string) => `u#${app}#${stage}`,
   alerts: (app: string, stage: string) => `a#${app}#${stage}`,
@@ -297,6 +303,50 @@ export const telemetryKeys = {
   email: (app: string, stage: string) => `mail#${app}#${stage}`,
   time: (ts: number) => new Date(ts).toISOString(),
 } as const;
+
+// ---------------------------------------------------------------------------
+// Edge traffic (the router's access log)
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields the router's access log carries (CloudFront standard logging,
+ * delivered to `platformNames.edgeLogGroup` as one JSON object per request,
+ * every value a string). Enough to count requests and page views per host;
+ * never the client's address. Each field costs bytes ingested, but CloudFront
+ * includes 750 bytes of log delivery per request, which these stay well under.
+ */
+export const EDGE_LOG_FIELDS = [
+  'timestamp(ms)',
+  'x-host-header',
+  'cs-method',
+  'cs-uri-stem',
+  'sc-status',
+  'sc-content-type',
+] as const;
+
+/** One access log record, as `EDGE_LOG_FIELDS` deliver it. */
+export const EdgeLogRecord = Schema.Struct({
+  'timestamp(ms)': Schema.String,
+  'x-host-header': Schema.String,
+  'cs-method': Schema.String,
+  'cs-uri-stem': Schema.String,
+  'sc-status': Schema.String,
+  'sc-content-type': Schema.optional(Schema.String),
+});
+export type EdgeLogRecord = typeof EdgeLogRecord.Type;
+
+/**
+ * Whether a request loaded a page: a GET answered with an HTML document, or
+ * a 304 for a path that names no file (a page the browser had cached, whose
+ * revalidation carries no content type). Assets, API calls and errors aren't.
+ */
+export function isPageView(method: string, uri: string, status: number, contentType: string | undefined) {
+  if (method !== 'GET') return false;
+  if (status >= 200 && status < 300) return (contentType ?? '').toLowerCase().startsWith('text/html');
+  if (status !== 304) return false;
+  const last = uri.slice(uri.lastIndexOf('/') + 1);
+  return !last.includes('.') || last.endsWith('.html');
+}
 
 // ---------------------------------------------------------------------------
 // Error fingerprinting (Sentry-style grouping)

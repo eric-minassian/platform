@@ -385,6 +385,13 @@ export function bucketTraffic(
   };
 }
 
+/**
+ * The router serves a page's files as well as its API calls: about this many edge requests for
+ * each the server handles, and `PAGE_VIEW_SHARE` of those load a page.
+ */
+export const EDGE_PER_SERVER_REQUEST = 4;
+export const PAGE_VIEW_SHARE = 0.15;
+
 export const pct = (hist: readonly number[], p: number) => percentile(hist, p);
 
 export function jobBucket(

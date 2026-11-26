@@ -1,8 +1,8 @@
 /**
  * An app stage at a glance: the deployment that's live and where it came
- * from, five figures against the previous period, the charts that explain
- * most incidents (status, latency, errors, and job runs when the app has
- * jobs) on one cursor with deployment markers, the busiest routes, what
+ * from, five figures against the previous period, page views and the charts
+ * that explain most incidents (status, latency, errors, and job runs when the
+ * app has jobs) on one cursor with deployment markers, the busiest routes, what
  * happened lately, and the custom metrics and rate limits the stage recorded.
  */
 import { useAtomValue } from '@effect/atom-react';
@@ -69,6 +69,11 @@ import { resolveWindow, type TimeSearch } from '../../lib/time.ts';
 import { viewResolution } from '../../lib/view.ts';
 import { overviewRoute } from '../../router.tsx';
 
+const PAGE_VIEWS: MetricsView = {
+  kind: 'metrics',
+  queries: [{ id: 'a', metric: 'page_views', stat: 'count' }],
+  chart: 'bar',
+};
 const STATUS: MetricsView = {
   kind: 'metrics',
   queries: [{ id: 'a', metric: 'requests', stat: 'count', groupBy: 'status' }],
@@ -275,8 +280,16 @@ function Charts({ app, stage, time }: { app: string; stage: string; time: TimeSe
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
       <ChartPanel
+        title="Page views"
+        description="pages the router served, static or not; up to an hour behind"
+        app={app}
+        stage={stage}
+        time={time}
+        view={PAGE_VIEWS}
+      />
+      <ChartPanel
         title="Requests"
-        description="by status class"
+        description="the server's, by status class"
         app={app}
         stage={stage}
         time={time}
@@ -297,7 +310,6 @@ function Charts({ app, stage, time }: { app: string; stage: string; time: TimeSe
         stage={stage}
         time={time}
         view={ERROR_RATE}
-        className={hasJobs ? undefined : 'xl:col-span-2'}
       />
       {hasJobs && (
         <ChartPanel
@@ -307,6 +319,7 @@ function Charts({ app, stage, time }: { app: string; stage: string; time: TimeSe
           stage={stage}
           time={time}
           view={JOB_RUNS}
+          className="xl:col-span-2"
         />
       )}
     </div>

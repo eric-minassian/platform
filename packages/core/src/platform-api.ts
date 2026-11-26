@@ -52,9 +52,11 @@ import {
   LogStatsResponse,
   MeResponse,
   MetricsResponse,
+  PublicAppsResponse,
   PutSecretRequest,
   QueueStats,
   RealtimeStatsResponse,
+  type RepoVisibility,
   RollbackRequest,
   RollbackResponse,
   RouteStats,
@@ -213,6 +215,8 @@ export interface CiPrincipal {
   readonly sha?: string | undefined;
   readonly actor?: string | undefined;
   readonly runId?: string | undefined;
+  /** The repository's visibility when the token was minted. */
+  readonly repositoryVisibility?: RepoVisibility | undefined;
 }
 
 export type Principal = MemberPrincipal | CiPrincipal;
@@ -272,6 +276,17 @@ export class SessionApi extends HttpApiGroup.make('session').add(
   }),
   HttpApiEndpoint.get('me', '/me', { success: MeResponse, error: errors }).middleware(Authenticated),
 ) {}
+
+/**
+ * What anyone may read, without signing in: the public directory. The router
+ * caches it (`PUBLIC_CACHE_CONTROL`), so readers don't wake the control plane.
+ */
+export class PublicApi extends HttpApiGroup.make('public').add(
+  HttpApiEndpoint.get('apps', '/public/apps', { success: PublicAppsResponse, error: errors }),
+) {}
+
+/** How long browsers and the router keep the public directory. */
+export const PUBLIC_CACHE_CONTROL = 'public, max-age=300, s-maxage=900';
 
 export class AppsApi extends HttpApiGroup.make('apps')
   .add(
@@ -733,6 +748,7 @@ export class AdminApi extends HttpApiGroup.make('admin')
 
 export class PlatformApi extends HttpApi.make('platform')
   .add(SessionApi)
+  .add(PublicApi)
   .add(AppsApi)
   .add(StagesApi)
   .add(DeploymentsApi)

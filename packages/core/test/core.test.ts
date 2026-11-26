@@ -141,6 +141,15 @@ describe('manifest', () => {
     expect(stored.web).toMatchObject({ compute: 'auto', memoryMb: 1024 });
   });
 
+  it('lists apps in the public directory unless they say otherwise', () => {
+    expect(parseManifest({ name: 'todo' }).listed).toBe(true);
+    expect(parseManifest({ name: 'todo', listed: false }).listed).toBe(false);
+    expect(() => parseManifest({ name: 'todo', listed: 'no' })).toThrow(/listed/);
+    // Deployments recorded before the setting existed were listed.
+    const { listed: _, ...stored } = parseManifest({ name: 'todo' });
+    expect(Schema.decodeUnknownSync(ResolvedManifest)(stored).listed).toBe(true);
+  });
+
   it('reports readable errors', () => {
     expect(() => parseManifest({ name: 'x', crons: { nightly: 'nope' } })).toThrow(/name.*crons\.nightly/s);
   });

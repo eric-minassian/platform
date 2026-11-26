@@ -5,7 +5,9 @@
  *
  * Every metric is read from the rollups the telemetry processor writes
  * (`telemetryKeys`), except `realtime` and `service`, which come from
- * CloudWatch on demand and so can't be watched by alert rules.
+ * CloudWatch on demand and so can't be watched by alert rules. Neither can
+ * `page_views` and `edge_requests`: the router's access log they come from
+ * arrives up to an hour late.
  */
 import { Schema } from 'effect';
 
@@ -63,7 +65,9 @@ export function autoQueryResolution(
 
 /**
  * What a query measures:
- * - `requests`: HTTP requests (stage-wide, or of routes)
+ * - `requests`: HTTP requests (stage-wide, or of routes) the stage's server handled
+ * - `page_views`: pages the router served for the stage's host (`isPageView`)
+ * - `edge_requests`: every request the router served for it: files, server, stores
  * - `latency`: their duration
  * - `cold_starts`: requests served by a fresh server process
  * - `jobs`: queue, event, cron, invoke and service runs
@@ -75,6 +79,8 @@ export function autoQueryResolution(
  */
 export const SeriesMetric = Schema.Literals([
   'requests',
+  'page_views',
+  'edge_requests',
   'latency',
   'cold_starts',
   'jobs',
@@ -129,7 +135,7 @@ const nonEmpty = Schema.String.check(Schema.isNonEmpty());
 export const SeriesFilter = Schema.Struct({
   /** Routes as rollups key them: `METHOD /pattern`, e.g. `GET /api/items/:id`. */
   routes: optional(Schema.Array(nonEmpty)),
-  /** `requests` only. */
+  /** `requests` and `edge_requests` only. */
   status: optional(Schema.Array(StatusClass)),
   /** Jobs as `kind:name`, e.g. `queue:refresh`, `cron:digest`. */
   jobs: optional(Schema.Array(nonEmpty)),
@@ -155,6 +161,8 @@ export type SeriesQuery = typeof SeriesQuery.Type;
 /** The statistics each metric answers; the first is its default. */
 export const METRIC_STATS: Record<SeriesMetric, readonly SeriesStat[]> = {
   requests: ['count', 'rate', 'percent'],
+  page_views: ['count', 'rate'],
+  edge_requests: ['count', 'rate', 'percent'],
   latency: ['p95', 'p50', 'p90', 'p99', 'histogram'],
   cold_starts: ['count', 'percent'],
   jobs: ['count', 'rate', 'percent'],
@@ -168,6 +176,8 @@ export const METRIC_STATS: Record<SeriesMetric, readonly SeriesStat[]> = {
 /** The dimensions each metric can be grouped by. */
 export const METRIC_GROUP_BY: Record<SeriesMetric, readonly SeriesGroupBy[]> = {
   requests: ['status', 'route'],
+  page_views: [],
+  edge_requests: ['status'],
   latency: ['route'],
   cold_starts: [],
   jobs: ['job', 'outcome'],
@@ -178,7 +188,7 @@ export const METRIC_GROUP_BY: Record<SeriesMetric, readonly SeriesGroupBy[]> = {
   service: ['name'],
 };
 
-/** Metrics alert rules can watch: those read from rollups. */
+/** Metrics alert rules can watch: those read from rollups written as their events happen. */
 export const ALERT_METRICS: readonly SeriesMetric[] = [
   'requests',
   'latency',
@@ -211,7 +221,9 @@ export function checkSeriesQuery(
       : `${q.metric} can't be grouped`;
   }
   const f = q.filter ?? {};
-  if (f.status?.length && q.metric !== 'requests') return 'only requests filter by status';
+  if (f.status?.length && q.metric !== 'requests' && q.metric !== 'edge_requests') {
+    return 'only requests and edge requests filter by status';
+  }
   if (f.routes?.length && q.metric !== 'requests' && q.metric !== 'latency' && q.metric !== 'cold_starts') {
     return 'only requests, latency and cold starts filter by route';
   }
@@ -272,6 +284,8 @@ export function seriesUnit(q: Pick<SeriesQuery, 'metric' | 'stat' | 'filter'>): 
 
 const METRIC_NOUN: Record<SeriesMetric, string> = {
   requests: 'requests',
+  page_views: 'page views',
+  edge_requests: 'edge requests',
   latency: 'latency',
   cold_starts: 'cold starts',
   jobs: 'job runs',
@@ -329,6 +343,8 @@ export function describeQuery(q: SeriesQuery): string {
       if (f.names?.length) head += ` (${f.names.join(', ')})`;
       break;
     case 'requests':
+    case 'page_views':
+    case 'edge_requests':
     case 'latency':
     case 'cold_starts':
     case 'jobs':

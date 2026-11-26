@@ -6,8 +6,11 @@
  */
 import {
   bucketStart,
+  EdgeLogRecord,
   HEALTH_PATH,
+  isPageView,
   latencyBucket,
+  parseStageHost,
   RESOLUTION_TTL_DAYS,
   type Resolution,
   TelemetryEvent,
@@ -88,10 +91,9 @@ const ttlFor = (bucket: number, res: Resolution) =>
 const statusClass = (status: number): string | null =>
   status >= 200 && status < 600 ? `s${Math.floor(status / 100)}xx` : null;
 
-export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
+/** Rollup rows a batch adds to, keyed by row: `bump` adds counters, labels and maxima to one. */
+function rollupBatch() {
   const rollups = new Map<string, RollupUpdate>();
-  const errors = new Map<string, ErrorGroupUpdate>();
-
   const bump = (
     pk: string,
     sk: string,
@@ -119,6 +121,12 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
       else u.set[k] = v;
     }
   };
+  return { rollups, bump };
+}
+
+export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
+  const { rollups, bump } = rollupBatch();
+  const errors = new Map<string, ErrorGroupUpdate>();
 
   for (const e of events) {
     const { app, stage, ts } = e;
@@ -278,6 +286,55 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
     }
   }
   return { rollups: [...rollups.values()], errors: [...errors.values()], events: events.length };
+}
+
+const decodeEdgeRecord = Schema.decodeUnknownOption(EdgeLogRecord);
+
+/** One message of the router's access log as a record, or null when it isn't one. */
+export function parseEdgeMessage(message: string): EdgeLogRecord | null {
+  try {
+    return Option.getOrNull(decodeEdgeRecord(JSON.parse(message)));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The router's access log (`platformNames.edgeLogGroup`) as edge rollups
+ * (`telemetryKeys.edge`) of the stages its hosts name: each request, by
+ * status class, and whether it loaded a page. Health checks aren't traffic
+ * (as in `aggregate`). Only stages the platform `serves` count: a host that
+ * names none (a typo, a scan of made-up names, the edge host itself) gets a
+ * 404 and no rows.
+ */
+export function aggregateEdge(
+  messages: readonly string[],
+  domain: string,
+  serves: (app: string, stage: string) => boolean,
+): Aggregation {
+  const { rollups, bump } = rollupBatch();
+  let events = 0;
+  for (const message of messages) {
+    const r = parseEdgeMessage(message);
+    if (!r) continue;
+    const ts = Number(r['timestamp(ms)']);
+    const status = Number(r['sc-status']);
+    if (!Number.isFinite(ts) || !Number.isFinite(status)) continue;
+    const uri = r['cs-uri-stem'];
+    if (uri === HEALTH_PATH) continue;
+    const target = parseStageHost(r['x-host-header'], domain);
+    if (!target || !serves(target.app, target.stage)) continue;
+    events++;
+    const add: Record<string, number> = { req: 1 };
+    const cls = statusClass(status);
+    if (cls) add[cls] = 1;
+    if (isPageView(r['cs-method'], uri, status, r['sc-content-type'])) add.pages = 1;
+    for (const res of RESOLUTIONS) {
+      const b = bucketStart(ts, res);
+      bump(telemetryKeys.edge(target.app, target.stage, res), telemetryKeys.time(b), res, b, add);
+    }
+  }
+  return { rollups: [...rollups.values()], errors: [], events };
 }
 
 /**
