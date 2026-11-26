@@ -16,6 +16,7 @@ import { DeploymentsLive, StagesLive } from './deployments.ts';
 import { RequestValidationLive, RouterErrorsLive } from './errors.ts';
 import { ManageLive } from './manage.ts';
 import { ObserveLive } from './observe.ts';
+import { PublicLive } from './public.ts';
 import { ConsoleSignInLive, SessionLive } from './session.ts';
 
 export const HttpLive = Layer.mergeAll(
@@ -25,6 +26,7 @@ export const HttpLive = Layer.mergeAll(
 ).pipe(
   Layer.provide([
     SessionLive,
+    PublicLive,
     AppsLive,
     StagesLive,
     DeploymentsLive,

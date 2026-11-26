@@ -171,6 +171,7 @@ export const ManifestSchema = Schema.Struct({
     Schema.isPattern(APP_NAME_PATTERN, { message: 'must be 3-30 chars of a-z, 0-9, single hyphens' }),
   ),
   description: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+  listed: Schema.Boolean.pipe(orElse(true)),
   web: Schema.optional(WebSchema),
   worker: Schema.optional(WorkerSchema),
   auth: AuthSchema.pipe(orElse(false)),
@@ -401,7 +402,13 @@ export interface EmailConfig {
 export interface AppConfig {
   /** 3-30 chars of a-z, 0-9 and single hyphens; also the app's host name. */
   name: string;
+  /** One line, up to 200 chars. The public directory shows it next to the app. */
   description?: string;
+  /**
+   * Whether the platform's public directory (`GET /v1/public/apps`) lists the
+   * prod stage, with its page views. Default true; `false` keeps the app out.
+   */
+  listed?: boolean;
   web?: WebConfig;
   /** Present automatically when any queue, event or cron exists. */
   worker?: WorkerConfig;
@@ -483,6 +490,8 @@ export function channel<Event>(): ChannelConfig<Event> {
 export const ResolvedManifest = Schema.Struct({
   name: Schema.String,
   description: Schema.optional(Schema.String),
+  /** Listed in the public directory (prod only). Deployments recorded before it existed were. */
+  listed: Schema.Boolean.pipe(orElse(true)),
   web: Schema.optional(WebSchema),
   /** Present when any queue, event subscription or cron exists. */
   worker: Schema.optional(WorkerSchema),
@@ -588,6 +597,7 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
   return {
     name: m.name,
     ...(m.description ? { description: m.description } : {}),
+    listed: m.listed,
     ...(m.web ? { web: m.web } : {}),
     ...(worker ? { worker } : {}),
     auth,

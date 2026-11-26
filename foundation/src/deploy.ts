@@ -7,8 +7,9 @@
  *                    the engine like any other app; then realtime's public
  *                    subscribe key and route-store entry, and the edge
  *                    floor alarm's permission to invoke the worker
- *  3. telemetry      the account-level log subscription, which targets the
- *                    control plane's worker and so comes after it
+ *  3. telemetry      the account-level log subscription and the router access
+ *                    log's, which target the control plane's worker and so
+ *                    come after it
  *
  *   node src/deploy.ts                       # everything (admin credentials)
  *   node src/deploy.ts --only control-plane  # a subset of phases
@@ -35,6 +36,7 @@ import {
   ensureAccountSubscriptionFilter,
   ensureParameterOnce,
   ensurePermission,
+  ensureSubscriptionFilter,
   getParameter,
   removePermission,
 } from '@ericminassian/platform-engine';
@@ -164,12 +166,19 @@ async function main(): Promise<void> {
       action: 'lambda:InvokeFunction',
       sourceArn: `arn:aws:logs:${runtime.region}:${runtime.accountId}:log-group:*`,
     });
-    // The processor's own log group is excluded so it can't feed itself.
+    // The processor's own log group is excluded so it can't feed itself, and the router's access
+    // log has a filter of its own: none of its lines are telemetry lines, and all of them count.
     await ensureAccountSubscriptionFilter(ctx, {
       name: 'platform-telemetry',
       destinationArn: workerArn,
       filterPattern: TELEMETRY_FILTER_PATTERN,
-      excludeLogGroups: [names.logGroup(CONTROL_PLANE_APP, PROD_STAGE, 'worker')],
+      excludeLogGroups: [names.logGroup(CONTROL_PLANE_APP, PROD_STAGE, 'worker'), platformNames.edgeLogGroup],
+    });
+    await ensureSubscriptionFilter(ctx, {
+      name: platformNames.edgeLogDelivery,
+      logGroup: platformNames.edgeLogGroup,
+      destinationArn: workerArn,
+      filterPattern: '',
     });
   }
 

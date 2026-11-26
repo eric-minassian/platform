@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import {
   EDGE_FLOOR_JOB,
+  EDGE_LOG_FIELDS,
   EMAIL_LOGIN_LOCAL_PART,
   emailDomain,
   emailMailFromDomain,
@@ -311,6 +312,53 @@ export class FoundationStack extends Stack {
       },
     });
     tag(distribution, 'edge');
+
+    // The router's access log (CloudFront standard logging), which the telemetry processor
+    // counts per host (`EDGE_LOG_FIELDS`, `v#` rollups): every request and page view a stage
+    // serves, its static files included, which no app's own telemetry sees. The processor is its
+    // only reader, so it's kept a day. The subscription that feeds it there names the control
+    // plane's worker, so the deploy adds it once the worker exists (src/deploy.ts).
+    const edgeLog = new logs.LogGroup(this, 'EdgeLog', {
+      logGroupName: platformNames.edgeLogGroup,
+      retention: logs.RetentionDays.ONE_DAY,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    tag(edgeLog, 'edge');
+    // Log delivery writes to a log group as `delivery.logs.amazonaws.com`. Without this policy it
+    // would write an account-wide one of its own, whose size limit other deliveries share.
+    const edgeLogPolicy = new logs.ResourcePolicy(this, 'EdgeLogPolicy', {
+      resourcePolicyName: platformNames.edgeLogDelivery,
+      policyStatements: [
+        new iam.PolicyStatement({
+          principals: [new iam.ServicePrincipal('delivery.logs.amazonaws.com')],
+          actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+          resources: [`${edgeLog.logGroupArn}:log-stream:*`],
+          conditions: {
+            StringEquals: { 'aws:SourceAccount': this.account },
+            ArnLike: { 'aws:SourceArn': this.formatArn({ service: 'logs', resource: '*' }) },
+          },
+        }),
+      ],
+    });
+    const edgeLogSource = new logs.CfnDeliverySource(this, 'EdgeLogSource', {
+      name: platformNames.edgeLogDelivery,
+      logType: 'ACCESS_LOGS',
+      resourceArn: distribution.distributionArn,
+    });
+    const edgeLogDestination = new logs.CfnDeliveryDestination(this, 'EdgeLogDestination', {
+      name: platformNames.edgeLogDelivery,
+      deliveryDestinationType: 'CWL',
+      destinationResourceArn: edgeLog.logGroupArn,
+      outputFormat: 'json',
+    });
+    edgeLogDestination.node.addDependency(edgeLogPolicy);
+    const edgeLogDelivery = new logs.CfnDelivery(this, 'EdgeLogDelivery', {
+      deliverySourceName: edgeLogSource.name,
+      deliveryDestinationArn: edgeLogDestination.attrArn,
+      recordFields: [...EDGE_LOG_FIELDS],
+    });
+    // It names the source by its name, which is no reference CloudFormation orders by.
+    edgeLogDelivery.node.addDependency(edgeLogSource);
     // The public root and nothing else, so a routing mistake can't expose a
     // private store. Listing it makes a missing file a 404 instead of a 403.
     const fromEdge = {

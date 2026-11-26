@@ -54,6 +54,10 @@ test('settings: each setting saves on its own, once it changed', async () => {
   expect(typed.ok, typed.error?.message).toBe(true);
   await waitFor(() => expect(save.hasAttribute('disabled')).toBe(false));
   expect(screen.getByRole('button', { name: 'Save repository' }).hasAttribute('disabled')).toBe(true);
+  // plat.config.ts decides the listing, so it's said here, not set.
+  const directory = screen.getByRole('heading', { name: 'Public directory' }).closest('section')!;
+  expect(directory.textContent).toMatch(/^Public directoryListed: anyone can read prod's description/);
+  expect(within(directory).getByRole('link', { name: '/v1/public/apps' })).toBeTruthy();
 });
 
 test('cost: the month so far, the days, and what each compute mode would cost', async () => {

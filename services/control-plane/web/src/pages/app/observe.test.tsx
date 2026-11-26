@@ -13,7 +13,15 @@ test('overview: the live deployment leads, then the figures, charts, routes and 
   const card = (await screen.findByRole('heading', { name: 'Production deployment' })).closest('section')!;
   expect(await within(card).findByText('Current')).toBeTruthy();
   expect(within(card).getByRole('link', { name: 'atlas.example.com' })).toBeTruthy();
-  for (const heading of ['Requests', 'Latency', '5xx rate', 'Job runs', 'Busiest routes', 'Activity']) {
+  for (const heading of [
+    'Page views',
+    'Requests',
+    'Latency',
+    '5xx rate',
+    'Job runs',
+    'Busiest routes',
+    'Activity',
+  ]) {
     expect(screen.getByRole('heading', { name: heading })).toBeTruthy();
   }
   const labels = expectNamed(agent);

@@ -4,6 +4,7 @@ import {
   DescribeLogGroupsCommand,
   PutAccountPolicyCommand,
   PutRetentionPolicyCommand,
+  PutSubscriptionFilterCommand,
 } from '@aws-sdk/client-cloudwatch-logs';
 import { type EngineContext, errorName, ignoreNotFound } from '../util.ts';
 
@@ -78,4 +79,24 @@ export async function ensureAccountSubscriptionFilter(
     }),
   );
   ctx.log('info', 'put account subscription filter', `account-policy ${spec.name}`);
+}
+
+/**
+ * A subscription filter on one log group, for lines the account-level one
+ * can't match (it takes a single pattern): every line of `logGroup` matching
+ * `filterPattern` (empty: all of them) streams to `destinationArn`.
+ */
+export async function ensureSubscriptionFilter(
+  ctx: EngineContext,
+  spec: { name: string; logGroup: string; destinationArn: string; filterPattern: string },
+): Promise<void> {
+  await ctx.clients.logs.send(
+    new PutSubscriptionFilterCommand({
+      filterName: spec.name,
+      logGroupName: spec.logGroup,
+      destinationArn: spec.destinationArn,
+      filterPattern: spec.filterPattern,
+    }),
+  );
+  ctx.log('info', 'put subscription filter', `log-group ${spec.logGroup}`);
 }

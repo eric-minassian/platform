@@ -70,6 +70,25 @@ describe('checkSeriesQuery', () => {
       checkSeriesQuery({ metric: 'requests', stat: 'count', groupBy: 'route' }, { alert: true }),
     ).toMatch(/one series/);
     expect(checkSeriesQuery({ ...ok, stage: 'dev' }, { alert: true })).toMatch(/own stage/);
+    // The router's access log arrives too late for a rule's minute windows.
+    expect(checkSeriesQuery({ metric: 'page_views', stat: 'count' }, { alert: true })).toMatch(
+      /can't watch page_views/,
+    );
+  });
+
+  it('takes edge traffic by status, and page views as counts', () => {
+    expect(
+      checkSeriesQuery({ metric: 'edge_requests', stat: 'percent', filter: { status: ['4xx'] } }),
+    ).toBeUndefined();
+    expect(checkSeriesQuery({ metric: 'edge_requests', stat: 'count', groupBy: 'status' })).toBeUndefined();
+    expect(checkSeriesQuery({ metric: 'page_views', stat: 'percent' })).toMatch(/answers count, rate/);
+    expect(checkSeriesQuery({ metric: 'page_views', stat: 'count', filter: { status: ['2xx'] } })).toMatch(
+      /only requests and edge requests filter by status/,
+    );
+    expect(checkSeriesQuery({ metric: 'edge_requests', stat: 'count', groupBy: 'route' })).toMatch(
+      /grouped by status/,
+    );
+    expect(describeQuery({ metric: 'page_views', stat: 'count' })).toBe('page views');
   });
 });
 

@@ -137,5 +137,21 @@ describe('CI deploy rules', () => {
     });
     expect(p).toMatchObject({ kind: 'ci', repository: 'dev/todo', actor: 'dev' });
     expect(actorOf(p!)).toBe('ci:dev/todo@dev');
+    expect(p?.repositoryVisibility).toBeUndefined();
+  });
+
+  it('keeps the repository’s visibility when the token states a known one', () => {
+    const claims = {
+      repository: 'dev/todo',
+      repository_owner: 'dev',
+      ref: 'refs/heads/main',
+      event_name: 'push',
+    };
+    expect(ciPrincipalFromClaims({ ...claims, repository_visibility: 'public' })?.repositoryVisibility).toBe(
+      'public',
+    );
+    expect(
+      ciPrincipalFromClaims({ ...claims, repository_visibility: 'secret' })?.repositoryVisibility,
+    ).toBeUndefined();
   });
 });

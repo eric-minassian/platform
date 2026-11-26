@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import {
   EDGE_FLOOR_JOB,
+  EDGE_LOG_FIELDS,
   emailDomain,
   emailMailFromDomain,
   type PlatformConfig,
@@ -527,6 +528,40 @@ describe('foundation stack', () => {
     for (const st of edge)
       expect(Object.keys((st.Condition as { StringEquals: object }).StringEquals)).toEqual(['AWS:SourceArn']);
     expect(edge[1]?.Condition).toMatchObject({ StringLike: { 's3:prefix': ['_public/*'] } });
+  });
+
+  it('delivers the router’s access log to the telemetry processor’s log group', () => {
+    const distribution = logicalId('AWS::CloudFront::Distribution', {});
+    const group = logicalId('AWS::Logs::LogGroup', { LogGroupName: platformNames.edgeLogGroup });
+    template.hasResourceProperties('AWS::Logs::LogGroup', {
+      LogGroupName: platformNames.edgeLogGroup,
+      RetentionInDays: 1,
+    });
+    template.hasResourceProperties('AWS::Logs::DeliverySource', {
+      Name: platformNames.edgeLogDelivery,
+      LogType: 'ACCESS_LOGS',
+      ResourceArn: Match.objectLike({
+        'Fn::Join': Match.arrayWith([Match.arrayWith([{ Ref: distribution }])]),
+      }),
+    });
+    const destination = logicalId('AWS::Logs::DeliveryDestination', {
+      Name: platformNames.edgeLogDelivery,
+      DeliveryDestinationType: 'CWL',
+      DestinationResourceArn: { 'Fn::GetAtt': [group, 'Arn'] },
+      OutputFormat: 'json',
+    });
+    // The fields the processor reads, and never the client's address.
+    template.hasResourceProperties('AWS::Logs::Delivery', {
+      DeliverySourceName: platformNames.edgeLogDelivery,
+      DeliveryDestinationArn: { 'Fn::GetAtt': [destination, 'Arn'] },
+      RecordFields: [...EDGE_LOG_FIELDS],
+    });
+    expect(EDGE_LOG_FIELDS).not.toContain('c-ip');
+    const policy = template.findResources('AWS::Logs::ResourcePolicy', {
+      Properties: { PolicyName: platformNames.edgeLogDelivery },
+    });
+    expect(JSON.stringify(policy)).toContain('delivery.logs.amazonaws.com');
+    expect(JSON.stringify(policy)).toContain(`{"Fn::GetAtt":["${group}","Arn"]},":log-stream:*`);
   });
 
   describe('edge floor', () => {

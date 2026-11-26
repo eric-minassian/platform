@@ -34,6 +34,7 @@ import { startServer } from '@ericminassian/platform/server';
 import { Effect, Layer, Stream } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { RequestValidationLive, RouterErrorsLive } from '../api/errors.ts';
+import { directoryDays, publicApp } from '../api/public.ts';
 import { parseRange } from '../telemetry/query.ts';
 import {
   APPS,
@@ -41,11 +42,13 @@ import {
   type DemoApp,
   deploymentsOf,
   diurnal,
+  EDGE_PER_SERVER_REQUEST,
   findApp,
   INCIDENT,
   inIncident,
   jobBucket,
   noise,
+  PAGE_VIEW_SHARE,
   pct,
   stagesOf,
   T0,
@@ -257,6 +260,7 @@ function summary(app: DemoApp): AppSummary {
     ...(last ? { lastDeployment: last } : {}),
     traffic,
     alerts: { total: rules.length, alarm: rules.filter((r) => r.state === 'alarm').length },
+    ...(stages.some((s) => s.stage === 'prod') ? { listed: true } : {}),
   };
 }
 
@@ -279,6 +283,32 @@ const SessionDemo = HttpApiBuilder.group(PlatformApi, 'session', (h) =>
     h.handleAll({
       cliLogin: () => readOnly('sign in the CLI'),
       me: () => Effect.succeed({ github: 'demo', role: 'admin' as const }),
+    }),
+  ),
+);
+
+/** Every demo app's prod, listed, with its edge traffic by day. */
+const PublicDemo = HttpApiBuilder.group(PlatformApi, 'public', (h) =>
+  Effect.succeed(
+    h.handleAll({
+      apps: () => {
+        const days = directoryDays(T0);
+        const apps = APPS.flatMap((app) => {
+          const prod = stagesOf(app).find((s) => s.stage === 'prod');
+          const live = deploymentsOf(app.record.name, 'prod').find((d) => d.id === prod?.currentDeployment);
+          if (!prod || !live) return [];
+          const requests = days.map(
+            (day) => bucketTraffic(app, app.routes, day, DAY).req * EDGE_PER_SERVER_REQUEST,
+          );
+          const pageViews = requests.map((n) => Math.round(n * PAGE_VIEW_SHARE));
+          return [publicApp(app.record, { ...prod, up: true }, live, live, { pageViews, requests })];
+        });
+        return Effect.succeed({
+          generatedAt: iso(T0),
+          days: days.map((d) => iso(d).slice(0, 10)),
+          apps: apps.toSorted((a, b) => a.name.localeCompare(b.name)),
+        });
+      },
     }),
   ),
 );
@@ -1218,6 +1248,7 @@ const AuthenticatedDemo = Layer.succeed(
 export const DemoLive = Layer.mergeAll(HttpApiBuilder.layer(PlatformApi), RouterErrorsLive).pipe(
   Layer.provide([
     SessionDemo,
+    PublicDemo,
     AppsDemo,
     StagesDemo,
     DeploymentsDemo,

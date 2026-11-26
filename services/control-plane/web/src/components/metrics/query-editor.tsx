@@ -37,6 +37,8 @@ import { type PickerOption, ValuePicker } from '../value-picker.tsx';
 
 export const METRIC_LABELS: Record<SeriesMetric, string> = {
   requests: 'Requests',
+  page_views: 'Page views',
+  edge_requests: 'Edge requests',
   latency: 'Latency',
   cold_starts: 'Cold starts',
   jobs: 'Job runs',
@@ -275,7 +277,7 @@ export function QueryRow({
           allowCustom
         />
       )}
-      {query.metric === 'requests' && (
+      {(query.metric === 'requests' || query.metric === 'edge_requests') && (
         <ValuePicker
           label="Any status"
           name={`Status classes${of}`}

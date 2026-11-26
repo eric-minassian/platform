@@ -322,6 +322,23 @@ export function toLimitStats(items: readonly Item[], range: TimeRange): LimitSta
     .toSorted((x, y) => y.denied - x.denied || y.allowed - x.allowed || x.name.localeCompare(y.name));
 }
 
+/** Daily edge rollups as page views and requests on each of `days` (UTC day starts), oldest first. */
+export function toEdgeDays(
+  items: readonly Item[],
+  days: readonly number[],
+): { readonly pageViews: number[]; readonly requests: number[] } {
+  const slot = new Map(days.map((d, i) => [telemetryKeys.time(d), i]));
+  const pageViews = days.map(() => 0);
+  const requests = days.map(() => 0);
+  for (const i of items) {
+    const at = slot.get(String(i.sk));
+    if (at === undefined) continue;
+    pageViews[at] = num(i.pages);
+    requests[at] = num(i.req);
+  }
+  return { pageViews, requests };
+}
+
 export function toErrorGroup(i: Item): ErrorGroup {
   return {
     fingerprint: String(i.sk),
@@ -437,7 +454,7 @@ export function seriesPlan(
 }
 
 /** The rollup family a query reads (`telemetryKeys`); none for the CloudWatch metrics. */
-export type SeriesFamily = 'stage' | 'route' | 'job' | 'metric' | 'limit';
+export type SeriesFamily = 'stage' | 'route' | 'job' | 'metric' | 'limit' | 'edge';
 
 export function seriesFamily(q: SeriesQuery): SeriesFamily | undefined {
   switch (q.metric) {
@@ -445,6 +462,9 @@ export function seriesFamily(q: SeriesQuery): SeriesFamily | undefined {
     case 'latency':
     case 'cold_starts':
       return q.filter?.routes?.length || q.groupBy === 'route' ? 'route' : 'stage';
+    case 'page_views':
+    case 'edge_requests':
+      return 'edge';
     case 'jobs':
     case 'job_duration':
       return 'job';
@@ -466,6 +486,7 @@ const FAMILY_KEY: Record<SeriesFamily, (app: string, stage: string, res: Resolut
   job: telemetryKeys.job,
   metric: telemetryKeys.metric,
   limit: telemetryKeys.limit,
+  edge: telemetryKeys.edge,
 };
 
 /**
@@ -544,6 +565,18 @@ function rowContributions(
         return (f.status?.length ? f.status : STATUS_CLASSES).map((c) => [c, { num: counts[c], den: req }]);
       const matching = f.status?.length ? f.status.reduce((a, c) => a + counts[c], 0) : req;
       return [[q.groupBy === 'route' ? key : ALL_SERIES, { num: matching, den: req }]];
+    }
+    case 'page_views': {
+      const pages = num(i.pages);
+      return [[ALL_SERIES, { num: pages, den: pages }]];
+    }
+    case 'edge_requests': {
+      const counts = statusCounts(i);
+      const req = num(i.req);
+      if (q.groupBy === 'status')
+        return (f.status?.length ? f.status : STATUS_CLASSES).map((c) => [c, { num: counts[c], den: req }]);
+      const matching = f.status?.length ? f.status.reduce((a, c) => a + counts[c], 0) : req;
+      return [[ALL_SERIES, { num: matching, den: req }]];
     }
     case 'latency': {
       if (!keep(f.routes, key)) return [];
@@ -828,6 +861,12 @@ export class TelemetryQuery extends Context.Service<
     ): Effect.Effect<number | null>;
     /** Prod's requests in each of the last 24 hours, oldest first (the current hour last). */
     traffic(app: string): Effect.Effect<ReadonlyArray<number>>;
+    /** The stage's page views and edge requests on each of `days` (UTC day starts, oldest first). */
+    edgeDays(
+      app: string,
+      stage: string,
+      days: readonly number[],
+    ): Effect.Effect<{ readonly pageViews: number[]; readonly requests: number[] }>;
     routes(app: string, stage: string, range: TimeRange): Effect.Effect<ReadonlyArray<RouteStats>>;
     /** `declared` adds the manifest's jobs that never ran. */
     jobs(
@@ -1131,7 +1170,22 @@ export class TelemetryQuery extends Context.Service<
         return toStageTraffic(yield* queryRange(telemetryKeys.stage(app, stage, '1m'), a, b));
       }, Effect.orDie);
 
+      const edgeDays = Effect.fn('TelemetryQuery.edgeDays')(function* (
+        app: string,
+        stage: string,
+        days: readonly number[],
+      ) {
+        if (days.length === 0) return toEdgeDays([], days);
+        const items = yield* queryRange(
+          telemetryKeys.edge(app, stage, '1d'),
+          telemetryKeys.time(days[0]!),
+          telemetryKeys.time(days.at(-1)!),
+        );
+        return toEdgeDays(items, days);
+      }, Effect.orDie);
+
       return TelemetryQuery.of({
+        edgeDays,
         stageTraffic,
         metrics,
         series: readSeries,

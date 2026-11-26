@@ -20,10 +20,19 @@ const optional = Schema.optional;
 // Records
 // ---------------------------------------------------------------------------
 
+/** A GitHub repository's visibility, as its Actions OIDC tokens state it. */
+export const RepoVisibility = Schema.Literals(['public', 'private', 'internal']);
+export type RepoVisibility = typeof RepoVisibility.Type;
+
 export const AppRecord = Schema.Struct({
   name: Schema.String,
   /** GitHub `owner/name` allowed to deploy this app from CI. */
   repo: Schema.String,
+  /**
+   * The repo's visibility at its last CI deploy (absent before one): the
+   * public directory links a public repo. Changing `repo` forgets it.
+   */
+  repoVisibility: optional(RepoVisibility),
   description: optional(Schema.String),
   /** GitHub usernames who can manage the app (admins can manage everything). */
   owners: Schema.Array(Schema.String),
@@ -200,8 +209,50 @@ export const AppSummary = Schema.Struct({
   traffic: optional(Schema.Array(Schema.Finite)),
   /** The app's alert rules on every stage: how many there are and how many are firing. */
   alerts: optional(Schema.Struct({ total: Schema.Finite, alarm: Schema.Finite })),
+  /** Whether the public directory lists prod: its live deployment's `listed` (absent without one). */
+  listed: optional(Schema.Boolean),
 });
 export type AppSummary = typeof AppSummary.Type;
+
+// ---------------------------------------------------------------------------
+// Public directory
+// ---------------------------------------------------------------------------
+
+/** Days of traffic the public directory gives each app. */
+export const PUBLIC_DIRECTORY_DAYS = 30;
+
+/** An app in the public directory: its prod stage, as anyone may see it. */
+export const PublicApp = Schema.Struct({
+  name: Schema.String,
+  /** The live deployment's `description` in plat.config.ts, else the app's own. */
+  description: optional(Schema.String),
+  url: Schema.String,
+  /** The GitHub repository's page, when the repo is public. */
+  source: optional(Schema.String),
+  /** When prod was first deployed. */
+  liveSince: Schema.String,
+  /** When the deployment prod serves went live (a compute switch keeps its build's time). */
+  lastDeployedAt: Schema.String,
+  /** Whether prod was up at the uptime pinger's last result; null before its first. */
+  up: Schema.NullOr(Schema.Boolean),
+  /** Pages the router served for prod's host on each of `days` (`isPageView`). */
+  pageViews: Schema.Array(Schema.Finite),
+  /** Every request the router served for it on each of `days`: files, server and stores. */
+  requests: Schema.Array(Schema.Finite),
+});
+export type PublicApp = typeof PublicApp.Type;
+
+/**
+ * Every app whose live prod deployment is `listed` (the default), by name.
+ * Counts start when the router's access log did (November 2026).
+ */
+export const PublicAppsResponse = Schema.Struct({
+  generatedAt: Schema.String,
+  /** The complete UTC days the counts cover (`YYYY-MM-DD`), oldest first, ending yesterday. */
+  days: Schema.Array(Schema.String),
+  apps: Schema.Array(PublicApp),
+});
+export type PublicAppsResponse = typeof PublicAppsResponse.Type;
 
 // ---------------------------------------------------------------------------
 // Stages and deployments

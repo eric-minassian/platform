@@ -84,6 +84,9 @@ export function registerApps(program: Command): void {
         [
           `${pc.bold(v.app.name)}  ${pc.dim(v.app.description ?? '')}`,
           `repo: ${v.app.repo}   owners: ${v.app.owners.join(', ')}   created: ${shortTime(v.app.createdAt)}`,
+          ...(v.listed === undefined
+            ? []
+            : [`public directory: ${v.listed ? 'listed' : 'not listed (listed: false in plat.config.ts)'}`]),
           '',
           table(
             v.stages.map((st) => ({

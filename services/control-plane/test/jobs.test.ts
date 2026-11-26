@@ -714,6 +714,7 @@ describe('pinger', () => {
 
   const manifest = (email?: ResolvedManifest['email']): ResolvedManifest => ({
     name: 'shop',
+    listed: true,
     auth: { enabled: false, required: false },
     db: false,
     queues: {},

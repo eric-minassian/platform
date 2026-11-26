@@ -15,6 +15,7 @@ import {
   seriesFamily,
   seriesPlan,
   statusCounts,
+  toEdgeDays,
   toSeriesResponse,
   windowValue,
 } from '../src/telemetry/query.ts';
@@ -213,6 +214,37 @@ describe('series from rollups', () => {
       stored: '1d',
       note: 'hourly data is kept for 35 days, so this range is in 1d buckets',
     });
+  });
+});
+
+describe('edge traffic', () => {
+  const edgeRows = [
+    { sk: at(0), req: 12, s2xx: 9, s3xx: 2, s4xx: 1, pages: 3 },
+    { sk: at(2), req: 5, s2xx: 5, pages: 1 },
+  ];
+
+  it('reads the edge rollups for page views and edge requests', () => {
+    expect(seriesFamily({ metric: 'page_views', stat: 'count' })).toBe('edge');
+    expect(seriesFamily({ metric: 'edge_requests', stat: 'count', groupBy: 'status' })).toBe('edge');
+    expect(lines(answer(edgeRows, { metric: 'page_views', stat: 'count' }))).toEqual({ all: [3, 0, 1] });
+    expect(lines(answer(edgeRows, { metric: 'edge_requests', stat: 'count', groupBy: 'status' }))).toEqual({
+      '2xx': [9, 0, 5],
+      '3xx': [2, 0, 0],
+      '4xx': [1, 0, 0],
+    });
+    expect(
+      lines(answer(edgeRows, { metric: 'edge_requests', stat: 'percent', filter: { status: ['4xx'] } })),
+    ).toEqual({ all: [8.33333, null, 0] });
+  });
+
+  it('gives each day of the public directory its page views and requests', () => {
+    const days = [T0 - DAY, T0, T0 + DAY].map((d) => Math.floor(d / DAY) * DAY);
+    const rows = [
+      { sk: new Date(days[0]!).toISOString(), req: 40, pages: 6 },
+      { sk: new Date(days[2]!).toISOString(), req: 2 },
+      { sk: new Date(days[2]! + DAY).toISOString(), req: 99, pages: 99 },
+    ];
+    expect(toEdgeDays(rows, days)).toEqual({ pageViews: [6, 0, 0], requests: [40, 0, 2] });
   });
 });
 

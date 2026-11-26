@@ -66,6 +66,7 @@ const liveDeployment = (manifest: Partial<ResolvedManifest> = {}): DeploymentIte
   createdAt: '2026-11-01T00:00:00.000Z',
   manifest: {
     name: 'shop',
+    listed: true,
     auth: { enabled: false, required: false },
     db: false,
     queues: {},
@@ -262,7 +263,7 @@ describe('authentication', () => {
 
   it.effect('keeps CI runs to member-less endpoints and to the stages their ref may deploy', () =>
     Effect.gen(function* () {
-      const { request } = yield* setup({
+      const { request, signIn } = yield* setup({
         store: memoryStore({ apps: [shop] }),
         artifacts: {
           uploadForms: (_ref, files) =>
@@ -276,6 +277,7 @@ describe('authentication', () => {
           ref: 'refs/heads/main',
           event_name: 'push',
           sha: 'abc123',
+          repository_visibility: 'public',
         }),
       );
       const me = yield* request('/v1/me', { headers: ci });
@@ -304,12 +306,23 @@ describe('authentication', () => {
       assert.strictEqual(created.deployment.actor, 'ci:bob/shop');
       assert.strictEqual(created.deployment.commit, 'abc123');
       assert.deepStrictEqual(Object.keys(created.uploads).toSorted(), ['manifest.json', 'static.zip']);
+      // The token says the repo is public, which the public directory links; another repo's is unknown.
+      const bob = yield* signIn('bob');
+      const summary = (yield* json(yield* request('/v1/apps/shop', { headers: bob }))) as { app: AppRecord };
+      assert.strictEqual(summary.app.repoVisibility, 'public');
 
       const staging = yield* deploy('staging');
       assert.strictEqual(staging.status, 403);
       assert.deepStrictEqual(yield* json(staging), {
         error: { code: 'forbidden', message: 'stage staging can only be deployed with a member token' },
       });
+
+      const moved = yield* request('/v1/apps/shop', {
+        method: 'PATCH',
+        headers: bob,
+        json: { repo: 'bob/store' },
+      });
+      assert.strictEqual(((yield* json(moved)) as AppRecord).repoVisibility, undefined);
     }),
   );
 
@@ -867,6 +880,7 @@ describe('observability', () => {
               createdAt: '2026-11-01T00:00:00.000Z',
               manifest: {
                 name: 'shop',
+                listed: true,
                 auth: { enabled: false, required: false },
                 db: false,
                 queues: {},
@@ -1387,6 +1401,7 @@ describe('manage', () => {
               createdAt: '2026-11-01T00:00:00.000Z',
               manifest: {
                 name: 'shop',
+                listed: true,
                 auth: { enabled: false, required: false },
                 db: false,
                 queues: {},

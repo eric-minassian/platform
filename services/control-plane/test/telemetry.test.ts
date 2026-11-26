@@ -6,7 +6,14 @@ import { Effect, Layer, Option } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { GitHub } from '../src/github.ts';
 import { toLogLine } from '../src/logs.ts';
-import { aggregate, maxFollowUps, parseLogMessage, rollupUpdateInput } from '../src/telemetry/aggregate.ts';
+import {
+  aggregate,
+  aggregateEdge,
+  maxFollowUps,
+  parseEdgeMessage,
+  parseLogMessage,
+  rollupUpdateInput,
+} from '../src/telemetry/aggregate.ts';
 import {
   parseRange,
   summarizeHealth,
@@ -259,6 +266,74 @@ describe('aggregate', () => {
         ExpressionAttributeValues: { ':m': 7 },
       },
     ]);
+  });
+});
+
+describe('aggregateEdge', () => {
+  /** An access log record as CloudFront delivers it: every value a string, `-` for none. */
+  const hit = (over: Record<string, string> = {}) =>
+    JSON.stringify({
+      'timestamp(ms)': String(T),
+      'x-host-header': 'todo.example.com',
+      'cs-method': 'GET',
+      'cs-uri-stem': '/',
+      'sc-status': '200',
+      'sc-content-type': 'text/html',
+      ...over,
+    });
+
+  const served = (app: string, stage: string) => app === 'todo' && (stage === 'prod' || stage === 'pr-3');
+
+  it('counts each stage host’s requests by status class, and its page views', () => {
+    const agg = aggregateEdge(
+      [
+        hit(),
+        hit({ 'cs-uri-stem': '/assets/index-1a2b.js', 'sc-content-type': 'text/javascript' }),
+        // A page the browser had cached: its 304 carries no content type.
+        hit({ 'cs-uri-stem': '/docs', 'sc-status': '304', 'sc-content-type': '-' }),
+        hit({ 'x-host-header': 'todo--pr-3.example.com', 'cs-uri-stem': '/nope', 'sc-status': '404' }),
+      ],
+      'example.com',
+      served,
+    );
+    expect(agg.events).toBe(4);
+    expect(agg.errors).toEqual([]);
+    const minute = agg.rollups.find((r) => r.pk === 'v#todo#prod#1m');
+    expect(minute).toMatchObject({ sk: '2026-11-14T10:15:00.000Z' });
+    expect(minute!.add).toEqual({ req: 3, s2xx: 2, s3xx: 1, pages: 2 });
+    expect(agg.rollups.find((r) => r.pk === 'v#todo#pr-3#1d')!.add).toEqual({ req: 1, s4xx: 1 });
+    // Every resolution of each stage; a day's row is kept 400 days.
+    expect(agg.rollups.map((r) => r.pk).toSorted()).toEqual([
+      'v#todo#pr-3#1d',
+      'v#todo#pr-3#1h',
+      'v#todo#pr-3#1m',
+      'v#todo#prod#1d',
+      'v#todo#prod#1h',
+      'v#todo#prod#1m',
+    ]);
+    const daily = agg.rollups.find((r) => r.pk === 'v#todo#prod#1d')!;
+    expect(daily.ttl).toBe(Date.parse('2026-11-14T00:00:00Z') / 1000 + 400 * 86400);
+  });
+
+  it('leaves out health checks, hosts of no stage the platform serves, and what isn’t a record', () => {
+    const agg = aggregateEdge(
+      [
+        hit({ 'cs-uri-stem': '/__platform/health', 'sc-content-type': 'application/json' }),
+        hit({ 'x-host-header': 'edge.platform.example.com' }),
+        hit({ 'x-host-header': 'todo.example.org' }),
+        hit({ 'sc-status': '-' }),
+        // A name nothing serves: the router answers 404, and it isn't anyone's traffic.
+        hit({ 'x-host-header': 'nothing-here.example.com', 'sc-status': '404' }),
+        hit({ 'x-host-header': 'todo--pr-9.example.com' }),
+        '{"message":"not a record"}',
+        'not json',
+      ],
+      'example.com',
+      served,
+    );
+    expect(agg).toEqual({ rollups: [], errors: [], events: 0 });
+    expect(parseEdgeMessage('[]')).toBeNull();
+    expect(parseEdgeMessage(hit())).toMatchObject({ 'x-host-header': 'todo.example.com' });
   });
 });
 

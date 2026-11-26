@@ -4,11 +4,12 @@
  * the `stages` queue's, which runs in a function of its own (plat.config.ts).
  */
 import { defineWorker, Queues } from '@ericminassian/platform';
-import { EDGE_FLOOR_JOB } from '@ericminassian/platform-core';
+import { EDGE_FLOOR_JOB, names, platformNames } from '@ericminassian/platform-core';
 import { Effect, Exit, Layer, Schema } from 'effect';
 import { AlertEvaluator } from './alerts/evaluator.ts';
 import { AlertRules } from './alerts/rules.ts';
 import { Artifacts } from './artifacts.ts';
+import { Settings } from './config.ts';
 import { Deployer, StageEngine } from './deploy.ts';
 import { EdgeFloor } from './edge-floor.ts';
 import { AppEmail } from './email.ts';
@@ -22,7 +23,8 @@ import { Reaper } from './jobs/reaper.ts';
 import { StorageExpiry } from './jobs/storage.ts';
 import { Watchdog } from './jobs/watchdog.ts';
 import { BaseLive } from './layers.ts';
-import { aggregate, parseLogMessage } from './telemetry/aggregate.ts';
+import { Store } from './store.ts';
+import { aggregate, aggregateEdge, parseLogMessage } from './telemetry/aggregate.ts';
 import { TelemetryQuery } from './telemetry/query.ts';
 import { TelemetryWriter } from './telemetry/write.ts';
 
@@ -51,6 +53,16 @@ const WorkerLive = Layer.mergeAll(
     ),
   ),
   Layer.provideMerge(BaseLive),
+);
+
+/** Whether the platform serves a stage (it hasn't been destroyed): the hosts the router's access log counts. */
+const servedStages = Store.use((s) => s.listAllStages).pipe(
+  Effect.map((stages) => {
+    const served = new Set(
+      stages.filter((s) => s.status !== 'destroyed').map((s) => names.base(s.app, s.stage)),
+    );
+    return (app: string, stage: string) => served.has(names.base(app, stage));
+  }),
 );
 
 /** What the API sends for a rollback (see jobs/call.ts). */
@@ -107,9 +119,14 @@ export default defineWorker({
   },
   logs: (batch) =>
     Effect.gen(function* () {
-      const events = batch.logEvents.flatMap((e) => parseLogMessage(e.message) ?? []);
-      if (events.length === 0) return;
-      const newGroups = yield* TelemetryWriter.use((w) => w.apply(aggregate(events)));
+      const messages = batch.logEvents.map((e) => e.message);
+      // The router's access log has a subscription of its own (foundation/src/deploy.ts).
+      const aggregation =
+        batch.logGroup === platformNames.edgeLogGroup
+          ? aggregateEdge(messages, (yield* Settings).platform.domain, yield* servedStages)
+          : aggregate(messages.flatMap((m) => parseLogMessage(m) ?? []));
+      if (aggregation.events === 0) return;
+      const newGroups = yield* TelemetryWriter.use((w) => w.apply(aggregation));
       if (newGroups.length) {
         yield* Effect.logInfo('new error groups').pipe(
           Effect.annotateLogs({ count: newGroups.length, logGroup: batch.logGroup }),

@@ -65,15 +65,16 @@ export const AppsLive = HttpApiBuilder.group(
         { concurrency: 'unbounded' },
       );
       const prod = stages.find((s) => s.stage === PROD_STAGE && s.status === 'active');
-      const [health, traffic] = prod
+      const [health, traffic, live] = prod
         ? yield* Effect.all(
             [
               ifAvailable('health', telemetry.health(app.name, prod.up ?? null)),
               ifAvailable('traffic', telemetry.traffic(app.name)),
+              prod.currentDeployment ? store.getDeployment(prod.currentDeployment) : Effect.succeedNone,
             ],
             { concurrency: 'unbounded' },
           )
-        : [Option.none(), Option.none()];
+        : [Option.none(), Option.none(), Option.none()];
       const lastDeployment = deployments[0];
       return {
         app,
@@ -83,6 +84,7 @@ export const AppsLive = HttpApiBuilder.group(
         ...(lastDeployment ? { lastDeployment: publicDeployment(lastDeployment) } : {}),
         ...(Option.isSome(traffic) ? { traffic: traffic.value } : {}),
         ...(Option.isSome(alertsOf) ? { alerts: alertsOf.value } : {}),
+        ...(Option.isSome(live) ? { listed: live.value.manifest?.listed ?? true } : {}),
       } satisfies AppSummary;
     });
 
@@ -156,6 +158,10 @@ export const AppsLive = HttpApiBuilder.group(
           const patch: Patch<AppRecord> = {
             ...(payload.description !== undefined ? { description: payload.description } : {}),
             ...(payload.repo !== undefined ? { repo: payload.repo } : {}),
+            // Another repo's visibility is unknown until its first CI deploy.
+            ...(payload.repo !== undefined && payload.repo.toLowerCase() !== app.repo.toLowerCase()
+              ? { repoVisibility: undefined }
+              : {}),
             ...(payload.owners !== undefined ? { owners: [...new Set(payload.owners)] } : {}),
           };
           if (Object.keys(patch).length === 0) return app;

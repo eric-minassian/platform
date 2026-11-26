@@ -411,6 +411,9 @@ Browser tests need Chromium once: `pnpm exec playwright install chromium`.
   `uploadUrl`, not through the server.
 - One-time per app: `plat apps create template-app --repo <owner>/<repo>` registers the repo with the
   platform. Without it, CI deploys are rejected.
+- Prod is listed in the platform's public directory (`/v1/public/apps`, which ericminassian.com shows):
+  its `description` from `plat.config.ts`, its address, daily page views, and its repository when that's
+  public. `listed: false` in `plat.config.ts` keeps it out.
 
 ## Debugging (add `--json` for machine output)
 
@@ -419,6 +422,7 @@ plat logs --since 30m [--stage pr-12] [--filter "error"] [--follow]
 plat errors                         # grouped errors with sample stack + trace id
 plat traces <traceId>               # one request across server → queue → worker
 plat metrics --since 6h             # requests, 5xx, p95, cold starts, per-route, per-job and rate-limit stats
+plat metrics --metric page_views --since 7d --res 1d   # pages served, static ones too (up to an hour behind)
 plat jobs dead                      # queue messages, events and cron runs that failed every attempt
 plat jobs redrive <id>... | --all   # run them again from the first attempt; `plat jobs discard` drops them
 plat services [--stage pr-12]       # long-running services: state, restarts, failed runs, cost

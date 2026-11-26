@@ -1,6 +1,6 @@
 import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
-import { newTraceId, TelemetryEvent, TRACE_SAMPLE_RATE, traceSampled } from '../src/index.ts';
+import { isPageView, newTraceId, TelemetryEvent, TRACE_SAMPLE_RATE, traceSampled } from '../src/index.ts';
 
 describe('trace sampling', () => {
   it('samples about TRACE_SAMPLE_RATE of trace ids', () => {
@@ -52,5 +52,21 @@ describe('telemetry lines', () => {
       callMs: 2,
     };
     expect(decode(line)).toEqual(line);
+  });
+});
+
+describe('page views', () => {
+  it('are GETs answered with an HTML document, or revalidated pages', () => {
+    expect(isPageView('GET', '/', 200, 'text/html')).toBe(true);
+    expect(isPageView('GET', '/about', 200, 'text/html; charset=utf-8')).toBe(true);
+    expect(isPageView('GET', '/app.js', 200, 'text/javascript')).toBe(false);
+    expect(isPageView('GET', '/missing', 404, 'text/html')).toBe(false);
+    expect(isPageView('HEAD', '/', 200, 'text/html')).toBe(false);
+    expect(isPageView('POST', '/api/form', 200, 'text/html')).toBe(false);
+    expect(isPageView('GET', '/', 200, undefined)).toBe(false);
+    // A 304 has no content type: a path that names no file, or an HTML file, is a page.
+    expect(isPageView('GET', '/docs', 304, '-')).toBe(true);
+    expect(isPageView('GET', '/index.html', 304, '-')).toBe(true);
+    expect(isPageView('GET', '/assets/app-1a2b.css', 304, '-')).toBe(false);
   });
 });

@@ -8,9 +8,11 @@ import {
   isPreviewStage,
   type PlatformConfig,
   PROD_STAGE,
+  RepoVisibility,
   validateStageName,
 } from '@ericminassian/platform-core';
 import type { CiPrincipal, MemberPrincipal, Principal } from '@ericminassian/platform-core/platform-api';
+import { Schema } from 'effect';
 
 export type { CiPrincipal, MemberPrincipal, Principal } from '@ericminassian/platform-core/platform-api';
 
@@ -23,9 +25,12 @@ export interface GithubOidcClaims {
   sha?: string;
   actor?: string;
   run_id?: string;
+  repository_visibility?: string;
 }
 
 export type Decision = { ok: true } | { ok: false; reason: string };
+
+const isRepoVisibility = Schema.is(RepoVisibility);
 
 /** What a stage-scoped request does; CI runs may tear down more than they may deploy. */
 export type StageAction = 'deploy' | 'destroy';
@@ -44,6 +49,9 @@ export function ciPrincipalFromClaims(claims: GithubOidcClaims): CiPrincipal | n
     ...(claims.sha ? { sha: claims.sha } : {}),
     ...(claims.actor ? { actor: claims.actor } : {}),
     ...(claims.run_id ? { runId: claims.run_id } : {}),
+    ...(isRepoVisibility(claims.repository_visibility)
+      ? { repositoryVisibility: claims.repository_visibility }
+      : {}),
   };
 }
 

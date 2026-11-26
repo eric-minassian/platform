@@ -81,6 +81,7 @@ import type { EmailJob, TodoCreated, TodoChanged } from './src/domain.ts';
 
 const app = defineApp({
   name: 'todo',
+  description: 'Shared todo lists', // the public directory shows it; `listed: false` keeps the app out
   web: {
     server: 'src/server.ts',
     static: 'web/dist',
@@ -959,13 +960,26 @@ writing any instrumentation:
   account and region; destination is the control plane worker) forwards
   `req|err|job|metric|limit|env` lines to the telemetry processor. `span` and
   `log` lines stay in CloudWatch Logs for log search and traces (Logs
-  Insights) to read on demand. The processor writes:
+  Insights) to read on demand.
+- **Edge traffic.** Apps' own lines only see what reaches their servers, so a
+  static site would look idle. The router's access log (CloudFront standard
+  logging, `EDGE_LOG_FIELDS`: time, host, method, path, status, content type,
+  never the client's address) is delivered to `/platform/edge` as JSON, kept
+  a day, and a subscription filter of its own (the account-level one takes a
+  single pattern) hands it to the same processor. It counts each stage's
+  requests by status class and its page views (`isPageView`: a GET answered
+  with HTML, or a 304 for a path that names no file), health checks left out,
+  and only for stages the platform serves, so a scan of made-up names writes
+  nothing.
+  CloudFront delivers it up to an hour late, so its series serve charts and
+  the public directory, not alert rules.
+- **Rollups.** The processor writes:
   - per-minute, per-hour and per-day rollups to `platform-telemetry`, with
     TTL (minutes 3 days): request counts by status class, a fixed-bucket
     latency histogram (so DynamoDB `ADD` works) and cold starts, stage-wide
     and per route; per-job, custom-metric (count, sum and a max raised by a
-    conditional write) and rate-limit series. Writes happen only when there
-    is traffic;
+    conditional write), rate-limit and edge (`v#`) series. Writes happen only
+    when there is traffic;
   - Sentry-style error groups. A new group sends an alert and can open a
     GitHub issue in the app repo.
 - **No CloudWatch custom metrics, alarms or dashboards per app.** These are
@@ -1030,9 +1044,9 @@ writing any instrumentation:
     rate, p95, firing alerts, cost and last deploy, trouble first.
   - **Overview:** the stage's live deployment (where it runs, its source,
     who deployed it, compute mode; its logs and a rollback to the one before),
-    five figures against the previous period, requests, latency, 5xx and job
-    runs, the busiest routes, recent activity, and the custom metrics and
-    rate limits the stage recorded.
+    five figures against the previous period, page views, requests, latency,
+    5xx and job runs, the busiest routes, recent activity, and the custom
+    metrics and rate limits the stage recorded.
   - **Metrics:** the explorer. Up to 8 queries (metric, statistic, filters,
     group by) over the rollups, expressions over them (`100 * b / a`), as a
     line, area, bar or heatmap. Each unit gets its own chart,
@@ -1063,6 +1077,7 @@ writing any instrumentation:
     rollback; secrets; cost; settings.
   - **Platform:** members, platform cost, and the edge floor's state and
     blocked requests.
+  - **Settings** also say whether the public directory lists the app.
   - **Demo:** `pnpm web:demo` in `services/control-plane` serves the API
     from generated data (`src/demo`), for working on the console without AWS.
 - **Uptime.** Every 5 minutes the pinger
@@ -1091,6 +1106,22 @@ writing any instrumentation:
   Cost tab and `plat apps show` also show each prod server's monthly estimate
   in both compute modes (see [Compute](#compute)).
 - **CLI.** `plat logs|metrics|errors|traces|data --json` gives agents the same views.
+
+## Public directory
+
+`GET /v1/public/apps` answers anyone, without signing in: every app whose
+live prod deployment is `listed` (the default; `listed: false` in
+`plat.config.ts` keeps it out), so following deploys and rollbacks. Each has
+its description (the live manifest's, else the record's), URL, when prod was
+first deployed and when what it serves went live (a compute switch keeps its
+build's time), the uptime pinger's last result, and page views and edge
+requests for each of the 30 complete UTC days before today. Its repository
+is linked when public: the platform records `repository_visibility` from the
+GitHub OIDC token of each CI deploy, and forgets it when `repo` changes.
+Nothing else is there: no owners, routes, deployments' contents or cost.
+It answers with `Cache-Control: public, max-age=300, s-maxage=900`, so the
+router answers repeat readers without waking the control plane. Eric's
+personal site (eric-minassian/website) lists its apps from it at build time.
 
 ## Identity
 
@@ -1180,6 +1211,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
 | Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
 | Edge floor (AWS WAF)                                | $0.10 for the alarm; while on, $6 a month by the hour (~$0.01/h) plus $0.60 per million requests                             |
+| Edge access log (page views)                        | ~$0 below CloudFront's 750 bytes of log delivery per request (a line is ~200); kept a day; the processor's invocations cents |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 | Alert rules                                         | a cron a minute (~43k invocations, inside the free tier) and one index read; per rule a rollup read a minute: cents          |
 
@@ -1440,3 +1472,6 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | A rule's state is written when it changes, else every 10 minutes                      | A write per rule per minute is ~$0.05 a rule a month, even for idle apps; reads cost less, and the history keeps every change.                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | Members' Logs Insights queries run only on their stage's log groups                   | The control plane can read every log group, so the API picks the groups and refuses queries that name their own (`SOURCE`, `logGroups(`).                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Explorer expressions run in the browser                                               | Each query's series is fetched and cached once, and arithmetic over aligned buckets is cheap. Alert rules watch a single query, so the server never needs them.                                                                                                                                                                                                                                                                                                                                                                                          |
+| Page views come from the router's access log, through the telemetry processor         | Apps' telemetry sees only server requests, so static sites read as idle. CloudFront's standard logging to CloudWatch Logs carries the real status and content type, costs nothing under its 750 bytes per request, and reuses the processor and rollups; the router function logging each request would bill every line and can't see the response. The log arrives up to an hour late, which daily counts and charts tolerate and alert rules don't.                                                                                                    |
+| The public directory lists every prod by default                                      | Eric's call (2026-11-26): his site should show every app he runs here without a step per app. What it shows is what a visitor of the app could see; `listed: false` keeps one out.                                                                                                                                                                                                                                                                                                                                                                       |
+| A repo's visibility comes from the CI deploy's OIDC token                             | The token already states it, for free, on every prod deploy. Asking GitHub on each read would add a dependency and a rate limit to a public endpoint.                                                                                                                                                                                                                                                                                                                                                                                                    |

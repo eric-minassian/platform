@@ -179,6 +179,10 @@ export const DeploymentsLive = HttpApiBuilder.group(
             createdAt: yield* nowIso,
           };
           yield* store.createDeployment(deployment);
+          // A CI token says whether the repo is public, which the public directory links.
+          if (p.kind === 'ci' && p.repositoryVisibility && p.repositoryVisibility !== app.repoVisibility) {
+            yield* store.updateApp(app.name, { repoVisibility: p.repositoryVisibility });
+          }
           const uploads = yield* artifacts.uploadForms({ app: app.name, stage, deployment: id }, [
             'manifest.json',
             ...files,
