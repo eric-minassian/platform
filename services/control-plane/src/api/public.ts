@@ -1,8 +1,9 @@
 /**
  * The public directory (`GET /v1/public/apps`): every app whose live prod
  * deployment is `listed`, with its page views, for anyone to read without
- * signing in (a personal site lists the platform's apps from it). It says
- * nothing a visitor of the apps couldn't see, and the router caches it.
+ * signing in. A personal site fetches it from visitors' browsers, so any
+ * origin may read it. It says nothing a visitor of the apps couldn't see,
+ * and the router caches it.
  */
 import {
   type AppRecord,
@@ -22,10 +23,10 @@ import { TelemetryQuery } from '../telemetry/query.ts';
 
 const DAY_MS = RESOLUTION_MS['1d'];
 
-/** The `count` complete UTC days before `now`'s, as day starts, oldest first. */
+/** The `count` UTC days ending with `now`'s, as day starts, oldest first. */
 export function directoryDays(now: number, count = PUBLIC_DIRECTORY_DAYS): number[] {
   const today = bucketStart(now, '1d');
-  return Array.from({ length: count }, (_, i) => today - (count - i) * DAY_MS);
+  return Array.from({ length: count }, (_, i) => today - (count - 1 - i) * DAY_MS);
 }
 
 /** Prod while it serves a deployment (a redeploy in flight still serves the last one). */
@@ -80,13 +81,19 @@ export const PublicLive = HttpApiBuilder.group(
     return handlers.handle('apps', () =>
       Effect.gen(function* () {
         yield* HttpEffect.appendPreResponseHandler((_, response) =>
-          Effect.succeed(HttpServerResponse.setHeader(response, 'cache-control', PUBLIC_CACHE_CONTROL)),
+          Effect.succeed(
+            HttpServerResponse.setHeaders(response, {
+              'cache-control': PUBLIC_CACHE_CONTROL,
+              'access-control-allow-origin': '*',
+            }),
+          ),
         );
         const now = yield* Clock.currentTimeMillis;
         const days = directoryDays(now);
-        const [apps, stages] = yield* Effect.all([store.listApps, store.listAllStages], {
-          concurrency: 'unbounded',
-        });
+        const [apps, stages, countingSince] = yield* Effect.all(
+          [store.listApps, store.listAllStages, telemetry.edgeCountingSince],
+          { concurrency: 'unbounded' },
+        );
         const prodOf = new Map(stages.filter(servesProd).map((s) => [s.app, s]));
         const entries = yield* Effect.forEach(
           apps,
@@ -99,6 +106,7 @@ export const PublicLive = HttpApiBuilder.group(
         return {
           generatedAt: new Date(now).toISOString(),
           days: days.map((d) => new Date(d).toISOString().slice(0, 10)),
+          ...(Option.isSome(countingSince) ? { countingSince: countingSince.value } : {}),
           apps: entries.flatMap(Option.toArray).toSorted((a, b) => a.name.localeCompare(b.name)),
         };
       }),

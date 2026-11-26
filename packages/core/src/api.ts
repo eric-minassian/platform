@@ -235,21 +235,24 @@ export const PublicApp = Schema.Struct({
   lastDeployedAt: Schema.String,
   /** Whether prod was up at the uptime pinger's last result; null before its first. */
   up: Schema.NullOr(Schema.Boolean),
-  /** Pages the router served for prod's host on each of `days` (`isPageView`). */
+  /** Pages the router served for prod's host on each of `days` (`isPageView`); today's so far. */
   pageViews: Schema.Array(Schema.Finite),
   /** Every request the router served for it on each of `days`: files, server and stores. */
   requests: Schema.Array(Schema.Finite),
 });
 export type PublicApp = typeof PublicApp.Type;
 
-/**
- * Every app whose live prod deployment is `listed` (the default), by name.
- * Counts start when the router's access log did (November 2026).
- */
+/** Every app whose live prod deployment is `listed` (the default), by name. */
 export const PublicAppsResponse = Schema.Struct({
   generatedAt: Schema.String,
-  /** The complete UTC days the counts cover (`YYYY-MM-DD`), oldest first, ending yesterday. */
+  /** The UTC days the counts cover (`YYYY-MM-DD`), oldest first, ending today (so far). */
   days: Schema.Array(Schema.String),
+  /**
+   * The first UTC day the router's access log counted (`YYYY-MM-DD`): days
+   * before it have no counts, rather than no traffic. Absent where the
+   * platform has no access log (`plat dev`).
+   */
+  countingSince: optional(Schema.String),
   apps: Schema.Array(PublicApp),
 });
 export type PublicAppsResponse = typeof PublicAppsResponse.Type;

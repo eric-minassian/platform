@@ -278,15 +278,21 @@ export class SessionApi extends HttpApiGroup.make('session').add(
 ) {}
 
 /**
- * What anyone may read, without signing in: the public directory. The router
- * caches it (`PUBLIC_CACHE_CONTROL`), so readers don't wake the control plane.
+ * What anyone may read, without signing in: the public directory. Pages on
+ * any site may fetch it from the browser (`Access-Control-Allow-Origin: *`;
+ * it carries no credentials), and the router caches it
+ * (`PUBLIC_CACHE_CONTROL`), so readers rarely wake the control plane.
  */
 export class PublicApi extends HttpApiGroup.make('public').add(
   HttpApiEndpoint.get('apps', '/public/apps', { success: PublicAppsResponse, error: errors }),
 ) {}
 
-/** How long browsers and the router keep the public directory. */
-export const PUBLIC_CACHE_CONTROL = 'public, max-age=300, s-maxage=900';
+/**
+ * How long browsers and the router keep the public directory: a page that
+ * fetches it live is a few minutes behind at most, and the control plane
+ * answers each edge location at most every five minutes.
+ */
+export const PUBLIC_CACHE_CONTROL = 'public, max-age=60, s-maxage=300';
 
 export class AppsApi extends HttpApiGroup.make('apps')
   .add(

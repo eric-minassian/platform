@@ -1115,14 +1115,21 @@ live prod deployment is `listed` (the default; `listed: false` in
 its description (the live manifest's, else the record's), URL, when prod was
 first deployed and when what it serves went live (a compute switch keeps its
 build's time), the uptime pinger's last result, and page views and edge
-requests for each of the 30 complete UTC days before today. Its repository
-is linked when public: the platform records `repository_visibility` from the
-GitHub OIDC token of each CI deploy (the control plane's own deploy, from its
-Actions event), and forgets it when `repo` changes.
-Nothing else is there: no owners, routes, deployments' contents or cost.
-It answers with `Cache-Control: public, max-age=300, s-maxage=900`, so the
-router answers repeat readers without waking the control plane. Eric's
-personal site (eric-minassian/website) lists its apps from it at build time.
+requests for each of the 30 UTC days ending today (today's so far).
+`countingSince` is the day the router's access log began (its log group's
+creation), so a reader can tell days before it from quiet ones. Its
+repository is linked when public: the platform records
+`repository_visibility` from the GitHub OIDC token of each CI deploy (the
+control plane's own deploy, from its Actions event), and forgets it when
+`repo` changes. Nothing else is there: no owners, routes, deployments'
+contents or cost.
+
+Eric's personal site (eric-minassian/website) fetches it from visitors'
+browsers, so it answers any origin (`Access-Control-Allow-Origin: *`; it
+carries no credentials) with `Cache-Control: public, max-age=60,
+s-maxage=300`: a page is a few minutes behind at most, and the router
+answers repeat readers, waking the control plane at most every five minutes
+per edge location.
 
 ## Identity
 
