@@ -55,16 +55,16 @@ const deployment = (
 });
 
 describe('directoryDays', () => {
-  it('is the 30 complete UTC days before today’s', () => {
+  it('is the 30 UTC days ending today', () => {
     const days = directoryDays(NOW);
     expect(days).toHaveLength(30);
-    expect(new Date(days[0]!).toISOString()).toBe('2026-10-27T00:00:00.000Z');
-    expect(new Date(days.at(-1)!).toISOString()).toBe('2026-11-25T00:00:00.000Z');
+    expect(new Date(days[0]!).toISOString()).toBe('2026-10-28T00:00:00.000Z');
+    expect(new Date(days.at(-1)!).toISOString()).toBe('2026-11-26T00:00:00.000Z');
   });
 });
 
 describe('public directory', () => {
-  it.effect('lists every listed prod to anyone, for the router to cache', () =>
+  it.effect('lists every listed prod to anyone, from any site, for the router to cache', () =>
     Effect.gen(function* () {
       yield* wallClockAt(NOW);
       const read: string[] = [];
@@ -104,6 +104,7 @@ describe('public directory', () => {
             ],
           }),
           telemetry: {
+            edgeCountingSince: Effect.succeedSome('2026-11-26'),
             edgeDays: (name, stageName, days) =>
               Effect.sync(() => {
                 read.push(`${name}/${stageName}`);
@@ -117,12 +118,16 @@ describe('public directory', () => {
       const res = yield* request('/v1/public/apps');
       assert.strictEqual(res.status, 200);
       assert.strictEqual(res.headers.get('cache-control'), PUBLIC_CACHE_CONTROL);
+      // A page fetches it from visitors' browsers: no credentials, so any origin.
+      assert.strictEqual(res.headers.get('access-control-allow-origin'), '*');
       const body = (yield* Effect.promise(() => res.json())) as PublicAppsResponse;
       assert.strictEqual(body.generatedAt, '2026-11-26T18:00:00.000Z');
       assert.deepStrictEqual(
         [body.days.length, body.days[0], body.days.at(-1)],
-        [30, '2026-10-27', '2026-11-25'],
+        [30, '2026-10-28', '2026-11-26'],
       );
+      // Days before it have no counts, which isn't the same as no traffic.
+      assert.strictEqual(body.countingSince, '2026-11-26');
       const lastDay = (n: number) => [...Array.from({ length: 29 }, () => 0), n];
       assert.deepStrictEqual(body.apps, [
         {
@@ -151,6 +156,21 @@ describe('public directory', () => {
       ]);
       // Only what's listed is read: prod's, never a preview's.
       assert.sameMembers(read, ['notes/prod', 'shop/prod']);
+    }),
+  );
+
+  it.effect('leaves out when counting began where there is no access log', () =>
+    Effect.gen(function* () {
+      yield* wallClockAt(NOW);
+      const request = yield* api(
+        testServices({
+          store: memoryStore({ apps: [], stages: [] }),
+          telemetry: { edgeCountingSince: Effect.succeedNone },
+        }),
+      );
+      const res = yield* request('/v1/public/apps');
+      const body = (yield* Effect.promise(() => res.json())) as object;
+      assert.deepStrictEqual(Object.keys(body).toSorted(), ['apps', 'days', 'generatedAt']);
     }),
   );
 });

@@ -2,6 +2,7 @@
  * Reads rollups back out of the telemetry table and shapes them into the API
  * DTOs. The mapping functions are pure (unit tested); `TelemetryQuery` does the I/O.
  */
+import { DescribeLogGroupsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import {
   type AppSummary,
@@ -15,6 +16,8 @@ import {
   type ErrorStatus,
   type JobStats,
   LATENCY_BUCKETS_MS,
+  platformNames,
+  telemetryKeys,
   type LimitPoint,
   type LimitsResponse,
   type LimitStats,
@@ -22,24 +25,23 @@ import {
   type MetricsResponse,
   type MinuteTraffic,
   PROD_STAGE,
-  percentile,
   QUERY_RESOLUTION_MS,
   type QueryResolution,
+  percentile,
+  type Resolution,
   RESOLUTION_MS,
   RESOLUTION_TTL_DAYS,
-  type Resolution,
   type RouteStats,
   type SeriesGroupBy,
   type SeriesQuery,
   type SeriesResponse,
   type SeriesStat,
+  seriesUnit,
   STATUS_CLASSES,
   type StatusClass,
-  seriesUnit,
-  telemetryKeys,
   type UptimePoint,
 } from '@ericminassian/platform-core';
-import { absurd, Clock, Context, Effect, Layer, Option } from 'effect';
+import { absurd, Clock, Context, Duration, Effect, Exit, Layer, Option } from 'effect';
 import { Aws, AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 
@@ -861,6 +863,11 @@ export class TelemetryQuery extends Context.Service<
     ): Effect.Effect<number | null>;
     /** Prod's requests in each of the last 24 hours, oldest first (the current hour last). */
     traffic(app: string): Effect.Effect<ReadonlyArray<number>>;
+    /**
+     * The first UTC day (`YYYY-MM-DD`) the router's access log counted: when its
+     * log group was created. None without one (`plat dev`) or when it can't be read.
+     */
+    readonly edgeCountingSince: Effect.Effect<Option.Option<string>>;
     /** The stage's page views and edge requests on each of `days` (UTC day starts, oldest first). */
     edgeDays(
       app: string,
@@ -1184,7 +1191,26 @@ export class TelemetryQuery extends Context.Service<
         return toEdgeDays(items, days);
       }, Effect.orDie);
 
+      // A log group's creation never changes, so once found it's kept for the process's life.
+      const edgeCountingSince = yield* Effect.cachedWithTTL(
+        tryAws(() =>
+          aws.logs().send(new DescribeLogGroupsCommand({ logGroupNamePrefix: platformNames.edgeLogGroup })),
+        ).pipe(
+          Effect.map((res) => {
+            const created = res.logGroups?.find(
+              (g) => g.logGroupName === platformNames.edgeLogGroup,
+            )?.creationTime;
+            return created
+              ? Option.some(new Date(created).toISOString().slice(0, 10))
+              : Option.none<string>();
+          }),
+          Effect.orElseSucceed(() => Option.none<string>()),
+        ),
+        (exit) => (Exit.isSuccess(exit) && Option.isSome(exit.value) ? Duration.infinity : Duration.zero),
+      );
+
       return TelemetryQuery.of({
+        edgeCountingSince,
         edgeDays,
         stageTraffic,
         metrics,
