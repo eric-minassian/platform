@@ -1,3 +1,5 @@
+import { PROD_STAGE } from './constants.ts';
+import { type Hosts, hostsOf } from './hosts.ts';
 import { APPSYNC_PUBLISH_PATH, APPSYNC_REALTIME_PATH } from './realtime.ts';
 
 /**
@@ -14,6 +16,8 @@ export interface PlatformRuntimeConfig {
   region: string;
   /** Apex domain apps live under (`ericminassian.com`, or `localhost` locally). */
   domain: string;
+  /** platform.config.ts `hosts`: what decides an aliased app's public URL (`appHost`). */
+  hosts?: Hosts;
   /** Scheme + optional port used to build public URLs (`https`, or `http` + `:3000` locally). */
   publicScheme: 'https' | 'http';
   publicPort?: number;
@@ -97,6 +101,20 @@ export function cognitoJwksUri(
 ): string {
   const base = cfg.jwksBaseUrl ?? `https://cognito-idp.${cfg.region}.amazonaws.com`;
   return `${base.replace(/\/$/, '')}/${userPoolId}/.well-known/jwks.json`;
+}
+
+/**
+ * The host a stage knows itself by, for its sign-in callbacks and the links
+ * it builds: prod's first host in `hosts`, else its own `host`. The route
+ * stays under `host`, which the alias reads.
+ */
+export function appHost(
+  cfg: Pick<PlatformRuntimeConfig, 'hosts'>,
+  app: string,
+  stage: string,
+  host: string,
+): string {
+  return (stage === PROD_STAGE && hostsOf(cfg.hosts, app)[0]) || host;
 }
 
 export function publicUrl(

@@ -123,7 +123,7 @@ export default defineWorker({
       // The router's access log has a subscription of its own (foundation/src/deploy.ts).
       const aggregation =
         batch.logGroup === platformNames.edgeLogGroup
-          ? aggregateEdge(messages, (yield* Settings).platform.domain, yield* servedStages)
+          ? aggregateEdge(messages, (yield* Settings).platform, yield* servedStages)
           : aggregate(messages.flatMap((m) => parseLogMessage(m) ?? []));
       if (aggregation.events === 0) return;
       const newGroups = yield* TelemetryWriter.use((w) => w.apply(aggregation));

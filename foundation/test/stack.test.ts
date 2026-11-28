@@ -4,6 +4,7 @@ import {
   EDGE_LOG_FIELDS,
   emailDomain,
   emailMailFromDomain,
+  NOT_FOUND_PATH,
   type PlatformConfig,
   platformNames,
   REALTIME_TOKEN_PATTERN,
@@ -12,7 +13,7 @@ import { App } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { describe, expect, it } from 'vitest';
 import config from '../../platform.config.ts';
-import { FOUNDATION_STACK, FoundationStack } from '../src/stack.ts';
+import { FOUNDATION_STACK, FoundationStack, routerFunctionName } from '../src/stack.ts';
 
 const account = '123456789012';
 const delegationRole = 'arn:aws:iam::210987654321:role/route53-delegation-platform-ericminassian-com';
@@ -52,7 +53,7 @@ describe('foundation stack', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', { TableName: platformNames.stateTable });
     template.hasResourceProperties('AWS::DynamoDB::Table', { TableName: platformNames.telemetryTable });
     template.hasResourceProperties('AWS::CloudFront::KeyValueStore', { Name: platformNames.keyValueStore });
-    template.hasResourceProperties('AWS::CloudFront::Function', { Name: platformNames.routerFunction });
+    template.hasResourceProperties('AWS::CloudFront::Function', { Name: routerFunctionName() });
     template.hasResourceProperties('AWS::Cognito::UserPool', { UserPoolName: platformNames.userPool });
     template.hasResourceProperties('AWS::IAM::ManagedPolicy', {
       ManagedPolicyName: platformNames.boundaryPolicy,
@@ -63,9 +64,8 @@ describe('foundation stack', () => {
     template.hasResourceProperties('AWS::SNS::Topic', { TopicName: platformNames.alertsTopic });
     template.hasResourceProperties('AWS::SSM::Parameter', { Name: platformNames.runtimeConfigParameter });
     template.hasResourceProperties('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
-    template.hasResourceProperties('AWS::Lambda::Function', {
-      FunctionName: platformNames.realtimeAuthorizer,
-    });
+    for (const fn of [platformNames.realtimeAuthorizer, platformNames.notFoundFunction])
+      template.hasResourceProperties('AWS::Lambda::Function', { FunctionName: fn });
     template.hasResourceProperties('AWS::SES::EmailIdentity', { EmailIdentity: mailDomain });
   });
 
@@ -269,11 +269,12 @@ describe('foundation stack', () => {
   });
 
   it('routes every app host through one distribution and the router function', () => {
-    const router = logicalId('AWS::CloudFront::Function', { Name: platformNames.routerFunction });
+    const router = logicalId('AWS::CloudFront::Function', { Name: routerFunctionName() });
     template.resourceCountIs('AWS::CloudFront::Distribution', 1);
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
-        Aliases: [`*.${config.domain}`],
+        // The apex too, which `hosts` redirects.
+        Aliases: [`*.${config.domain}`, config.domain],
         DefaultCacheBehavior: Match.objectLike({
           TargetOriginId: 'sites',
           // Managed-AllViewerExceptHostHeader: Web Function origins reject a forwarded Host.
@@ -289,8 +290,77 @@ describe('foundation stack', () => {
     });
   });
 
+  it('holds the not-found origin static requests fail over to, which reads only 404 pages', () => {
+    const router = logicalId('AWS::CloudFront::Function', { Name: routerFunctionName() });
+    const notFound = logicalId('AWS::Lambda::Function', { FunctionName: platformNames.notFoundFunction });
+    const sites = logicalId('AWS::S3::Bucket', {
+      BucketName: platformNames.sitesBucket(account, config.region),
+    });
+    template.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({
+        // The router handles its path like any other; the behavior only puts the origin there.
+        CacheBehaviors: Match.arrayWith([
+          Match.objectLike({
+            PathPattern: NOT_FOUND_PATH,
+            TargetOriginId: 'not-found',
+            OriginRequestPolicyId: 'b689b0a8-53d0-40ab-baf2-68738e2966ac',
+            FunctionAssociations: [
+              { EventType: 'viewer-request', FunctionARN: { 'Fn::GetAtt': [router, 'FunctionARN'] } },
+            ],
+          }),
+        ]),
+        Origins: Match.arrayWith([
+          Match.objectLike({ Id: 'not-found', OriginAccessControlId: Match.anyValue() }),
+        ]),
+      }),
+    });
+    const url = logicalId('AWS::Lambda::Url', {
+      TargetFunctionArn: { 'Fn::GetAtt': [notFound, 'Arn'] },
+      AuthType: 'AWS_IAM',
+    });
+    // CloudFront calls it through the URL, and only this distribution may.
+    for (const action of ['lambda:InvokeFunctionUrl', 'lambda:InvokeFunction'])
+      template.hasResourceProperties('AWS::Lambda::Permission', {
+        Action: action,
+        Principal: 'cloudfront.amazonaws.com',
+        FunctionName: { 'Fn::GetAtt': [url, 'FunctionArn'] },
+      });
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: [
+          {
+            Effect: 'Allow',
+            Action: 's3:GetObject',
+            Resource: { 'Fn::Join': ['', [{ 'Fn::GetAtt': [sites, 'Arn'] }, '/*/404.html']] },
+          },
+        ],
+      },
+    });
+  });
+
+  it('names the router after its code, so new code arrives with the origins it needs', () => {
+    expect(routerFunctionName()).toMatch(/^platform-router-[0-9a-f]{10}$/);
+    expect(routerFunctionName()).toBe(routerFunctionName());
+  });
+
+  it('puts the apex on the certificate and the distribution only when `hosts` names it', () => {
+    template.hasResourceProperties('AWS::CertificateManager::Certificate', {
+      DomainName: `*.${config.domain}`,
+      SubjectAlternativeNames: [config.domain],
+    });
+    const { [config.domain]: _apex, ...rest } = config.hosts ?? {};
+    const without = synth({ config: { ...config, hosts: rest } });
+    without.hasResourceProperties('AWS::CertificateManager::Certificate', {
+      DomainName: `*.${config.domain}`,
+      SubjectAlternativeNames: Match.absent(),
+    });
+    without.hasResourceProperties('AWS::CloudFront::Distribution', {
+      DistributionConfig: Match.objectLike({ Aliases: [`*.${config.domain}`] }),
+    });
+  });
+
   it('serves public stores from the storage bucket’s public root, and only there', () => {
-    const router = logicalId('AWS::CloudFront::Function', { Name: platformNames.routerFunction });
+    const router = logicalId('AWS::CloudFront::Function', { Name: routerFunctionName() });
     const storage = logicalId('AWS::S3::Bucket', {
       BucketName: platformNames.storageBucket(account, config.region),
     });
@@ -299,7 +369,7 @@ describe('foundation stack', () => {
     });
     template.hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
-        CacheBehaviors: [
+        CacheBehaviors: Match.arrayWith([
           Match.objectLike({
             PathPattern: '/__platform/storage/*',
             TargetOriginId: 'storage',
@@ -311,7 +381,7 @@ describe('foundation stack', () => {
               { EventType: 'viewer-request', FunctionARN: { 'Fn::GetAtt': [router, 'FunctionARN'] } },
             ],
           }),
-        ],
+        ]),
         Origins: Match.arrayWith([
           Match.objectLike({
             Id: 'storage',

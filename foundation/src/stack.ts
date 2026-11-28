@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   EDGE_FLOOR_JOB,
@@ -6,6 +7,9 @@ import {
   emailDomain,
   emailMailFromDomain,
   HOST_HEADER,
+  NOT_FOUND_FILE,
+  NOT_FOUND_ORIGIN_ID,
+  NOT_FOUND_PATH,
   names,
   PUBLIC_STORAGE_ROOT,
   type PlatformConfig,
@@ -13,6 +17,7 @@ import {
   PROD_STAGE,
   platformNames,
   REALTIME_TOKEN_PATTERN,
+  SITES_ORIGIN_ID,
   STORAGE_DEFAULT_CACHE_CONTROL,
   STORAGE_PATH,
   STORAGE_RESPONSE_HEADERS,
@@ -43,7 +48,7 @@ import {
   aws_ssm as ssm,
   Tags,
 } from 'aws-cdk-lib';
-import { S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
+import { FunctionUrlOrigin, S3BucketOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { CloudFrontTarget, UserPoolDomainTarget } from 'aws-cdk-lib/aws-route53-targets';
 import type { Construct, IConstruct } from 'constructs';
@@ -108,11 +113,15 @@ export class FoundationStack extends Stack {
       validation: acm.CertificateValidation.fromDns(zone),
     });
     tag(zoneCertificate, 'edge');
-    // Every app host. Its validation CNAME lives in the root zone, which this
-    // account can't write: on a first deploy the stack waits until the record
-    // is added in github.com/eric-minassian/aws (docs/SETUP.md).
+    // Every app host, and the apex when `hosts` names it. Its validation CNAME
+    // lives in the root zone, which this account can't write: on a first
+    // deploy the stack waits until the record is added in
+    // github.com/eric-minassian/aws (docs/SETUP.md). The apex validates with
+    // the same record as the wildcard.
+    const servesApex = Boolean(config.hosts?.[config.domain]);
     const edgeCertificate = new acm.Certificate(this, 'EdgeCertificate', {
       domainName: `*.${config.domain}`,
+      ...(servesApex ? { subjectAlternativeNames: [config.domain] } : {}),
       validation: acm.CertificateValidation.fromDns(),
     });
     tag(edgeCertificate, 'edge');
@@ -210,7 +219,7 @@ export class FoundationStack extends Stack {
     });
     routes.applyRemovalPolicy(RemovalPolicy.RETAIN);
     const router = new cloudfront.Function(this, 'Router', {
-      functionName: platformNames.routerFunction,
+      functionName: routerFunctionName(),
       comment: 'platform router',
       runtime: cloudfront.FunctionRuntime.JS_2_0,
       keyValueStore: routes,
@@ -259,6 +268,44 @@ export class FoundationStack extends Stack {
       },
     });
 
+    // The not-found origin, the second of each static request's origin group
+    // (the router makes it with `createRequestOriginGroup`): a file the build
+    // doesn't have gets the build's 404 page (src/not-found.ts). It runs only
+    // for those misses, and reads only 404 pages.
+    const notFoundLogs = new logs.LogGroup(this, 'NotFoundLogs', {
+      logGroupName: `/aws/lambda/${platformNames.notFoundFunction}`,
+      retention: logs.RetentionDays.ONE_WEEK,
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+    const notFound = new NodejsFunction(this, 'NotFound', {
+      functionName: platformNames.notFoundFunction,
+      description: "Serves a static build's 404 page for the files it doesn't have",
+      entry: fileURLToPath(new URL('./not-found.ts', import.meta.url)),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_24_X,
+      architecture: lambda.Architecture.ARM_64,
+      // It reads one small object.
+      memorySize: 256,
+      timeout: Duration.seconds(5),
+      logGroup: notFoundLogs,
+      environment: { SITES_BUCKET: sites.bucketName },
+      bundling: {
+        format: OutputFormat.ESM,
+        target: 'node24',
+        minify: true,
+        // The Node.js runtime ships the AWS SDK v3.
+        externalModules: ['@aws-sdk/*'],
+      },
+    });
+    notFound.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [sites.arnForObjects(`*/${NOT_FOUND_FILE}`)],
+      }),
+    );
+    tag(notFound, 'edge');
+    const notFoundUrl = notFound.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+
     // One distribution for every app. The router function serves static files
     // from the sites bucket or switches the origin to the stage's Web Function.
     // No web ACL: the control plane attaches the edge floor's only while it's on
@@ -268,7 +315,7 @@ export class FoundationStack extends Stack {
     // puts it back.
     const distribution = new cloudfront.Distribution(this, 'Edge', {
       comment: 'platform-edge',
-      domainNames: [`*.${config.domain}`],
+      domainNames: [`*.${config.domain}`, ...(servesApex ? [config.domain] : [])],
       certificate: edgeCertificate,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
@@ -276,7 +323,7 @@ export class FoundationStack extends Stack {
       enableIpv6: true,
       defaultBehavior: {
         origin: S3BucketOrigin.withOriginAccessControl(sites, {
-          originId: 'sites',
+          originId: SITES_ORIGIN_ID,
           originAccessControl: sitesAccess,
         }),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -301,6 +348,21 @@ export class FoundationStack extends Stack {
           cachePolicy,
           // No origin request policy: S3 gets only what the cache key holds.
           responseHeadersPolicy: storageHeaders,
+          functionAssociations: [
+            { function: router, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
+          ],
+        },
+        // Here only so the distribution holds the not-found origin, which static requests' origin
+        // groups name by id. The router handles this path like any other (it's under
+        // `/__platform/`, so never a file) and never leaves a request on this origin.
+        [NOT_FOUND_PATH]: {
+          origin: FunctionUrlOrigin.withOriginAccessControl(notFoundUrl, { originId: NOT_FOUND_ORIGIN_ID }),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachedMethods: cloudfront.CachedMethods.CACHE_GET_HEAD,
+          compress: true,
+          cachePolicy,
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
           functionAssociations: [
             { function: router, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST },
           ],
@@ -743,6 +805,7 @@ export class FoundationStack extends Stack {
       accountId: this.account,
       region: this.region,
       domain: config.domain,
+      ...(config.hosts ? { hosts: config.hosts } : {}),
       publicScheme: 'https',
       artifactsBucket: artifacts.bucketName,
       sitesBucket: sites.bucketName,
@@ -796,6 +859,16 @@ class PublicStorageOrigin extends cloudfront.OriginBase {
     // OAC, not an origin access identity.
     return { originAccessIdentity: '' };
   }
+}
+
+/**
+ * `platformNames.routerFunction` and a hash of the router's code, built with a
+ * stand-in for the route store's id (a token here, which doesn't stay the same
+ * string from one synth to the next; the store itself never changes).
+ */
+export function routerFunctionName(): string {
+  const code = buildRouterFunctionCode({ kvsId: 'routes' });
+  return `${platformNames.routerFunction}-${createHash('sha256').update(code).digest('hex').slice(0, 10)}`;
 }
 
 /** `platform:managed` + `platform:component` on every taggable resource under `scope`. */

@@ -8,6 +8,8 @@
 import {
   type AppRecord,
   bucketStart,
+  hostsOf,
+  type PlatformConfig,
   PROD_STAGE,
   PUBLIC_DIRECTORY_DAYS,
   type PublicApp,
@@ -17,6 +19,7 @@ import { PlatformApi, PUBLIC_CACHE_CONTROL } from '@ericminassian/platform-core/
 import { Clock, Effect, Option } from 'effect';
 import { HttpEffect, HttpServerResponse } from 'effect/http';
 import { HttpApiBuilder } from 'effect/http-api';
+import { Settings } from '../config.ts';
 import type { DeploymentItem, StageItem } from '../records.ts';
 import { Store } from '../store.ts';
 import { TelemetryQuery } from '../telemetry/query.ts';
@@ -35,6 +38,12 @@ export const servesProd = (s: StageItem): boolean =>
   s.currentDeployment !== undefined &&
   (s.status === 'active' || s.status === 'deploying');
 
+/** Where visitors find an app: its first host in platform.config.ts `hosts`, else prod's own URL. */
+export const prodUrl = (platform: Pick<PlatformConfig, 'hosts'>, prod: StageItem): string => {
+  const [host] = hostsOf(platform.hosts, prod.app);
+  return host ? `https://${host}` : prod.url;
+};
+
 /**
  * An app's directory entry. `live` is the deployment prod serves; `built` the
  * one whose build it runs, which differs after a compute switch: the platform
@@ -46,12 +55,13 @@ export function publicApp(
   live: DeploymentItem,
   built: DeploymentItem,
   traffic: { readonly pageViews: readonly number[]; readonly requests: readonly number[] },
+  url = prod.url,
 ): PublicApp {
   const description = live.manifest?.description ?? app.description;
   return {
     name: app.name,
     ...(description ? { description } : {}),
-    url: prod.url,
+    url,
     ...(app.repoVisibility === 'public' ? { source: `https://github.com/${app.repo}` } : {}),
     liveSince: prod.createdAt,
     lastDeployedAt: built.finishedAt ?? built.createdAt,
@@ -67,6 +77,7 @@ export const PublicLive = HttpApiBuilder.group(
   Effect.fn(function* (handlers) {
     const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
+    const settings = yield* Settings;
 
     const entry = Effect.fn('directoryEntry')(function* (app: AppRecord, prod: StageItem, days: number[]) {
       const live = yield* store.getDeployment(prod.currentDeployment!);
@@ -75,7 +86,7 @@ export const PublicLive = HttpApiBuilder.group(
         ? Option.getOrElse(yield* store.getDeployment(live.value.computeSwitchOf), () => live.value)
         : live.value;
       const traffic = yield* telemetry.edgeDays(app.name, PROD_STAGE, days);
-      return Option.some(publicApp(app, prod, live.value, built, traffic));
+      return Option.some(publicApp(app, prod, live.value, built, traffic, prodUrl(settings.platform, prod)));
     });
 
     return handlers.handle('apps', () =>

@@ -87,6 +87,7 @@ export function registerApps(program: Command): void {
           ...(v.listed === undefined
             ? []
             : [`public directory: ${v.listed ? 'listed' : 'not listed (listed: false in plat.config.ts)'}`]),
+          ...(v.hosts?.length ? [`prod also at: ${v.hosts.join(', ')} (hosts in platform.config.ts)`] : []),
           '',
           table(
             v.stages.map((st) => ({

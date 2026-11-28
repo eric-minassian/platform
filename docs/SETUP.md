@@ -251,3 +251,19 @@ Then open a PR in `hello` and check that:
 1. Add `{ github: '<username>', role: 'member' }` to `members` in
    `platform.config.ts` and merge. CI redeploys the platform.
 2. They run `plat login`, which uses their own `gh` token.
+
+## Serving another host
+
+For a name beyond `<app>.ericminassian.com`, such as `www` or the apex:
+
+1. Add it to `hosts` in `platform.config.ts` (an app's prod, or a redirect)
+   and merge. CI redeploys the platform, which writes the host's route-store
+   entry and, for the apex, adds it to the edge certificate and distribution.
+   ACM validates the apex with the wildcard's record from step 5.
+2. In eric-minassian/aws, point it at the edge and `pnpm deploy` there: a
+   label under the domain as a CNAME to `edge.platform.ericminassian.com`
+   (or no record of its own, so the `*` wildcard takes it), the apex as a
+   `CLOUDFRONT` alias to the distribution (the `DistributionDomainName`
+   output of the `platform-foundation` stack).
+3. Deploy the app again, so its sign-in callbacks and the links it builds use
+   the host.

@@ -52,8 +52,13 @@ describe('localDecision', () => {
 
   it('serves built files (with SPA fallback) when no dev server runs', () => {
     const s: LocalRouterState = { record, server, staticDir: '/srv/www' };
-    expect(localDecision(s, '/assets/app.js')).toEqual({ kind: 'file', path: '/srv/www/assets/app.js' });
-    expect(localDecision(s, '/deep/link')).toEqual({ kind: 'file', path: '/srv/www/index.html' });
+    const notFound = '/srv/www/404.html';
+    expect(localDecision(s, '/assets/app.js')).toEqual({
+      kind: 'file',
+      path: '/srv/www/assets/app.js',
+      notFound,
+    });
+    expect(localDecision(s, '/deep/link')).toEqual({ kind: 'file', path: '/srv/www/index.html', notFound });
   });
 
   it('reports a starting server and missing frontends', () => {
@@ -215,6 +220,33 @@ describe('startLocalRouter', () => {
     expect(await js.text()).toBe('console.log(1)');
     expect(await (await fetch(`${base}/some/page`)).text()).toBe('<p>spa</p>');
     expect((await fetch(`${base}/missing.png`)).status).toBe(404);
+  });
+
+  it('answers a file the build doesn’t have with its 404 page, like the edge', async () => {
+    const staticDir = tempDir();
+    writeFileSync(join(staticDir, 'index.html'), '<p>home</p>');
+    writeFileSync(join(staticDir, '404.html'), '<p>not here</p>');
+    const site = localRouteRecord({
+      app: 'docs',
+      stage: 'local',
+      deploymentId: 'd1',
+      hasServer: false,
+      hasStatic: true,
+      serverRoutes: [],
+      spa: false,
+    });
+    const pages = await startLocalRouter({ port: 0, state: () => ({ record: site, staticDir }) });
+    try {
+      const at = `http://127.0.0.1:${(pages.address() as AddressInfo).port}`;
+      const missing = await fetch(`${at}/no/such/page`);
+      expect(missing.status).toBe(404);
+      expect(missing.headers.get('content-type')).toContain('text/html');
+      expect(await missing.text()).toBe('<p>not here</p>');
+      expect((await fetch(`${at}/gone.png`)).status).toBe(404);
+      expect(await (await fetch(`${at}/`)).text()).toBe('<p>home</p>');
+    } finally {
+      pages.close();
+    }
   });
 
   it('runs interceptors first', async () => {

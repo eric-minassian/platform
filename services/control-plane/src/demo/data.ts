@@ -73,6 +73,8 @@ export interface DemoApp {
   readonly db: boolean;
   readonly storage: readonly string[];
   readonly stages: readonly string[];
+  /** Its hosts in platform.config.ts `hosts`, which prod is visited at. */
+  readonly hosts?: readonly string[];
 }
 
 const created = new Date(T0 - 60 * DAY).toISOString();
@@ -158,6 +160,7 @@ export const APPS: readonly DemoApp[] = [
   },
   {
     record: record('shortlinks', 'Short links for talks and posts'),
+    hosts: ['go.example.com'],
     peak: 1.5,
     routes: [
       { method: 'GET', route: '/:slug', share: 0.95, median: 9, spread: 1.8 },

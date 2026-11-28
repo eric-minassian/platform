@@ -202,7 +202,7 @@ lose. App names are 3–30 chars; stages 2–20 (`prod`, `pr-12`, `local`).
 
 | Resource     | Name                                                                                                                                                                  |
 | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com`                                                                                                    |
+| Host         | `todo.ericminassian.com`, previews `todo--pr-12.ericminassian.com`; prod also at its hosts in platform.config.ts `hosts`                                              |
 | Server       | Web Function `todo--prod` (endpoints `live`, `live-b`); request-mode function `todo--prod--web` (aliases `live`, `live-b`, a function URL each)                       |
 | Worker       | `todo--prod--worker`; a handler's own `…--worker--<queue\|event\|cron>-<name>` (`.` and `:` in event types become `_`; hashed past 64)                                |
 | Table        | `todo--prod`                                                                                                                                                          |
@@ -250,6 +250,31 @@ used by `plat dev`):
   deployment id). Every routed stage reports which deployment it serves, for
   the deployer, `plat deploy`/`plat rollback` and the uptime pinger.
 - Unknown hosts get a 404.
+- A host in platform.config.ts `hosts` has an entry of its own, which the
+  platform's deploy writes from the config (`hostRecords`) and deletes once
+  the host is gone; it refuses to replace an app's route. An alias (`a`)
+  names an app's own prod host: the function reads that record and goes on
+  with it, so the app's deploys, rollbacks and destroys never touch the
+  alias. Its files keep the app's own host in `x-platform-host`, sharing
+  cache entries; its server requests see the alias. A redirect (`x`) is a
+  301 to the same path and query on its target. An app's prod knows itself
+  by its first alias (bindings `host` and `url`, its Cognito client's
+  callback and sign-out URLs); its route, the deploy's edge checks and the
+  uptime pinger stay on `<app>.<domain>`. See [DNS](#dns).
+- A file a static build doesn't have: for GET and HEAD the function makes an
+  origin group (`createRequestOriginGroup`) of the sites bucket and the
+  not-found origin, a function URL (`platform-not-found`, OAC) that
+  CloudFront asks when S3 answers 403 (a missing key: the distribution can't
+  list the bucket) or 404. It reads that deployment's `404.html` from the
+  rewritten path and answers with it, status 404, or a plain 404, which the
+  edge keeps a day: a deployment's files never change. CloudFront fails over
+  only GET, HEAD and OPTIONS, so a POST to a file path still gets S3's 403.
+  The distribution holds the origin through a behavior on
+  `/__platform/not-found`, where the router runs as everywhere else.
+- The function is `platform-router-<hash of its code>`. A function updated in
+  place reaches the edges before a distribution change does, so code that
+  needs a new origin would run without it for minutes; a new function is
+  switched to in the same distribution update that adds the origin.
 
 While the whole edge is busy, an AWS WAF web ACL runs before the function:
 the edge floor, which answers a client sending one host more than
@@ -1033,7 +1058,8 @@ writing any instrumentation:
 `GET /v1/public/apps` answers anyone, without signing in: every app whose
 live prod deployment is `listed` (the default; `listed: false` in
 `plat.config.ts` keeps it out), so following deploys and rollbacks. Each has
-its description (the live manifest's, else the record's), URL, when prod was
+its description (the live manifest's, else the record's), URL (its first
+host in `hosts`, if it has one), when prod was
 first deployed and when what it serves went live (a compute switch keeps its
 build's time), the uptime pinger's last result, and page views and edge
 requests for each of the 30 UTC days ending today (today's so far).
@@ -1115,6 +1141,10 @@ The root zone `ericminassian.com` stays in Eric's management account
   plus the ACM validation record for the `*.ericminassian.com` certificate.
 - Explicit records and delegated siblings (orbit, forma, …) beat the wildcard.
   Those names are listed in `reservedAppNames`.
+- Hosts in `hosts` point at the edge from there too: `www` with a CNAME to the
+  edge host, the apex with A and AAAA aliases to the distribution (an apex
+  can't be a CNAME). The edge certificate and distribution carry the apex only
+  while `hosts` names it; ACM validates it with the wildcard's record.
 - App creation also checks DNS, so it never shadows an existing name.
 
 ## Cost model
@@ -1134,6 +1164,7 @@ The root zone `ericminassian.com` stays in Eric's management account
 | Rate limit checks                                   | one DynamoDB write each (~$0.63 per million on demand); refusals an instance already knows about are free                    |
 | Public stores                                       | S3 storage, plus a $0.0004 per 1,000 GET on each edge miss; transfer counts toward CloudFront's; no Lambda                   |
 | Edge floor (AWS WAF)                                | $0.10 for the alarm; while on, $6 a month by the hour (~$0.01/h) plus $0.60 per million requests                             |
+| Not-found origin (static misses)                    | $0 at rest; an invocation and a 404-page read per missing file the edge hasn't kept, inside the free tier                    |
 | Edge access log (page views)                        | ~$0 below CloudFront's 750 bytes of log delivery per request (a line is ~200); kept a day; the processor's invocations cents |
 | Alarms / dashboards / custom metrics                | none per app                                                                                                                 |
 | Alert rules                                         | a cron a minute (~43k invocations, inside the free tier) and one index read; per rule a rollup read a minute: cents          |
@@ -1385,3 +1416,6 @@ docs                     DESIGN.md (this), SETUP.md (one-time runbook)
 | The public directory lists every prod by default                                      | Eric's call (2026-11-26): his site should show every app he runs here without a step per app. What it shows is what a visitor of the app could see; `listed: false` keeps one out.                                                                                                                                                                                                                                                                                                                                                                       |
 | A repo's visibility comes from the CI deploy's OIDC token                             | The token already states it, for free, on every prod deploy. Asking GitHub on each read would add a dependency and a rate limit to a public endpoint.                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Long-running services are removed (0.5.0)                                             | Eric's call (2026-11-28). A service's container was billed all month whether it was used or not (its vCPU, memory and public IPv4 address), the only part of an app billed while idle: about $6 of the platform's ~$13 a month. A stream source is listened to by a cron for a while each run instead, with its own `memoryMb` and `timeoutSeconds`, merging what arrives into what it stored.                                                                                                                                                           |
+| Hosts beyond `<app>.<domain>` are platform config: route-store aliases and redirects  | Eric's site moved onto the platform at www, with the apex sent there (2026-11-28). Hosts in `plat.config.ts` would let any member claim any name; platform.config.ts is reviewed like `members`. An alias reads the app's own route, so deploys, rollbacks and previews need nothing new, and `www` stays a reserved app name.                                                                                                                                                                                                                           |
+| A static build's missing files fail over to a function that serves its 404 page       | CloudFront's custom error responses are per distribution, so they'd replace servers' own 4xx too, and a viewer-response function can't set a body. An origin group the router makes per request touches only static GETs, and runs a function only on misses. Tried on a throwaway distribution first (2026-11-28).                                                                                                                                                                                                                                      |
+| The router function is named after its code                                           | Code updated in place reaches the edges before a distribution change, so code that needs a new origin (the not-found one) would run for minutes without it. A new function arrives in the same distribution update.                                                                                                                                                                                                                                                                                                                                      |
