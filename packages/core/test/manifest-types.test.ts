@@ -17,7 +17,9 @@ type DeepReadonly<T> = T extends readonly (infer U)[]
     ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
     : T;
 type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-const configFitsSchema: Same<keyof AppConfig, keyof ManifestInput> = true;
+/** Fields the schema still knows only to refuse them with what replaced them. */
+type Removed = 'services';
+const configFitsSchema: Same<keyof AppConfig, Exclude<keyof ManifestInput, Removed>> = true;
 export const _checks = [
   configFitsSchema,
   (c: AppConfig): DeepReadonly<ManifestInput> => c,

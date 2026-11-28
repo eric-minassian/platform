@@ -1,7 +1,6 @@
 export * from './api.ts';
 export * from './auth.ts';
 export * from './bindings.ts';
-export * from './compute.ts';
 export * from './config.ts';
 export * from './constants.ts';
 export * from './cron.ts';

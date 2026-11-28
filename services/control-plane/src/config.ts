@@ -5,12 +5,7 @@
  * a failed read is retried on the next use.
  */
 import { GetParameterCommand, GetParametersByPathCommand } from '@aws-sdk/client-ssm';
-import {
-  type PlatformConfig,
-  type PlatformRuntimeConfig,
-  platformNames,
-  type ResolvedManifest,
-} from '@ericminassian/platform-core';
+import { type PlatformConfig, type PlatformRuntimeConfig, platformNames } from '@ericminassian/platform-core';
 import { Config, Context, Effect, Exit, Layer, Option, Redacted } from 'effect';
 import platformConfig from '../../../platform.config.ts';
 import { Aws, tryAws } from './aws.ts';
@@ -126,16 +121,4 @@ export function logRetentionDays(platform: PlatformConfig, stage: string): numbe
   return stage === 'prod'
     ? platform.telemetry.logRetentionDays.prod
     : platform.telemetry.logRetentionDays.other;
-}
-
-/** Why a stage can't run this manifest's long-running services, when it declares more than the limit. */
-export function servicesLimitIssue(
-  platform: PlatformConfig,
-  manifest: Pick<ResolvedManifest, 'services'>,
-): string | undefined {
-  const declared = Object.keys(manifest.services);
-  const limit = platform.limits.servicesPerApp;
-  return declared.length > limit
-    ? `plat.config.ts declares ${declared.length} services (${declared.join(', ')}); an app may have ${limit}`
-    : undefined;
 }

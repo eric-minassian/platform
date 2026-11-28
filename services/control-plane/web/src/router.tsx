@@ -213,14 +213,6 @@ const routeTree = rootRoute.addChildren([
         { time: true },
       ),
       child(
-        'services',
-        'Services',
-        page(() => import('./pages/app/services.tsx'), 'ServicesPage'),
-        {
-          time: true,
-        },
-      ),
-      child(
         'email',
         'Email',
         page(() => import('./pages/app/email.tsx'), 'EmailPage'),

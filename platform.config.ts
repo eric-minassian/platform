@@ -38,7 +38,6 @@ export default definePlatformConfig({
     // could be over its limit; the busiest minute before it (2026-11) was 748. Remove both for no floor.
     edgeRequestsPerMinute: 1000,
     edgeFloorAt: 1000,
-    servicesPerApp: 3,
   },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });

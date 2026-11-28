@@ -68,7 +68,6 @@ export interface DemoApp {
   }>;
   readonly metrics: ReadonlyArray<{ name: string; unit?: string; perMinute: number; value?: number }>;
   readonly limits: readonly string[];
-  readonly services: readonly string[];
   readonly email: boolean;
   readonly realtime: boolean;
   readonly db: boolean;
@@ -115,7 +114,6 @@ export const APPS: readonly DemoApp[] = [
       { name: 'feed_bytes', unit: 'KB', perMinute: 1.2, value: 180 },
     ],
     limits: ['search-per-user'],
-    services: [],
     email: false,
     realtime: false,
     db: true,
@@ -133,7 +131,6 @@ export const APPS: readonly DemoApp[] = [
     jobs: [{ kind: 'cron', name: 'compact', perHour: 1, median: 2300 }],
     metrics: [{ name: 'notes_saved', perMinute: 4 }],
     limits: [],
-    services: [],
     email: false,
     realtime: true,
     db: true,
@@ -153,7 +150,6 @@ export const APPS: readonly DemoApp[] = [
     ],
     metrics: [],
     limits: ['send-per-hour'],
-    services: ['imap-sync'],
     email: true,
     realtime: false,
     db: true,
@@ -170,7 +166,6 @@ export const APPS: readonly DemoApp[] = [
     jobs: [],
     metrics: [],
     limits: [],
-    services: [],
     email: false,
     realtime: false,
     db: true,

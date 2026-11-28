@@ -29,7 +29,7 @@ import { DateTime, Effect, Option, Schema } from 'effect';
 import { HttpApiBuilder } from 'effect/http-api';
 import { Artifacts } from '../artifacts.ts';
 import { actorOf } from '../authz.ts';
-import { Settings, servicesLimitIssue } from '../config.ts';
+import { Settings } from '../config.ts';
 import { WorkerJobs } from '../jobs/call.ts';
 import { type DeploymentItem, Store } from '../store.ts';
 import { Access, publicDeployment, publicStage } from './access.ts';
@@ -138,8 +138,6 @@ export const DeploymentsLive = HttpApiBuilder.group(
               `email.dailyLimit is ${manifest.email.dailyLimit}, above the platform's ceiling of ${emailsPerDay} recipients a day (limits.emailsPerDay in platform.config.ts)`,
             );
           }
-          const overLimit = servicesLimitIssue(settings.platform, manifest);
-          if (overLimit) return yield* InvalidManifest.of(overLimit);
           // Bundles carry the SDK's runtime, and the engine's bindings and job payloads changed
           // under older ones (jobs are pushed since 0.4.0).
           if (!sdkSupported(payload.sdk))

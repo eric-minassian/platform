@@ -261,14 +261,7 @@ export type PublicAppsResponse = typeof PublicAppsResponse.Type;
 // Stages and deployments
 // ---------------------------------------------------------------------------
 
-/** `services.zip` holds `<service>/index.mjs` (+ `.map`) for each long-running service. */
-export const ArtifactFile = Schema.Literals([
-  'manifest.json',
-  'server.zip',
-  'worker.zip',
-  'static.zip',
-  'services.zip',
-]);
+export const ArtifactFile = Schema.Literals(['manifest.json', 'server.zip', 'worker.zip', 'static.zip']);
 export type ArtifactFile = typeof ArtifactFile.Type;
 
 export const PresignedPost = Schema.Struct({
@@ -302,7 +295,6 @@ export const CreateDeploymentResponse = Schema.Struct({
     'server.zip': optional(PresignedPost),
     'worker.zip': optional(PresignedPost),
     'static.zip': optional(PresignedPost),
-    'services.zip': optional(PresignedPost),
   }),
 });
 export type CreateDeploymentResponse = typeof CreateDeploymentResponse.Type;
@@ -364,7 +356,7 @@ export const RouteStats = Schema.Struct({
 });
 export type RouteStats = typeof RouteStats.Type;
 
-export const JobKind = Schema.Literals(['queue', 'event', 'cron', 'invoke', 'service']);
+export const JobKind = Schema.Literals(['queue', 'event', 'cron', 'invoke']);
 export type JobKind = typeof JobKind.Type;
 
 export const JobStats = Schema.Struct({
@@ -612,7 +604,7 @@ export type ErrorGroup = typeof ErrorGroup.Type;
 export const UpdateErrorRequest = Schema.Struct({ status: ErrorStatus });
 export type UpdateErrorRequest = typeof UpdateErrorRequest.Type;
 
-/** Log stream of a line: `web`, `worker`, or `service:<name>` for a long-running service. */
+/** Log stream of a line: `web` or `worker`. */
 export const LogStream = Schema.String;
 export type LogStream = typeof LogStream.Type;
 
@@ -776,28 +768,6 @@ export type UptimeTraffic = typeof UptimeTraffic.Type;
 export const UptimePoint = Schema.Union([UptimeCheck, UptimeTraffic]);
 export type UptimePoint = typeof UptimePoint.Type;
 
-/** Monthly cost of one container if it runs all month (`estimateContainerCost`). */
-export const MonthlyContainerCost = Schema.Struct({
-  computeUsd: Schema.Finite,
-  publicIpv4Usd: Schema.Finite,
-  totalUsd: Schema.Finite,
-});
-
-/**
- * Something billed for as long as it runs, estimated from its size because
- * Cost Explorer lags a day and doesn't attribute every part of it to the
- * app (a container's public IPv4 address).
- */
-export const AlwaysOnCost = Schema.Struct({
-  stage: Schema.String,
-  kind: Schema.Literal('service'),
-  name: Schema.String,
-  /** `0.25 vCPU · 512 MB · Spot`. */
-  detail: Schema.String,
-  monthly: MonthlyContainerCost,
-});
-export type AlwaysOnCost = typeof AlwaysOnCost.Type;
-
 /** A non-preview stage's server: how it runs, and (prod) what each mode would cost. */
 export const StageCompute = Schema.Struct({
   stage: Schema.String,
@@ -814,8 +784,6 @@ export const CostResponse = Schema.Struct({
   currency: Schema.Literal('USD'),
   days: Schema.Array(Schema.Struct({ date: Schema.String, usd: Schema.Finite })),
   monthToDateUsd: Schema.Finite,
-  /** Services of the app's non-preview stages (previews run theirs for minutes after a deploy). */
-  alwaysOn: optional(Schema.Array(AlwaysOnCost)),
   /** Servers of the app's non-preview stages (previews run request mode). */
   compute: optional(Schema.Array(StageCompute)),
 });
@@ -888,80 +856,6 @@ export const UrlResponse = Schema.Struct({ url: Schema.String });
 export type UrlResponse = typeof UrlResponse.Type;
 
 export const CronRunResponse = Schema.Struct({ started: Schema.String });
-
-// ---------------------------------------------------------------------------
-// Long-running services
-// ---------------------------------------------------------------------------
-
-/**
- * - `running`: every desired task is up and the latest rollout finished
- * - `starting`: a rollout or replacement is under way
- * - `failing`: tasks keep stopping before they settle, or the last rollout failed
- * - `stopped`: scaled to zero (a preview past its minutes, or `plat services stop`)
- */
-export const ServiceState = Schema.Literals(['running', 'starting', 'failing', 'stopped']);
-export type ServiceState = typeof ServiceState.Type;
-
-export const ServiceInfo = Schema.Struct({
-  name: Schema.String,
-  /** Size and capacity the live deployment declares. */
-  cpu: Schema.Finite,
-  memoryMb: Schema.Finite,
-  spot: Schema.Boolean,
-  state: ServiceState,
-  desired: Schema.Finite,
-  running: Schema.Finite,
-  pending: Schema.Finite,
-  /** Deployment whose build the service runs. */
-  deployment: optional(Schema.String),
-  /** When the current task started. */
-  startedAt: optional(Schema.String),
-  /** When a preview's stop schedule scales it to zero. */
-  stopsAt: optional(Schema.String),
-  /** The task that stopped most recently (ECS keeps stopped tasks for about an hour). */
-  lastStop: optional(
-    Schema.Struct({ at: Schema.String, reason: Schema.String, exitCode: optional(Schema.Finite) }),
-  ),
-  /** Recent ECS service events, newest first. */
-  events: Schema.Array(Schema.Struct({ at: Schema.String, message: Schema.String })),
-  /** Containers started in the range: deploys, crashes, Spot replacements. */
-  starts: Schema.Finite,
-  /** Runs of `run` that failed and were rerun in the same container, in the range. */
-  failedRuns: Schema.Finite,
-  /** CPU and memory use, % of the task's size (ECS's per-service CloudWatch metrics). */
-  points: Schema.Array(
-    Schema.Struct({
-      ts: Schema.String,
-      cpu: Schema.NullOr(Schema.Finite),
-      memory: Schema.NullOr(Schema.Finite),
-    }),
-  ),
-  /** If it ran all month. */
-  monthly: MonthlyContainerCost,
-});
-export type ServiceInfo = typeof ServiceInfo.Type;
-
-export const ServicesResponse = Schema.Struct({
-  app: Schema.String,
-  stage: Schema.String,
-  res: Resolution,
-  services: Schema.Array(ServiceInfo),
-});
-export type ServicesResponse = typeof ServicesResponse.Type;
-
-export const StartServiceRequest = Schema.Struct({
-  /** Stop it again after this many minutes. Previews default to the service's `previewMinutes`. */
-  minutes: optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1440 }))),
-});
-export type StartServiceRequest = typeof StartServiceRequest.Encoded;
-
-export const ServiceActionResponse = Schema.Struct({
-  name: Schema.String,
-  /** Tasks the service now asks for (1 running, 0 stopped). */
-  desired: Schema.Finite,
-  stopsAt: optional(Schema.String),
-});
-export type ServiceActionResponse = typeof ServiceActionResponse.Type;
 export type CronRunResponse = typeof CronRunResponse.Type;
 
 // ---------------------------------------------------------------------------
@@ -976,7 +870,6 @@ export const AdminOverview = Schema.Struct({
     emailsPerDay: Schema.Finite,
     edgeRequestsPerMinute: optional(Schema.Finite),
     edgeFloorAt: optional(Schema.Finite),
-    servicesPerApp: Schema.Finite,
   }),
   apps: Schema.Finite,
   stages: Schema.Finite,

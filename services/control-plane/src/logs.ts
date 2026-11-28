@@ -1,8 +1,7 @@
 /**
  * Log search, stats, context, live tail, traces and Logs Insights over an app
- * stage's CloudWatch log groups (`/platform/apps/<app>/<stage>/{web,worker}`,
- * and `services/<name>` for each long-running service). The Insights queries
- * themselves are built in insights.ts.
+ * stage's CloudWatch log groups (`/platform/apps/<app>/<stage>/{web,worker}`).
+ * The Insights queries themselves are built in insights.ts.
  */
 import {
   DescribeLogGroupsCommand,
@@ -26,7 +25,6 @@ import {
   type LogStream,
   type LogsResponse,
   names,
-  RESOURCE_KEY_PATTERN,
   type TelemetryEvent,
   type TraceFilters,
   type TracesResponse,
@@ -65,33 +63,16 @@ import {
 } from './insights.ts';
 import { parseLogMessage } from './telemetry/aggregate.ts';
 
-const SERVICE_STREAM = 'service:';
+const isStream = (name: string): name is 'web' | 'worker' => name === 'web' || name === 'worker';
 
 /** The log group a stream is read from; none for a name that isn't one of the stage's streams. */
 export function logGroupOf(app: string, stage: string, stream: LogStream): string | undefined {
-  if (stream === 'web' || stream === 'worker') return names.logGroup(app, stage, stream);
-  if (!stream.startsWith(SERVICE_STREAM)) return undefined;
-  const key = stream.slice(SERVICE_STREAM.length);
-  return RESOURCE_KEY_PATTERN.test(key) ? names.serviceLogGroup(app, stage, key) : undefined;
+  return isStream(stream) ? names.logGroup(app, stage, stream) : undefined;
 }
 
 /** The stream a log group belongs to, from its name or ARN (Live Tail reports either; Logs Insights' `@log` is `<account>:<name>`). */
 export function streamOfLogGroup(group: string): LogStream {
-  const service = /\/services\/([^/:]+)(?::\*)?$/.exec(group);
-  if (service) return `${SERVICE_STREAM}${service[1]}`;
   return /\/worker(?::\*)?$/.test(group) ? 'worker' : 'web';
-}
-
-/**
- * The stream of a log group under the stage's prefix (the rest of its name):
- * `web`, `worker` or `services/<name>`. `web.local` (Web Function
- * environments) and anything else is none.
- */
-function streamUnderStage(rest: string): LogStream | undefined {
-  if (rest === 'web' || rest === 'worker') return rest;
-  if (!rest.startsWith('services/')) return undefined;
-  const key = rest.slice('services/'.length);
-  return RESOURCE_KEY_PATTERN.test(key) ? `${SERVICE_STREAM}${key}` : undefined;
 }
 
 /** The streams a search reads: those both `stream` and `filters.streams` allow (undefined: every one). */
@@ -180,9 +161,7 @@ export function describe(e: TelemetryEvent): string {
     case 'limit':
       return `limit ${e.name} ${e.ok ? 'ok' : 'over'}`;
     case 'env':
-      return e.runtime === 'service'
-        ? `service ${e.name ?? ''} container ${e.event}${e.reason ? ` (${e.reason})` : ''}`
-        : `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
+      return `${e.runtime} environment ${e.event}${e.initMs ? ` (init ${e.initMs}ms)` : ''}`;
     default:
       return absurd(e);
   }
@@ -291,7 +270,7 @@ const FINISHED = new Set(['Complete', 'Failed', 'Cancelled', 'Timeout']);
 /** How long a request waits for its Logs Insights queries. */
 const QUERY_TIMEOUT = '25 seconds';
 
-const invalidStream = () => BadRequest.of('stream must be web, worker or service:<name>');
+const invalidStream = () => BadRequest.of('stream must be web or worker');
 
 export class Logs extends Context.Service<
   Logs,
@@ -372,9 +351,7 @@ export class Logs extends Context.Service<
 
       /**
        * Every stream of the stage with its log group: web and worker when the
-       * stage has them, and each service log group, including those of
-       * services a later deploy dropped (the engine removes service log
-       * groups only with the stage).
+       * stage has them. `web.local` (Web Function environments) isn't one.
        */
       const stageStreams = Effect.fnUntraced(function* (app: string, stage: string) {
         const prefix = names.logGroupPrefix(app, stage);
@@ -385,15 +362,12 @@ export class Logs extends Context.Service<
             aws.logs().send(new DescribeLogGroupsCommand({ logGroupNamePrefix: prefix, nextToken })),
           );
           for (const { logGroupName: group } of res.logGroups ?? []) {
-            const stream = group ? streamUnderStage(group.slice(prefix.length)) : undefined;
-            if (group && stream) streams.push({ stream, group });
+            const stream = group?.slice(prefix.length);
+            if (group && stream && isStream(stream)) streams.push({ stream, group });
           }
           nextToken = res.nextToken;
         } while (nextToken);
-        const order = (s: LogStream) => (s === 'web' ? 0 : s === 'worker' ? 1 : 2);
-        return streams.toSorted(
-          (a, b) => order(a.stream) - order(b.stream) || a.stream.localeCompare(b.stream),
-        );
+        return streams.toSorted((a, b) => a.stream.localeCompare(b.stream));
       });
 
       /** Each named stream with its log group; a name that isn't a stream fails with `invalid`. */

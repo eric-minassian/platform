@@ -82,7 +82,6 @@ describe.skipIf(!findEmulatorBinary() && !process.env.PLAT_EMULATOR_ENDPOINT)(
         },
         webMode: 'function',
         webCompute: 'request',
-        servicesMode: 'external',
       });
     };
     const lambda = () => engineContext(engine).clients.lambda;

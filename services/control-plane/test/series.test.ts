@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AlertRules } from '../src/alerts/rules.ts';
 import { cloudWatchSeriesRes } from '../src/cloudwatch.ts';
 import { toRealtimeSeriesResponse } from '../src/jobs/realtime.ts';
-import { toServiceSeriesResponse } from '../src/jobs/services.ts';
 import type { StageItem } from '../src/store.ts';
 import {
   type SeriesFamily,
@@ -118,12 +117,13 @@ describe('series from rollups', () => {
     ]);
   });
 
-  it('answers jobs by job and by outcome, leaving out rows that only count service starts', () => {
+  it('answers jobs by job and by outcome, leaving out rows of long-running services', () => {
     const rows = [
       { sk: `${at(0)}#queue:emails`, kind: 'queue', name: 'emails', ok: 3, error: 1 },
       { sk: `${at(0)}#cron:digest`, kind: 'cron', name: 'digest', ok: 1 },
       { sk: `${at(1)}#queue:emails`, kind: 'queue', name: 'emails', error: 2 },
-      { sk: `${at(1)}#service:ais`, kind: 'service', name: 'ais', starts: 1 },
+      // Stored before services were removed, until its TTL runs out.
+      { sk: `${at(1)}#service:ais`, kind: 'service', name: 'ais', ok: 4, error: 1, l3: 5, starts: 1 },
     ];
     expect(lines(answer(rows, { metric: 'jobs', stat: 'percent', filter: { outcome: 'error' } }))).toEqual({
       all: [20, 100, null],
@@ -141,6 +141,8 @@ describe('series from rollups', () => {
         answer(rows, { metric: 'jobs', stat: 'count', filter: { jobs: ['cron:digest'], outcome: 'ok' } }),
       ),
     ).toEqual({ all: [1, 0, 0] });
+    expect(lines(answer(rows, { metric: 'job_duration', stat: 'count' }))).toEqual({ all: [0, 0, 0] });
+    expect(windowValue(rows, { metric: 'jobs', stat: 'count' }, 'job', T0, T0 + 3 * MIN)).toBe(7);
   });
 
   it('answers custom metrics in their own unit: sums, averages, maxima and counts', () => {
@@ -320,30 +322,6 @@ describe('series from CloudWatch', () => {
       series: [{ key: 'all', values: [3, 4, 0] }],
     });
   });
-
-  it('answers services’ usage per service or for all of them, null where ECS reported nothing', () => {
-    const results = [
-      result('s0', [
-        [0, 40],
-        [5, 60],
-      ]),
-      result('s1', [[0, 20]]),
-    ];
-    const q = { measure: 'cpu', stat: 'avg', grouped: true } as const;
-    const grouped = toServiceSeriesResponse(results, ['worker', 'api'], q, range);
-    expect(grouped.unit).toBe('percent');
-    expect(lines(grouped)).toEqual({ api: [20, null, null], worker: [40, 60, null] });
-    expect(
-      lines(toServiceSeriesResponse(results, ['worker', 'api'], { ...q, grouped: false }, range)),
-    ).toEqual({
-      all: [30, 60, null],
-    });
-    expect(
-      lines(
-        toServiceSeriesResponse(results, ['worker', 'api'], { ...q, stat: 'max', grouped: false }, range),
-      ),
-    ).toEqual({ all: [40, 60, null] });
-  });
 });
 
 // ------------------------------------------------------------------ the endpoints
@@ -445,7 +423,7 @@ describe('series endpoint', () => {
     }),
   );
 
-  effect.effect('reads realtime and services from CloudWatch', () =>
+  effect.effect('reads realtime from CloudWatch', () =>
     Effect.gen(function* () {
       const measures: string[] = [];
       const { request, bob } = yield* setup({
@@ -465,15 +443,6 @@ describe('series endpoint', () => {
       );
       assert.strictEqual(realtime.status, 200);
       assert.deepStrictEqual(measures, ['errors']);
-      // Without container compute there is no usage to read: one line of nulls.
-      const range = { from: String(T0), to: String(T0 + 10 * MIN), res: '5m' };
-      const services = yield* request(
-        seriesPath({ metric: 'service', stat: 'max', filter: { measure: 'cpu', names: ['ais'] } }, range),
-        { headers: bob },
-      );
-      assert.deepStrictEqual(((yield* json(services)) as { series: unknown }).series, [
-        { key: 'all', values: [null, null, null] },
-      ]);
     }),
   );
 });

@@ -64,10 +64,6 @@ const LEVEL_TEXT: Record<string, string> = {
   system: 'text-subtle',
 };
 
-/** A service's stream is `service:<name>`; its name fits the column. */
-export const streamLabel = (stream: string): string =>
-  stream.startsWith('service:') ? stream.slice(8) : stream;
-
 /** Keys that follow a line as newer lines arrive above it (an index wouldn't). */
 export const lineKeys = (lines: readonly LogLine[]): string[] =>
   keyed(lines, (l) => `${l.ts}|${l.stream}|${l.message}`).map((k) => k.key);
@@ -121,9 +117,7 @@ function Cells({ line, q, time }: { line: LogLine; q: string | undefined; time: 
         />
         {level}
       </span>
-      <span className="hidden truncate text-muted-foreground @2xl:block" title={line.stream}>
-        {streamLabel(line.stream)}
-      </span>
+      <span className="hidden truncate text-muted-foreground @2xl:block">{line.stream}</span>
       <span className={cn('truncate', level === 'system' ? 'text-subtle' : 'text-foreground')}>
         {highlight(line.message, q)}
       </span>

@@ -1,6 +1,6 @@
 {
   "name": "@ericminassian/platform-engine",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Idempotent AWS SDK drivers that provision and deploy platform stages (no CloudFormation).",
   "license": "MIT",
   "repository": {
@@ -39,8 +39,6 @@
     "@aws-sdk/client-cloudwatch-logs": "^3.1169.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1169.0",
     "@aws-sdk/client-dynamodb": "^3.1169.0",
-    "@aws-sdk/client-ecr": "^3.1169.0",
-    "@aws-sdk/client-ecs": "^3.1169.0",
     "@aws-sdk/client-eventbridge": "^3.1169.0",
     "@aws-sdk/client-iam": "^3.1169.0",
     "@aws-sdk/client-lambda": "^3.1169.0",
@@ -54,9 +52,7 @@
     "@aws-sdk/client-sts": "^3.1169.0",
     "@aws-sdk/signature-v4a": "^3.1138.0",
     "@ericminassian/platform-core": "workspace:*",
-    "@smithy/hash-node": "^4.5.2",
     "@smithy/node-http-handler": "^4.14.2",
-    "@smithy/signature-v4": "^5.7.5",
     "fflate": "^0.8.3"
   },
   "devDependencies": {

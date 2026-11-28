@@ -16,7 +16,6 @@ import {
   type SeriesGroupBy,
   type SeriesMetric,
   type SeriesStat,
-  SERVICE_MEASURES,
   STATUS_CLASSES,
 } from '@ericminassian/platform-core';
 import { Option } from 'effect';
@@ -46,7 +45,6 @@ export const METRIC_LABELS: Record<SeriesMetric, string> = {
   custom: 'Custom metric',
   rate_limit: 'Rate limit checks',
   realtime: 'Realtime',
-  service: 'Service',
 };
 
 export const STAT_LABELS: Record<SeriesStat, string> = {
@@ -90,16 +88,12 @@ function resetFor(q: NamedSeriesQuery, metric: SeriesMetric): NamedSeriesQuery {
     id: q.id,
     metric,
     stat: METRIC_STATS[metric][0]!,
-    ...(metric === 'realtime'
-      ? { filter: { measure: 'events' } }
-      : metric === 'service'
-        ? { filter: { measure: 'cpu' } }
-        : {}),
+    ...(metric === 'realtime' ? { filter: { measure: 'events' } } : {}),
     ...(q.hidden ? { hidden: q.hidden } : {}),
   };
 }
 
-type KnownKind = 'routes' | 'jobs' | 'custom' | 'limits' | 'services';
+type KnownKind = 'routes' | 'jobs' | 'custom' | 'limits';
 
 /** Where each metric's filter values come from. */
 const KNOWN_KIND: Partial<Record<SeriesMetric, KnownKind>> = {
@@ -110,7 +104,6 @@ const KNOWN_KIND: Partial<Record<SeriesMetric, KnownKind>> = {
   job_duration: 'jobs',
   custom: 'custom',
   rate_limit: 'limits',
-  service: 'services',
 };
 
 const nothing = Atom.make(AsyncResult.initial<PickerOption[]>());
@@ -139,10 +132,6 @@ const knownValuesAtom = family((k: { app: string; stage: string; time: TimeSearc
     limits: () =>
       options(fresh(ApiClient.query('observe', 'limits', { params, query, timeToLive })), (r) =>
         r.limits.map((l) => ({ value: l.name, hint: fmtNum(l.allowed + l.denied) })),
-      ),
-    services: () =>
-      options(fresh(ApiClient.query('observe', 'services', { params, query, timeToLive })), (r) =>
-        r.services.map((x) => ({ value: x.name })),
       ),
   };
   return read[k.kind]();
@@ -304,30 +293,21 @@ export function QueryRow({
           onChange={(o) => setFilter({ outcome: o === 'any' ? undefined : o })}
         />
       )}
-      {(query.metric === 'custom' || query.metric === 'rate_limit' || query.metric === 'service') && (
+      {(query.metric === 'custom' || query.metric === 'rate_limit') && (
         <ValuePicker
-          label={
-            query.metric === 'custom'
-              ? 'Pick a metric'
-              : query.metric === 'rate_limit'
-                ? 'All limits'
-                : 'All services'
-          }
-          name={`${query.metric === 'custom' ? 'Metrics' : query.metric === 'rate_limit' ? 'Limits' : 'Services'}${of}`}
+          label={query.metric === 'custom' ? 'Pick a metric' : 'All limits'}
+          name={`${query.metric === 'custom' ? 'Metrics' : 'Limits'}${of}`}
           options={known}
           selected={f.names ?? []}
           onChange={(v) => setFilter({ names: v })}
-          allowCustom={query.metric !== 'service'}
+          allowCustom
         />
       )}
-      {(query.metric === 'realtime' || query.metric === 'service') && (
+      {query.metric === 'realtime' && (
         <Choice
           label={`Measure${of}`}
           value={f.measure ?? ''}
-          options={(query.metric === 'realtime' ? REALTIME_MEASURES : SERVICE_MEASURES).map((m) => ({
-            value: m,
-            label: m,
-          }))}
+          options={REALTIME_MEASURES.map((m) => ({ value: m, label: m }))}
           onChange={(measure) => setFilter({ measure })}
           className="min-w-28"
         />

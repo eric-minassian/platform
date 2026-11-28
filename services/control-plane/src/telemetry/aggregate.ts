@@ -214,27 +214,13 @@ export function aggregate(events: readonly TelemetryEvent[]): Aggregation {
       }
       case 'env': {
         if (e.event !== 'start') break;
-        const field = { web: 'webStarts', worker: 'workerStarts', service: 'serviceStarts' }[e.runtime];
+        const field = { web: 'webStarts', worker: 'workerStarts' }[e.runtime];
         // A server's INIT, for the compute chooser's cold starts.
         const init: Record<string, number> =
           e.runtime === 'web' && e.initMs !== undefined ? { webInitMs: e.initMs, webInits: 1 } : {};
         for (const res of RESOLUTIONS) {
           const b = bucketStart(ts, res);
           bump(telemetryKeys.stage(app, stage, res), telemetryKeys.time(b), res, b, { [field]: 1, ...init });
-        }
-        // A service's container starts sit next to its runs, on its job series.
-        if (e.runtime === 'service' && e.name) {
-          for (const res of RESOLUTIONS) {
-            const b = bucketStart(ts, res);
-            bump(
-              telemetryKeys.job(app, stage, res),
-              `${telemetryKeys.time(b)}#service:${e.name}`,
-              res,
-              b,
-              { starts: 1 },
-              { kind: 'service', name: e.name },
-            );
-          }
         }
         break;
       }

@@ -227,7 +227,7 @@ export function series(
         lines.push({ key: q.groupBy === 'name' ? l : 'all', values: ts.map((t) => value(bucket(t, 3 + i))) });
       }
     }
-  } else if (q.metric === 'realtime') {
+  } else {
     const measure = q.filter?.measure ?? 'events';
     const per = { events: 90, publishes: 30, subscribes: 6, errors: 0.05 }[measure] ?? 1;
     lines.push({
@@ -236,18 +236,6 @@ export function series(
         ? ts.map((t) => Math.round(per * (step / MIN) * diurnal(t) * (0.6 + 0.8 * noise(t, 11)) * k))
         : [],
     });
-  } else {
-    const measure = q.filter?.measure ?? 'cpu';
-    for (const s of app.services) {
-      if (q.filter?.names?.length && !q.filter.names.includes(s)) continue;
-      lines.push({
-        key: q.groupBy === 'name' ? s : 'all',
-        values: ts.map((t) => {
-          const base = measure === 'cpu' ? 6 + 18 * diurnal(t) : 38 + 6 * diurnal(t);
-          return Math.round((base * (q.stat === 'max' ? 1.6 : 1) + 4 * noise(t, 13)) * 10) / 10;
-        }),
-      });
-    }
   }
 
   const ranked = lines
@@ -519,16 +507,6 @@ function workerLines(app: DemoApp, stage: string, minute: number): LogLine[] {
         : `${job.kind} ${job.name} → ok · ${(job.median / 1000).toFixed(2)}s`,
       trace,
     });
-  }
-  for (const s of app.services) {
-    if (noise(minute, 51) < 0.2) {
-      out.push({
-        ts: new Date(minute + 30_000).toISOString(),
-        stream: `service:${s}`,
-        level: 'info',
-        message: `${s}: synced 14 messages`,
-      });
-    }
   }
   if (noise(minute, 61) < 0.08) {
     out.push({

@@ -22,8 +22,8 @@ const app = defineApp({
   worker: { entry: 'src/worker.ts', timeoutSeconds: 300, memoryMb: 512 },
   queues: {
     // Deploys and destroys, in a function of their own: Lambda's full 15 minutes, and room for
-    // artifacts and service images. One run each: the watchdog fails a deploy whose run died, and
-    // a deploy is retried by deploying again, never behind the author's back.
+    // artifacts. One run each: the watchdog fails a deploy whose run died, and a deploy is retried
+    // by deploying again, never behind the author's back.
     stages: queue<StageJob>({ memoryMb: 1024, timeoutSeconds: 900, maxAttempts: 1 }),
   },
   auth: false,

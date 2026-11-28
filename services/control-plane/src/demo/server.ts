@@ -380,12 +380,6 @@ const DeploymentsDemo = HttpApiBuilder.group(PlatformApi, 'deployments', (h) =>
             env: {},
             ...(app.realtime ? { realtime: { subscribe: 'signed-in' as const, channels: ['notes/*'] } } : {}),
             ...(app.email ? { email: { name: 'Inbox', dailyLimit: 200 } } : {}),
-            services: Object.fromEntries(
-              app.services.map((s) => [
-                s,
-                { entry: `src/${s}.ts`, cpu: 0.25, memoryMb: 512, spot: true, previewMinutes: 30 },
-              ]),
-            ),
           } as never,
         });
       },
@@ -667,67 +661,6 @@ const ObserveDemo = HttpApiBuilder.group(PlatformApi, 'observe', (h) =>
             }),
           };
         }),
-      services: ({ params, query }) =>
-        Effect.map(demoApp(params.app), (a) => {
-          const w = windowOf(query);
-          const res = storedRes(w);
-          return {
-            app: a.record.name,
-            stage: query.stage ?? 'prod',
-            res,
-            services: a.services.map((s) => {
-              const cpu = series(
-                a,
-                query.stage ?? 'prod',
-                { metric: 'service', stat: 'avg', filter: { measure: 'cpu', names: [s] } },
-                w,
-                res,
-              );
-              const mem = series(
-                a,
-                query.stage ?? 'prod',
-                { metric: 'service', stat: 'avg', filter: { measure: 'memory', names: [s] } },
-                w,
-                res,
-              );
-              return {
-                name: s,
-                cpu: 0.25,
-                memoryMb: 512,
-                spot: true,
-                state: 'running' as const,
-                desired: 1,
-                running: 1,
-                pending: 0,
-                deployment: deploymentsOf(a.record.name, 'prod')[0]?.id,
-                startedAt: iso(T0 - 30 * HOUR),
-                lastStop: {
-                  at: iso(T0 - 30 * HOUR - 4 * MIN),
-                  reason: 'Spot capacity was reclaimed',
-                  exitCode: 143,
-                },
-                events: [
-                  {
-                    at: iso(T0 - 30 * HOUR),
-                    message: 'service inbox--prod--imap-sync has reached a steady state.',
-                  },
-                  {
-                    at: iso(T0 - 30 * HOUR - 3 * MIN),
-                    message: 'service inbox--prod--imap-sync has started 1 tasks.',
-                  },
-                ],
-                starts: 2,
-                failedRuns: 1,
-                points: cpu.timestamps.map((ts, i) => ({
-                  ts,
-                  cpu: cpu.series[0]?.values[i] ?? null,
-                  memory: mem.series[0]?.values[i] ?? null,
-                })),
-                monthly: { computeUsd: 2.52, publicIpv4Usd: 3.6, totalUsd: 6.12 },
-              };
-            }),
-          };
-        }),
       errors: ({ params, query }) =>
         Effect.map(demoApp(params.app), (a) =>
           errorGroups(a, query.stage ?? 'prod')
@@ -772,17 +705,6 @@ const ObserveDemo = HttpApiBuilder.group(PlatformApi, 'observe', (h) =>
             monthToDateUsd:
               Math.round(days.filter((d) => d.date.startsWith(month)).reduce((n, d) => n + d.usd, 0) * 100) /
               100,
-            ...(a.services.length
-              ? {
-                  alwaysOn: a.services.map((s) => ({
-                    stage: 'prod',
-                    kind: 'service' as const,
-                    name: s,
-                    detail: '0.25 vCPU · 512 MB · Spot',
-                    monthly: { computeUsd: 2.52, publicIpv4Usd: 3.6, totalUsd: 6.12 },
-                  })),
-                }
-              : {}),
             compute: [
               {
                 stage: 'prod',
@@ -1160,9 +1082,6 @@ const ManageDemo = HttpApiBuilder.group(PlatformApi, 'manage', (h) =>
         }),
       unsuppress: () => Effect.void,
       resumeEmail: () => Effect.succeed({ status: 'enabled' as const }),
-      restartService: ({ params }) => Effect.succeed({ name: params.name, desired: 1 }),
-      startService: ({ params }) => Effect.succeed({ name: params.name, desired: 1 }),
-      stopService: ({ params }) => Effect.succeed({ name: params.name, desired: 0 }),
       redrive: () => Effect.succeed({ count: 1 }),
       discard: () => Effect.succeed({ count: 1 }),
     }),
@@ -1179,7 +1098,6 @@ const AdminDemo = HttpApiBuilder.group(PlatformApi, 'admin', (h) =>
             appsPerMember: 20,
             stagesPerApp: 5,
             emailsPerDay: 2000,
-            servicesPerApp: 2,
             edgeRequestsPerMinute: 600,
             edgeFloorAt: 3000,
           },

@@ -36,11 +36,10 @@ describe('jobs', () => {
     expect(event).toMatch(/^_e-[0-9a-f]{8}-/);
     expect(event.length).toBeLessThanOrEqual(64);
     expect(event.startsWith(jobSchedulePrefix('event', `order:${'x'.repeat(60)}`))).toBe(true);
-    // Crons' own schedules are the cron key; services' stop schedules contain `--`.
+    // Crons' own schedules are the cron key.
     expect(isJobSchedule(`_q-emails-${id}`)).toBe(true);
     expect(isJobSchedule('c-cleanup')).toBe(false);
     expect(isJobSchedule('nightly')).toBe(false);
-    expect(isJobSchedule('firehose--stop')).toBe(false);
   });
 
   it('writes one-shot expressions in UTC to the second', () => {

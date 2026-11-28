@@ -461,15 +461,14 @@ describe('logs', () => {
     expect(toFilterPattern('{ $.status = 500 }')).toBe('{ $.status = 500 }');
   });
 
-  it('names service streams after their log groups', () => {
+  it('names streams after their log groups', () => {
+    expect(logGroupOf('shop', 'prod', 'web')).toBe('/platform/apps/shop/prod/web');
     expect(logGroupOf('shop', 'prod', 'worker')).toBe('/platform/apps/shop/prod/worker');
-    expect(logGroupOf('shop', 'prod', 'service:ais')).toBe('/platform/apps/shop/prod/services/ais');
-    expect(logGroupOf('shop', 'prod', 'service:../web')).toBeUndefined();
     expect(logGroupOf('shop', 'prod', 'web.local')).toBeUndefined();
+    expect(logGroupOf('shop', 'prod', 'service:ais')).toBeUndefined();
     const arn = 'arn:aws:logs:us-east-1:000000000000:log-group:/platform/apps/shop/prod';
-    expect(streamOfLogGroup(`${arn}/services/ais`)).toBe('service:ais');
-    expect(streamOfLogGroup(`${arn}/services/ais:*`)).toBe('service:ais');
     expect(streamOfLogGroup('/platform/apps/shop/prod/worker')).toBe('worker');
+    expect(streamOfLogGroup(`${arn}/worker:*`)).toBe('worker');
     expect(streamOfLogGroup(`${arn}/web`)).toBe('web');
     const start = {
       _p: 1 as const,
@@ -478,20 +477,17 @@ describe('logs', () => {
       app: 'shop',
       stage: 'prod',
       rev: 'd1',
-      runtime: 'service' as const,
-      name: 'ais',
+      runtime: 'worker' as const,
     };
-    expect(toLogLine('service:ais', 0, JSON.stringify({ ...start, event: 'start' }))).toMatchObject({
-      stream: 'service:ais',
+    expect(toLogLine('worker', 0, JSON.stringify({ ...start, event: 'start', initMs: 180 }))).toMatchObject({
+      stream: 'worker',
       level: 'info',
-      message: 'service ais container start',
+      message: 'worker environment start (init 180ms)',
     });
-    expect(describeEvent({ ...start, event: 'stop', reason: 'SIGTERM' })).toBe(
-      'service ais container stop (SIGTERM)',
-    );
+    expect(describeEvent({ ...start, event: 'stop' })).toBe('worker environment stop');
   });
 
-  effect.effect('searches service log groups too, and filters by stream', () =>
+  effect.effect('searches the stage’s web and worker log groups, and filters by stream', () =>
     Effect.gen(function* () {
       const filtered: string[] = [];
       const logs = {
@@ -499,17 +495,18 @@ describe('logs', () => {
           if (command.constructor.name === 'DescribeLogGroupsCommand') {
             assert.strictEqual(command.input.logGroupNamePrefix, '/platform/apps/shop/prod/');
             return Promise.resolve({
-              logGroups: ['web', 'web.local', 'worker', 'services/ais', 'services/Bad'].map((g) => ({
+              // `services/ais`: a long-running service's, left from before services were removed.
+              logGroups: ['web', 'web.local', 'worker', 'services/ais'].map((g) => ({
                 logGroupName: `/platform/apps/shop/prod/${g}`,
               })),
             });
           }
           const group = String(command.input.logGroupName);
           filtered.push(group);
-          const ts = group.endsWith('/ais') ? 3000 : group.endsWith('/worker') ? 2000 : 1000;
+          const ts = group.endsWith('/worker') ? 2000 : 1000;
           return Promise.resolve({
             events: [{ timestamp: ts, message: `from ${group.split('/').at(-1)}` }],
-            ...(group.endsWith('/ais') ? { nextToken: 'more' } : {}),
+            ...(group.endsWith('/worker') ? { nextToken: 'more' } : {}),
           });
         },
       } as unknown as CloudWatchLogsClient;
@@ -522,7 +519,6 @@ describe('logs', () => {
       assert.deepStrictEqual(
         all.lines.map((l) => [l.stream, l.message]),
         [
-          ['service:ais', 'from ais'],
           ['worker', 'from worker'],
           ['web', 'from web'],
         ],
@@ -530,16 +526,16 @@ describe('logs', () => {
       // The next page only reads the streams that had more.
       filtered.length = 0;
       yield* search({ nextToken: all.nextToken ?? '' });
-      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/services/ais']);
+      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/worker']);
 
       filtered.length = 0;
-      const one = yield* search({ stream: 'service:ais' });
-      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/services/ais']);
+      const one = yield* search({ stream: 'web' });
+      assert.deepStrictEqual(filtered, ['/platform/apps/shop/prod/web']);
       assert.strictEqual(one.lines.length, 1);
 
-      const bad = yield* Effect.flip(search({ stream: 'service:Nope' }));
-      assert.strictEqual(bad.message, 'stream must be web, worker or service:<name>');
-      const forged = Buffer.from(JSON.stringify({ 'service:../../other': 'x' })).toString('base64url');
+      const bad = yield* Effect.flip(search({ stream: 'service:ais' }));
+      assert.strictEqual(bad.message, 'stream must be web or worker');
+      const forged = Buffer.from(JSON.stringify({ '../../other': 'x' })).toString('base64url');
       assert.strictEqual((yield* Effect.flip(search({ nextToken: forged }))).message, 'invalid next token');
     }),
   );
@@ -725,7 +721,6 @@ describe('pinger', () => {
     storageOptions: {},
     secrets: [],
     env: {},
-    services: {},
     ...(email ? { email } : {}),
   });
   const deployment = (app: string, id: string, m: ResolvedManifest): DeploymentItem => ({

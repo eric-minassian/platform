@@ -1,7 +1,7 @@
 /**
  * Observability endpoints: metrics, routes, jobs, queues, realtime, email,
- * custom metrics, rate limits, services, errors and their occurrences,
- * uptime, cost, logs (search, stats, context, tail, Logs Insights), traces.
+ * custom metrics, rate limits, errors and their occurrences, uptime, cost,
+ * logs (search, stats, context, tail, Logs Insights), traces.
  */
 import {
   checkSeriesQuery,
@@ -9,7 +9,6 @@ import {
   QUERY_RESOLUTION_MS,
   QueryResolution,
   REALTIME_MEASURES,
-  SERVICE_MEASURES,
   type StageCompute,
 } from '@ericminassian/platform-core';
 import { BadRequest, NotFound, PlatformApi } from '@ericminassian/platform-core/platform-api';
@@ -19,7 +18,6 @@ import { AppEmail } from '../email.ts';
 import { checkLogFilters } from '../insights.ts';
 import { AppQueues } from '../jobs/queues.ts';
 import { AppRealtime } from '../jobs/realtime.ts';
-import { AppServices, alwaysOnCosts } from '../jobs/services.ts';
 import { Logs, logGroupOf } from '../logs.ts';
 import { type DeploymentItem, type StageItem, stageCompute } from '../records.ts';
 import { Store } from '../store.ts';
@@ -42,8 +40,6 @@ const rangeOf = (query: RangeQuery, defaultRange?: string) =>
 const isQueryResolution = Schema.is(QueryResolution);
 const isRealtimeMeasure = (m: string | undefined): m is (typeof REALTIME_MEASURES)[number] =>
   REALTIME_MEASURES.some((x) => x === m);
-const isServiceMeasure = (m: string | undefined): m is (typeof SERVICE_MEASURES)[number] =>
-  SERVICE_MEASURES.some((x) => x === m);
 
 /** A stage's server on the Cost tab: its mode and setting, and the chooser's latest estimate (pure). */
 export function stageComputeCost(stage: StageItem, live: DeploymentItem | undefined): StageCompute[] {
@@ -90,7 +86,6 @@ export const ObserveLive = HttpApiBuilder.group(
     const logs = yield* Logs;
     const queues = yield* AppQueues;
     const realtime = yield* AppRealtime;
-    const services = yield* AppServices;
     const store = yield* Store;
     const telemetry = yield* TelemetryQuery;
 
@@ -102,8 +97,8 @@ export const ObserveLive = HttpApiBuilder.group(
 
     /**
      * The app's stages that run all the time, with their live deployments:
-     * not previews (they stop their services minutes after a deploy and run
-     * servers in request mode), nor stages on their way out.
+     * not previews (they run servers in request mode), nor stages on their
+     * way out.
      */
     const liveStages = Effect.fnUntraced(function* (app: string) {
       const stages = (yield* store.listStages(app)).filter(
@@ -139,28 +134,15 @@ export const ObserveLive = HttpApiBuilder.group(
             return yield* BadRequest.of(`res is one of ${Object.keys(QUERY_RESOLUTION_MS).join(', ')}`);
           const now = yield* Clock.currentTimeMillis;
           // CloudWatch keeps minute data for 15 days, the rollups for 3.
-          const cloudWatch = q.metric === 'realtime' || q.metric === 'service';
           const range = parseSeriesRange(
             query,
             query.res,
             now,
-            cloudWatch ? 15 * 86_400_000 : storedHorizonMs('1m'),
+            q.metric === 'realtime' ? 15 * 86_400_000 : storedHorizonMs('1m'),
           );
           const measure = q.filter?.measure;
           if (q.metric === 'realtime' && isRealtimeMeasure(measure))
             return yield* realtime.series(app, stage, measure, range);
-          if (q.metric === 'service' && isServiceMeasure(measure)) {
-            const declared = Object.keys(
-              Option.getOrUndefined(yield* access.liveManifest(app, stage))?.services ?? {},
-            );
-            return yield* services.series(
-              app,
-              stage,
-              q.filter?.names?.length ? q.filter.names : declared,
-              { measure, stat: q.stat === 'max' ? 'max' : 'avg', grouped: q.groupBy === 'name' },
-              range,
-            );
-          }
           return yield* telemetry.series(app, stage, q, range);
         }),
 
@@ -204,13 +186,6 @@ export const ObserveLive = HttpApiBuilder.group(
         Effect.gen(function* () {
           const { app, stage } = yield* scope(params.app, query.stage);
           return yield* queues.deadLetters(app, stage);
-        }),
-
-      services: ({ params, query }) =>
-        Effect.gen(function* () {
-          const { app, stage } = yield* scope(params.app, query.stage);
-          const manifest = Option.getOrUndefined(yield* access.liveManifest(app, stage));
-          return yield* services.stats(app, stage, manifest?.services ?? {}, yield* rangeOf(query));
         }),
 
       realtime: ({ params, query }) =>
@@ -269,7 +244,6 @@ export const ObserveLive = HttpApiBuilder.group(
           );
           return {
             ...cost,
-            alwaysOn: live.flatMap((l) => alwaysOnCosts(l.stage.stage, l.live?.manifest?.services ?? {})),
             compute: live.flatMap((l) => stageComputeCost(l.stage, l.live)),
           };
         }),
@@ -296,8 +270,7 @@ export const ObserveLive = HttpApiBuilder.group(
           const { app, stage } = yield* scope(params.app, query.stage);
           // Refused before the event stream opens, so a bad name is a 400 rather than an `error` event.
           for (const stream of [...(query.stream ? [query.stream] : []), ...(query.f?.streams ?? [])])
-            if (!logGroupOf(app, stage, stream))
-              return yield* BadRequest.of('stream must be web, worker or service:<name>');
+            if (!logGroupOf(app, stage, stream)) return yield* BadRequest.of('stream must be web or worker');
           const problem = checkLogFilters(query.f);
           if (problem) return yield* BadRequest.of(problem);
           return logs.tail({ app, stage, q: query.q, stream: query.stream, filters: query.f }).pipe(

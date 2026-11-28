@@ -57,7 +57,9 @@ describe('checkSeriesQuery', () => {
       /ok or error/,
     );
     expect(checkSeriesQuery({ metric: 'custom', stat: 'sum' })).toMatch(/names its metric/);
-    expect(checkSeriesQuery({ metric: 'service', stat: 'avg' })).toMatch(/cpu or memory/);
+    expect(checkSeriesQuery({ metric: 'requests', stat: 'count', filter: { measure: 'events' } })).toMatch(
+      /only realtime queries take a measure/,
+    );
   });
 
   it('refuses what an alert rule cannot watch', () => {

@@ -8,7 +8,6 @@ export {
   type BuildPart,
   type BuildResult,
   buildApp,
-  bundleService,
   bundleWorker,
   validateForBuild,
 } from './build.ts';
@@ -17,10 +16,7 @@ export {
   type DeployOptions,
   type DeployResult,
   deploy,
-  formatServiceCost,
   presignedPostForm,
-  type ServiceCost,
-  serviceCosts,
   waitForDeployment,
 } from './deploy.ts';
 export { type LocalStage, localEnv, startLocalStage } from './dev/local-stage.ts';

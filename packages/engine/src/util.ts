@@ -41,10 +41,6 @@ const NOT_FOUND = new Set([
   'NoSuchCachePolicy',
   'NoSuchDistribution',
   'EntityNotFound',
-  'ServiceNotFoundException',
-  'ClusterNotFoundException',
-  'RepositoryNotFoundException',
-  'ImageNotFoundException',
 ]);
 
 export function isNotFound(e: unknown): boolean {
@@ -119,36 +115,6 @@ export async function mapLimit<T, R>(
   });
   await Promise.all(workers);
   return out;
-}
-
-export interface RawRequest {
-  method: string;
-  protocol: string;
-  hostname: string;
-  port?: number;
-  path: string;
-  query?: Record<string, string>;
-  headers: Record<string, string>;
-  body?: string;
-}
-
-/**
- * Send a request outside the SDK's operations through a client's own HTTP
- * handler, so it gets the same TLS setup (the emulator's CA) as the client.
- */
-export async function sendRaw(
-  client: { config: { requestHandler: unknown } },
-  request: RawRequest,
-): Promise<{ statusCode: number; body: Uint8Array }> {
-  const handler = client.config.requestHandler as {
-    handle(
-      request: RawRequest,
-    ): Promise<{ response: { statusCode: number; body: AsyncIterable<Uint8Array> } }>;
-  };
-  const { response } = await handler.handle(request);
-  const chunks: Uint8Array[] = [];
-  for await (const c of response.body) chunks.push(c);
-  return { statusCode: response.statusCode, body: new Uint8Array(Buffer.concat(chunks)) };
 }
 
 // ------------------------------------------------------------------ tags

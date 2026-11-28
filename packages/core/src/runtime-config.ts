@@ -44,27 +44,6 @@ export interface PlatformRuntimeConfig {
   realtime?: RealtimeRuntimeConfig;
   /** The SES domain every stage sends from (absent on platforms that predate email). */
   email?: EmailRuntimeConfig;
-  /** Container compute, ECS on Fargate (absent on platforms that predate it). */
-  containers?: ContainersRuntimeConfig;
-}
-
-/**
- * Where containers run. Tasks get a public IPv4 address in a public subnet
- * (there is no NAT gateway) and accept no inbound traffic.
- */
-export interface ContainersRuntimeConfig {
-  /** ECS cluster name. */
-  cluster: string;
-  subnets: string[];
-  securityGroups: string[];
-  /** ECR repository name. */
-  repository: string;
-  /** `<account>.dkr.ecr.<region>.amazonaws.com/<repository>`. */
-  repositoryUri: string;
-  /** Pulls images and writes container logs. */
-  executionRoleArn: string;
-  /** Assumed by EventBridge Scheduler to scale a stage's services (preview stop schedules). */
-  schedulerRoleArn: string;
 }
 
 /**

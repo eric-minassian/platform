@@ -87,9 +87,8 @@ function line(e: LineEventOf): { level: string; text: string; failed: boolean } 
     return { level: 'metric', text: `${e.name} = ${e.value}${e.unit ? ` ${e.unit}` : ''}`, failed: false };
   if (e.t === 'limit')
     return { level: 'limit', text: `${e.name} ${e.ok ? 'allowed' : 'denied'}`, failed: false };
-  const what = e.runtime === 'service' && e.name ? `service ${e.name}` : e.runtime;
-  const detail = e.reason ?? (e.initMs !== undefined ? `init ${e.initMs}ms` : undefined);
-  return { level: 'env', text: `${what} ${e.event}${detail ? ` (${detail})` : ''}`, failed: false };
+  const detail = e.initMs !== undefined ? ` (init ${e.initMs}ms)` : '';
+  return { level: 'env', text: `${e.runtime} ${e.event}${detail}`, failed: false };
 }
 
 const durOf = (e: TelemetryEvent): number => ('dur' in e && typeof e.dur === 'number' ? e.dur : 0);

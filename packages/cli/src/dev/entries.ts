@@ -11,7 +11,7 @@ export function tsxCli(): string {
   return join(dirname(pkg), rel);
 }
 
-export type DevEntry = 'server-entry' | 'worker-host' | 'service-host';
+export type DevEntry = 'server-entry' | 'worker-host';
 
 /** A CLI-owned entry file next to this module (`.ts` in the repo, `.js` when published). */
 export function devEntry(name: DevEntry): string {

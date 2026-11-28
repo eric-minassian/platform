@@ -62,12 +62,9 @@ import {
   RouteStats,
   SecretsResponse,
   SeriesResponse,
-  ServiceActionResponse,
-  ServicesResponse,
   StageDestroyed,
   StageDestroying,
   StageRecord,
-  StartServiceRequest,
   StorageResponse,
   SuppressedResponse,
   TraceResponse,
@@ -143,7 +140,7 @@ export class NotFound extends Schema.TaggedError<NotFound, { readonly brand: uni
 
 /**
  * 409: `exists`, `dns_conflict`, `has_stages`, `already_started`, `rollback_failed`,
- * `redrive_failed`, `discard_failed`, `paused_by_aws`, `service_action_failed`.
+ * `redrive_failed`, `discard_failed`, `paused_by_aws`.
  */
 export class Conflict extends Schema.TaggedError<Conflict, { readonly brand: unique symbol }>()(
   'Conflict',
@@ -441,13 +438,6 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       success: LimitsResponse,
       error: errors,
     }),
-    /** The stage's long-running services: ECS state, CPU and memory, starts and failed runs. */
-    HttpApiEndpoint.get('services', '/apps/:app/services', {
-      params: app,
-      query: rangeQuery,
-      success: ServicesResponse,
-      error: errors,
-    }),
     HttpApiEndpoint.get('errors', '/apps/:app/errors', {
       params: app,
       query: { ...stageQuery, status: Schema.optional(ErrorStatus) },
@@ -479,7 +469,7 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       query: {
         ...rangeQuery,
         q: Schema.optional(Schema.String),
-        /** `web`, `worker` or `service:<name>`. */
+        /** `web` or `worker`. */
         stream: Schema.optional(Schema.String),
         /** Structured filters as JSON (`LogFilters`); any of them runs the search on Logs Insights. */
         f: Schema.optional(Schema.fromJsonString(LogFilters)),
@@ -499,7 +489,7 @@ export class ObserveApi extends HttpApiGroup.make('observe')
       query: {
         ...stageQuery,
         q: Schema.optional(Schema.String),
-        /** `web`, `worker` or `service:<name>`. */
+        /** `web` or `worker`. */
         stream: Schema.optional(Schema.String),
         /** Structured filters as JSON (`LogFilters`), applied to the live lines. */
         f: Schema.optional(Schema.fromJsonString(LogFilters)),
@@ -695,31 +685,6 @@ export class ManageApi extends HttpApiGroup.make('manage')
       params: app,
       query: stageQuery,
       success: EmailSending,
-      error: errors,
-    }),
-    /** Replaces the service's task with a fresh one on the same build. */
-    HttpApiEndpoint.post('restartService', '/apps/:app/services/:name/restart', {
-      params: { ...app, name: Schema.String },
-      query: stageQuery,
-      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
-      error: errors,
-    }),
-    /**
-     * Runs it (desired 1). It stops again after `minutes` when given; on
-     * previews always, by default after its `previewMinutes` (30 when that is 0).
-     */
-    HttpApiEndpoint.post('startService', '/apps/:app/services/:name/start', {
-      params: { ...app, name: Schema.String },
-      query: stageQuery,
-      payload: StartServiceRequest,
-      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
-      error: errors,
-    }),
-    /** Scales it to zero until it is started again or the stage is redeployed. */
-    HttpApiEndpoint.post('stopService', '/apps/:app/services/:name/stop', {
-      params: { ...app, name: Schema.String },
-      query: stageQuery,
-      success: ServiceActionResponse.pipe(HttpApiSchema.status(202)),
       error: errors,
     }),
     /** Runs dead letters again from their first attempt, on the function their handler runs in now. */

@@ -67,182 +67,6 @@ describe('foundation stack', () => {
       FunctionName: platformNames.realtimeAuthorizer,
     });
     template.hasResourceProperties('AWS::SES::EmailIdentity', { EmailIdentity: mailDomain });
-    template.hasResourceProperties('AWS::ECS::Cluster', { ClusterName: platformNames.containerCluster });
-    template.hasResourceProperties('AWS::ECR::Repository', {
-      RepositoryName: platformNames.containerRepository,
-    });
-    template.hasResourceProperties('AWS::EC2::VPC', {
-      Tags: Match.arrayWith([{ Key: 'Name', Value: platformNames.containerNetwork }]),
-    });
-    template.hasResourceProperties('AWS::EC2::SecurityGroup', { GroupName: platformNames.containerNetwork });
-    for (const role of [platformNames.containerExecutionRole, platformNames.containerSchedulerRole])
-      template.hasResourceProperties('AWS::IAM::Role', { RoleName: role, Path: '/platform/' });
-  });
-
-  describe('containers', () => {
-    const cluster = () => logicalId('AWS::ECS::Cluster', { ClusterName: platformNames.containerCluster });
-    const repository = () =>
-      logicalId('AWS::ECR::Repository', { RepositoryName: platformNames.containerRepository });
-
-    it('runs them in public subnets across three zones, with no NAT gateway or flow logs', () => {
-      template.resourceCountIs('AWS::EC2::VPC', 1);
-      template.resourceCountIs('AWS::EC2::Subnet', 3);
-      for (const zone of [0, 1, 2])
-        template.hasResourceProperties('AWS::EC2::Subnet', {
-          AvailabilityZone: { 'Fn::Select': [zone, { 'Fn::GetAZs': '' }] },
-          MapPublicIpOnLaunch: true,
-        });
-      template.resourceCountIs('AWS::EC2::InternetGateway', 1);
-      template.resourceCountIs('AWS::EC2::Route', 3);
-      template.allResourcesProperties('AWS::EC2::Route', {
-        DestinationCidrBlock: '0.0.0.0/0',
-        GatewayId: { Ref: Match.stringLikeRegexp('^ContainerNetworkIGW') },
-      });
-      template.resourceCountIs('AWS::EC2::NatGateway', 0);
-      template.resourceCountIs('AWS::EC2::EIP', 0);
-      template.resourceCountIs('AWS::EC2::FlowLog', 0);
-      // Leaving the default security group alone avoids CDK's custom-resource Lambda.
-      template.resourceCountIs('Custom::VpcRestrictDefaultSG', 0);
-    });
-
-    it('reaches S3 and DynamoDB through free gateway endpoints only', () => {
-      const endpoints = Object.values(
-        template.findResources('AWS::EC2::VPCEndpoint') as Record<
-          string,
-          { Properties: { VpcEndpointType: string; ServiceName: { 'Fn::Join': [string, unknown[]] } } }
-        >,
-      );
-      expect(endpoints.map((e) => e.Properties.VpcEndpointType)).toEqual(['Gateway', 'Gateway']);
-      const services = endpoints.map((e) => String(e.Properties.ServiceName['Fn::Join'][1].at(-1)));
-      expect(services.toSorted((a, b) => a.localeCompare(b))).toEqual(['.dynamodb', '.s3']);
-    });
-
-    it('takes no inbound traffic', () => {
-      template.hasResourceProperties('AWS::EC2::SecurityGroup', {
-        GroupName: platformNames.containerNetwork,
-        SecurityGroupEgress: [Match.objectLike({ CidrIp: '0.0.0.0/0', IpProtocol: '-1' })],
-        SecurityGroupIngress: Match.absent(),
-      });
-      template.resourceCountIs('AWS::EC2::SecurityGroupIngress', 0);
-    });
-
-    it('runs Fargate and Fargate Spot tasks without Container Insights', () => {
-      template.hasResourceProperties('AWS::ECS::Cluster', {
-        ClusterName: platformNames.containerCluster,
-        ClusterSettings: [{ Name: 'containerInsights', Value: 'disabled' }],
-      });
-      template.hasResourceProperties('AWS::ECS::ClusterCapacityProviderAssociations', {
-        Cluster: { Ref: cluster() },
-        CapacityProviders: ['FARGATE', 'FARGATE_SPOT'],
-      });
-    });
-
-    it('scans pushed images and expires only untagged ones', () => {
-      const resources = template.toJSON().Resources as Record<
-        string,
-        {
-          Properties: {
-            ImageScanningConfiguration: unknown;
-            LifecyclePolicy: { LifecyclePolicyText: string };
-          };
-        }
-      >;
-      const repo = resources[repository()]!.Properties;
-      expect(repo.ImageScanningConfiguration).toEqual({ ScanOnPush: true });
-      expect(JSON.parse(repo.LifecyclePolicy.LifecyclePolicyText)).toEqual({
-        rules: [
-          {
-            rulePriority: 1,
-            description: 'Expire untagged images after a day',
-            selection: {
-              tagStatus: 'untagged',
-              countType: 'sinceImagePushed',
-              countNumber: 1,
-              countUnit: 'days',
-            },
-            action: { type: 'expire' },
-          },
-        ],
-      });
-    });
-
-    it('lets ECS pull images and ship logs, and Scheduler only scale stage services', () => {
-      template.hasResourceProperties('AWS::IAM::Role', {
-        RoleName: platformNames.containerExecutionRole,
-        AssumeRolePolicyDocument: {
-          Statement: [
-            Match.objectLike({ Action: 'sts:AssumeRole', Principal: { Service: 'ecs-tasks.amazonaws.com' } }),
-          ],
-        },
-        Policies: [
-          {
-            PolicyName: 'execution',
-            PolicyDocument: Match.objectLike({
-              Statement: [
-                Match.objectLike({ Sid: 'PullImages' }),
-                Match.objectLike({ Sid: 'RegistryAuth' }),
-                Match.objectLike({ Sid: 'ContainerLogs' }),
-              ],
-            }),
-          },
-        ],
-      });
-      template.hasResourceProperties('AWS::IAM::Role', {
-        RoleName: platformNames.containerSchedulerRole,
-        AssumeRolePolicyDocument: {
-          Statement: [
-            Match.objectLike({
-              Action: 'sts:AssumeRole',
-              Principal: { Service: 'scheduler.amazonaws.com' },
-              Condition: { StringEquals: { 'aws:SourceAccount': account } },
-            }),
-          ],
-        },
-        Policies: [
-          {
-            PolicyName: 'scheduler',
-            PolicyDocument: Match.objectLike({
-              Statement: [Match.objectLike({ Sid: 'ScaleStageServices', Action: 'ecs:UpdateService' })],
-            }),
-          },
-        ],
-      });
-    });
-
-    it('lets the control plane run services and pass both roles', () => {
-      template.hasResourceProperties('AWS::IAM::Role', {
-        RoleName: platformNames.controlPlaneRole,
-        Policies: [
-          {
-            PolicyName: 'control',
-            PolicyDocument: Match.objectLike({
-              Statement: Match.arrayWith([
-                Match.objectLike({ Sid: 'ContainerServices' }),
-                Match.objectLike({ Sid: 'ContainerImages' }),
-                Match.objectLike({
-                  Sid: 'ContainerRoles',
-                  Action: 'iam:PassRole',
-                  Resource: [
-                    {
-                      'Fn::GetAtt': [
-                        logicalId('AWS::IAM::Role', { RoleName: platformNames.containerExecutionRole }),
-                        'Arn',
-                      ],
-                    },
-                    {
-                      'Fn::GetAtt': [
-                        logicalId('AWS::IAM::Role', { RoleName: platformNames.containerSchedulerRole }),
-                        'Arn',
-                      ],
-                    },
-                  ],
-                }),
-              ]),
-            }),
-          },
-        ],
-      });
-    });
   });
 
   describe('realtime', () => {
@@ -429,10 +253,9 @@ describe('foundation stack', () => {
       ...Object.keys(template.findResources('Custom::CrossAccountZoneDelegation')),
       ...Object.keys(template.findResources('AWS::AppSync::Api')),
       ...Object.keys(template.findResources('AWS::SES::EmailIdentity')),
-      ...Object.keys(template.findResources('AWS::ECR::Repository')),
     ];
     const resources = template.toJSON().Resources as Record<string, { DeletionPolicy?: string }>;
-    expect(retained).toHaveLength(12);
+    expect(retained).toHaveLength(11);
     for (const id of retained) expect(resources[id]?.DeletionPolicy, id).toBe('Retain');
   });
 
@@ -742,18 +565,6 @@ describe('foundation stack', () => {
     for (const key of ['artifactsBucket', 'kvsArn', 'distributionArn', 'userPoolId', 'boundaryPolicyArn'])
       expect(literal).toContain(`"${key}":"`);
     expect(literal).toContain('"realtime":{"apiId":"');
-    expect(literal).toContain(`"containers":{"cluster":"`);
-    for (const key of [
-      'subnets',
-      'securityGroups',
-      'repository',
-      'repositoryUri',
-      'executionRoleArn',
-      'schedulerRoleArn',
-    ])
-      expect(literal).toContain(`"${key}":`);
-    const network = logicalId('AWS::EC2::SecurityGroup', { GroupName: platformNames.containerNetwork });
-    expect(parts).toContainEqual({ 'Fn::GetAtt': [network, 'GroupId'] });
     const api = logicalId('AWS::AppSync::Api', { Name: platformNames.realtimeApi });
     for (const attr of ['ApiId', 'Dns.Http', 'Dns.Realtime'])
       expect(parts).toContainEqual({ 'Fn::GetAtt': [api, attr] });

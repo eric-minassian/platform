@@ -1,7 +1,7 @@
 /**
  * A time chart of an endpoint's own points (`{ ts, ...counts }` at the
  * answer's `res`), for pages whose figures and chart come from one answer:
- * email, realtime, services and the edge floor. Drawn by `TimeChart`, so it
+ * email, realtime and the edge floor. Drawn by `TimeChart`, so it
  * shares the page's cursor, markers and zoom with every other chart.
  */
 import { QUERY_RESOLUTION_MS, type QueryResolution } from '@ericminassian/platform-core';

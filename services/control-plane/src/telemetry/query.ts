@@ -14,6 +14,7 @@ import {
   type CustomMetricStats,
   type ErrorGroup,
   type ErrorStatus,
+  JobKind,
   type JobStats,
   LATENCY_BUCKETS_MS,
   platformNames,
@@ -41,7 +42,7 @@ import {
   type StatusClass,
   type UptimePoint,
 } from '@ericminassian/platform-core';
-import { absurd, Clock, Context, Duration, Effect, Exit, Layer, Option } from 'effect';
+import { absurd, Clock, Context, Duration, Effect, Exit, Layer, Option, Schema } from 'effect';
 import { Aws, AwsError, tryAws } from '../aws.ts';
 import { Settings } from '../config.ts';
 
@@ -190,9 +191,14 @@ export function toRouteStats(items: readonly Item[]): RouteStats[] {
 }
 
 /**
+ * Whether a job row's kind still exists. Rows of long-running services
+ * (`service:<name>`, removed in 0.5.0) stay until their TTL runs out.
+ */
+const isJobKind = Schema.is(JobKind);
+
+/**
  * Sums per-job items (sk = `<iso>#<kind>:<name>`). `declared` adds never-run
- * jobs from the manifest. A service's row can hold only container starts;
- * without a run it isn't a job.
+ * jobs from the manifest.
  */
 export function toJobStats(
   items: readonly Item[],
@@ -214,7 +220,8 @@ export function toJobStats(
   for (const d of declared) get(d.kind, d.name);
   const listed = new Set(acc.keys());
   for (const i of items) {
-    const a = get(i.kind as JobStats['kind'], String(i.name));
+    if (!isJobKind(i.kind)) continue;
+    const a = get(i.kind, String(i.name));
     a.ok += num(i.ok);
     a.error += num(i.error);
     addHist(a.hist, histogramOf(i));
@@ -230,28 +237,6 @@ export function toJobStats(
       p95: percentile(a.hist, 95),
       ...(a.last ? { lastRun: new Date(a.last).toISOString() } : {}),
     }));
-}
-
-export interface ServiceRuns {
-  /** Containers of the service that started. */
-  readonly starts: number;
-  /** Runs of its `run` that failed (and were rerun). */
-  readonly failedRuns: number;
-}
-
-/**
- * Starts and failed runs per service, from its job rows (`service:<name>`).
- * Rows of units of work it traced (`service:<name>/<unit>`) aren't runs.
- */
-export function toServiceRuns(items: readonly Item[]): Map<string, ServiceRuns> {
-  const out = new Map<string, ServiceRuns>();
-  for (const i of items) {
-    const name = str(i.name);
-    if (i.kind !== 'service' || !name || name.includes('/')) continue;
-    const prev = out.get(name) ?? { starts: 0, failedRuns: 0 };
-    out.set(name, { starts: prev.starts + num(i.starts), failedRuns: prev.failedRuns + num(i.error) });
-  }
-  return out;
 }
 
 /** Items of a `<iso>#<name>` series family, by name and then bucket time. */
@@ -475,7 +460,6 @@ export function seriesFamily(q: SeriesQuery): SeriesFamily | undefined {
     case 'rate_limit':
       return 'limit';
     case 'realtime':
-    case 'service':
       return undefined;
     default:
       return absurd(q.metric);
@@ -590,7 +574,7 @@ function rowContributions(
       if (!keep(f.routes, key)) return [];
       return [[ALL_SERIES, { num: num(i.cold), den: num(i.req) }]];
     case 'jobs': {
-      if (!keep(f.jobs, key)) return [];
+      if (!isJobKind(i.kind) || !keep(f.jobs, key)) return [];
       const ok = num(i.ok);
       const error = num(i.error);
       const runs = ok + error;
@@ -603,7 +587,7 @@ function rowContributions(
       return [[q.groupBy === 'job' ? key : ALL_SERIES, { num: matching, den: runs }]];
     }
     case 'job_duration': {
-      if (!keep(f.jobs, key)) return [];
+      if (!isJobKind(i.kind) || !keep(f.jobs, key)) return [];
       const hist = histogramOf(i);
       const n = hist.reduce((a, b) => a + b, 0);
       return [[q.groupBy === 'job' ? key : ALL_SERIES, { num: n, den: n, hist }]];
@@ -642,7 +626,6 @@ function rowContributions(
       return [[q.groupBy === 'name' ? name : ALL_SERIES, { num: matching, den: checks }]];
     }
     case 'realtime':
-    case 'service':
       return [];
     default:
       return absurd(q.metric);
@@ -851,7 +834,7 @@ export class TelemetryQuery extends Context.Service<
   TelemetryQuery,
   {
     metrics(app: string, stage: string, range: TimeRange): Effect.Effect<MetricsResponse>;
-    /** The explorer's query over `range`, from rollups (not `realtime` or `service`). */
+    /** The explorer's query over `range`, from rollups (not `realtime`). */
     series(app: string, stage: string, query: SeriesQuery, range: SeriesRange): Effect.Effect<SeriesResponse>;
     /** The query's statistic over the whole of `from`..`to` (`windowValue`), from minute rollups. */
     seriesWindow(
@@ -886,12 +869,6 @@ export class TelemetryQuery extends Context.Service<
     customMetrics(app: string, stage: string, range: TimeRange): Effect.Effect<CustomMetricsResponse>;
     /** Rate limit checks per limit, at 1h or 1d. */
     limits(app: string, stage: string, range: TimeRange): Effect.Effect<LimitsResponse>;
-    /** Container starts and failed runs of each of the stage's services. */
-    serviceRuns(
-      app: string,
-      stage: string,
-      range: TimeRange,
-    ): Effect.Effect<ReadonlyMap<string, ServiceRuns>>;
     /** Most recently seen first. */
     errors(app: string, stage: string): Effect.Effect<ReadonlyArray<ErrorGroup>>;
     /** Triage from the console (the one write the API makes here); false when there's no such group. */
@@ -964,7 +941,7 @@ export class TelemetryQuery extends Context.Service<
         } satisfies MetricsResponse;
       }, Effect.orDie);
 
-      /** The rollup family a query reads; realtime and service queries are answered from CloudWatch. */
+      /** The rollup family a query reads; realtime queries are answered from CloudWatch. */
       const familyOf = (query: SeriesQuery) => {
         const family = seriesFamily(query);
         return family
@@ -1065,16 +1042,6 @@ export class TelemetryQuery extends Context.Service<
         const [a, b] = isoRange(r);
         const items = yield* queryRange(telemetryKeys.limit(app, stage, r.res), a, b);
         return { app, stage, res: r.res, limits: toLimitStats(items, r) } satisfies LimitsResponse;
-      }, Effect.orDie);
-
-      const serviceRuns = Effect.fn('TelemetryQuery.serviceRuns')(function* (
-        app: string,
-        stage: string,
-        range: TimeRange,
-      ) {
-        const r = seriesRange(range);
-        const [a, b] = isoRange(r);
-        return toServiceRuns(yield* queryRange(telemetryKeys.job(app, stage, r.res), a, b));
       }, Effect.orDie);
 
       const errors = Effect.fn('TelemetryQuery.errors')(function* (app: string, stage: string) {
@@ -1221,7 +1188,6 @@ export class TelemetryQuery extends Context.Service<
         jobs,
         customMetrics,
         limits,
-        serviceRuns,
         errors,
         setErrorStatus,
         uptime,

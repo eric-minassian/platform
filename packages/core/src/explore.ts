@@ -4,8 +4,8 @@
  * alert rules from it; the CLI sends it.
  *
  * Every metric is read from the rollups the telemetry processor writes
- * (`telemetryKeys`), except `realtime` and `service`, which come from
- * CloudWatch on demand and so can't be watched by alert rules. Neither can
+ * (`telemetryKeys`), except `realtime`, which comes from CloudWatch on
+ * demand and so can't be watched by alert rules. Neither can
  * `page_views` and `edge_requests`: the router's access log they come from
  * arrives up to an hour late.
  */
@@ -70,12 +70,11 @@ export function autoQueryResolution(
  * - `edge_requests`: every request the router served for it: files, server, stores
  * - `latency`: their duration
  * - `cold_starts`: requests served by a fresh server process
- * - `jobs`: queue, event, cron, invoke and service runs
+ * - `jobs`: queue, event, cron and invoke runs
  * - `job_duration`: their duration
  * - `custom`: the app's `Metrics.count`/`value` series
  * - `rate_limit`: `RateLimits` checks
  * - `realtime`: AppSync Events activity (CloudWatch)
- * - `service`: long-running services' CPU and memory (CloudWatch)
  */
 export const SeriesMetric = Schema.Literals([
   'requests',
@@ -88,7 +87,6 @@ export const SeriesMetric = Schema.Literals([
   'custom',
   'rate_limit',
   'realtime',
-  'service',
 ]);
 export type SeriesMetric = typeof SeriesMetric.Type;
 
@@ -99,7 +97,7 @@ export type SeriesMetric = typeof SeriesMetric.Type;
  * - `percent`: the share, 0–100, of the metric's events that match the
  *   status or outcome filter, among all of them in the bucket (5xx % of
  *   requests, failed % of runs, denied % of checks)
- * - `sum`, `avg`, `max`: of recorded values (custom metrics, realtime, service)
+ * - `sum`, `avg`, `max`: of recorded values (custom metrics, realtime)
  * - `p50`…`p99`: latency percentiles, from the rollups' fixed-bucket histograms
  *   (each is the upper bound of the bucket holding it)
  * - `histogram`: every latency bucket's count, for heatmaps
@@ -139,11 +137,11 @@ export const SeriesFilter = Schema.Struct({
   status: optional(Schema.Array(StatusClass)),
   /** Jobs as `kind:name`, e.g. `queue:refresh`, `cron:digest`. */
   jobs: optional(Schema.Array(nonEmpty)),
-  /** Custom metric names, rate limit names, or service names. */
+  /** Custom metric names or rate limit names. */
   names: optional(Schema.Array(nonEmpty)),
   /** `jobs`: `ok` or `error`; `rate_limit`: `allowed` or `denied`. */
   outcome: optional(SeriesOutcome),
-  /** `realtime`: `events`, `publishes`, `subscribes` or `errors`; `service`: `cpu` or `memory`. */
+  /** `realtime`: `events`, `publishes`, `subscribes` or `errors`. */
   measure: optional(nonEmpty),
 });
 export type SeriesFilter = typeof SeriesFilter.Type;
@@ -170,7 +168,6 @@ export const METRIC_STATS: Record<SeriesMetric, readonly SeriesStat[]> = {
   custom: ['sum', 'avg', 'count', 'max'],
   rate_limit: ['count', 'percent'],
   realtime: ['sum'],
-  service: ['avg', 'max'],
 };
 
 /** The dimensions each metric can be grouped by. */
@@ -185,7 +182,6 @@ export const METRIC_GROUP_BY: Record<SeriesMetric, readonly SeriesGroupBy[]> = {
   custom: ['name'],
   rate_limit: ['name', 'outcome'],
   realtime: [],
-  service: ['name'],
 };
 
 /** Metrics alert rules can watch: those read from rollups written as their events happen. */
@@ -200,7 +196,6 @@ export const ALERT_METRICS: readonly SeriesMetric[] = [
 ];
 
 export const REALTIME_MEASURES = ['events', 'publishes', 'subscribes', 'errors'] as const;
-export const SERVICE_MEASURES = ['cpu', 'memory'] as const;
 
 /**
  * Why a query can't be answered, or undefined when it can. `alert` also
@@ -237,8 +232,8 @@ export function checkSeriesQuery(
         : `${q.metric} doesn't filter by outcome`;
     }
   }
-  if (f.names?.length && q.metric !== 'custom' && q.metric !== 'rate_limit' && q.metric !== 'service') {
-    return 'only custom metrics, rate limits and services filter by name';
+  if (f.names?.length && q.metric !== 'custom' && q.metric !== 'rate_limit') {
+    return 'only custom metrics and rate limits filter by name';
   }
   if (q.metric === 'custom' && !f.names?.length && q.groupBy !== 'name') {
     return 'a custom metric query names its metric, or groups by name';
@@ -246,12 +241,7 @@ export function checkSeriesQuery(
   if (q.metric === 'realtime' && !REALTIME_MEASURES.some((m) => m === f.measure)) {
     return `realtime measures one of ${REALTIME_MEASURES.join(', ')}`;
   }
-  if (q.metric === 'service' && !SERVICE_MEASURES.some((m) => m === f.measure)) {
-    return `service measures ${SERVICE_MEASURES.join(' or ')}`;
-  }
-  if (q.metric !== 'realtime' && q.metric !== 'service' && f.measure) {
-    return 'only realtime and service queries take a measure';
-  }
+  if (q.metric !== 'realtime' && f.measure) return 'only realtime queries take a measure';
   if (options.alert) {
     if (!ALERT_METRICS.includes(q.metric)) return `alert rules can't watch ${q.metric}`;
     if (q.stat === 'histogram') return 'alert rules watch one number, not a histogram';
@@ -277,9 +267,7 @@ const STAT_UNIT: Record<SeriesStat, string> = {
 };
 
 export function seriesUnit(q: Pick<SeriesQuery, 'metric' | 'stat' | 'filter'>): string {
-  const unit = STAT_UNIT[q.stat];
-  // Service CPU and memory are percentages of what the task reserved.
-  return unit === 'count' && q.metric === 'service' ? 'percent' : unit;
+  return STAT_UNIT[q.stat];
 }
 
 const METRIC_NOUN: Record<SeriesMetric, string> = {
@@ -293,7 +281,6 @@ const METRIC_NOUN: Record<SeriesMetric, string> = {
   custom: 'custom metric',
   rate_limit: 'rate limit checks',
   realtime: 'realtime',
-  service: 'service',
 };
 
 /**
@@ -331,9 +318,6 @@ export function describeQuery(q: SeriesQuery): string {
       break;
     case 'realtime':
       head = `realtime ${f.measure ?? 'events'}`;
-      break;
-    case 'service':
-      head = `${q.stat} ${f.measure ?? 'cpu'}${f.names?.length ? ` of ${f.names.join(', ')}` : ''}`;
       break;
     case 'rate_limit':
       head =
@@ -401,7 +385,7 @@ export type LogLevelName = typeof LogLevelName.Type;
  */
 export const LogFilters = Schema.Struct({
   levels: optional(Schema.Array(LogLevelName)),
-  /** `web`, `worker` or `service:<name>`. */
+  /** `web` or `worker`. */
   streams: optional(Schema.Array(nonEmpty)),
   /** Route patterns (without the method), e.g. `/api/items/:id`. */
   routes: optional(Schema.Array(nonEmpty)),

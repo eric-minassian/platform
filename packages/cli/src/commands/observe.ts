@@ -14,7 +14,6 @@ import {
   type LogLine,
   METRIC_STATS,
   QueryResolution,
-  RESOURCE_KEY_PATTERN,
   STATUS_CLASSES,
   type SeriesFilter,
   SeriesGroupBy,
@@ -205,10 +204,10 @@ export function registerObserve(program: Command): void {
   withTarget(
     program
       .command('logs')
-      .description('search recent logs (web, worker and services); --follow streams live')
+      .description('search recent logs (web + worker); --follow streams live')
       .option('--since <duration>', 'how far back', '1h')
       .option('--filter <text>', 'only lines containing this text / CloudWatch filter pattern')
-      .option('--stream <name>', 'only web, worker or one service (by name)')
+      .option('--stream <name>', 'only web or worker')
       .option('--level <level>', 'only error, warn, info, debug or system lines (repeatable)', collectList)
       .option('--route <pattern>', 'only lines of this route, e.g. /api/items/:id (repeatable)', collect)
       .option('--status <class>', 'only lines with a 2xx, 3xx, 4xx or 5xx status (repeatable)', collectList)
@@ -255,7 +254,7 @@ export function registerObserve(program: Command): void {
         }
         if (opts.around !== undefined) {
           if (!stream)
-            throw new CliError('--around needs --stream (web, worker or a service name)', {
+            throw new CliError('--around needs --stream (web or worker)', {
               exitCode: EXIT.usage,
             });
           const lines = opts.context === undefined ? undefined : wholeNumber(opts.context, '--context', 200);
@@ -619,19 +618,9 @@ export function parsePartition(pairs: string[]): string {
   return params.toString();
 }
 
-/**
- * `--stream` → the API's stream: `web`, `worker`, or a service's name as
- * `service:<name>` (also accepted as is, for a service named web or worker).
- */
 export function logStream(name: string): string {
   if (name === 'web' || name === 'worker') return name;
-  const service = name.startsWith('service:') ? name.slice('service:'.length) : name;
-  if (!RESOURCE_KEY_PATTERN.test(service)) {
-    throw new CliError(`--stream takes web, worker or a service name, got "${name}"`, {
-      exitCode: EXIT.usage,
-    });
-  }
-  return `service:${service}`;
+  throw new CliError(`--stream takes web or worker, got "${name}"`, { exitCode: EXIT.usage });
 }
 
 export function formatLogLine(l: LogLine): string {
@@ -643,7 +632,6 @@ export function formatLogLine(l: LogLine): string {
 function streamLabel(stream: string): string {
   if (stream === 'web') return pc.green('web   ');
   if (stream === 'worker') return pc.yellow('worker');
-  if (stream.startsWith('service:')) return pc.magenta(stream.slice('service:'.length).padEnd(6));
   return stream.padEnd(6);
 }
 
