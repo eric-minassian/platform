@@ -1,6 +1,7 @@
 import type { ApiKey, ChannelNamespace } from '@aws-sdk/client-appsync';
 import type { Tag } from '@aws-sdk/client-sesv2';
 import {
+  hostRecords,
   names,
   type PlatformRuntimeConfig,
   parseManifest,
@@ -16,6 +17,7 @@ import {
   ensureRealtimePlatform,
   namespaceAuthModes,
 } from '../src/drivers/appsync.ts';
+import { ensureHostRecords } from '../src/drivers/kvs.ts';
 import { snapRetention } from '../src/drivers/logs.ts';
 import {
   deleteTenant,
@@ -258,6 +260,9 @@ describe('static assets', () => {
     expect(cacheControlFor('assets/index-BRmjjcSz.js')).toMatch(/immutable/);
     expect(cacheControlFor('/assets/logo.svg')).toMatch(/immutable/);
     expect(cacheControlFor('chunk.a1b2c3d4.css')).toMatch(/immutable/);
+    // Astro's build output: hashes with `-` and `_`, and fonts named by their hash alone.
+    expect(cacheControlFor('_astro/Layout.Bx-3kQ_a.css')).toMatch(/immutable/);
+    expect(cacheControlFor('_astro/fonts/6e9eb6a43d052e14.woff2')).toMatch(/immutable/);
     expect(cacheControlFor('index.html')).toMatch(/must-revalidate/);
     expect(cacheControlFor('robots.txt')).toMatch(/must-revalidate/);
     expect(cacheControlFor('my-component.js')).toMatch(/must-revalidate/);
@@ -266,6 +271,70 @@ describe('static assets', () => {
     expect(contentTypeFor('a/b/index.html')).toBe('text/html; charset=utf-8');
     expect(contentTypeFor('x.woff2')).toBe('font/woff2');
     expect(contentTypeFor('unknown.bin')).toBe('application/octet-stream');
+  });
+});
+
+describe('host entries', () => {
+  /** A route store holding `entries`, recording what's put and deleted. */
+  function store(entries: Record<string, unknown>) {
+    const state = new Map(Object.entries(entries).map(([k, v]) => [k, JSON.stringify(v)]));
+    const put: string[] = [];
+    const deleted: string[] = [];
+    const handlers: Record<string, (i: Record<string, string>) => unknown> = {
+      ListKeysCommand: () => ({ Items: [...state].map(([Key, Value]) => ({ Key, Value })) }),
+      DescribeKeyValueStoreCommand: () => ({ ETag: 'e1' }),
+      PutKeyCommand: ({ Key, Value }) => {
+        state.set(Key!, Value!);
+        put.push(Key!);
+        return {};
+      },
+      DeleteKeyCommand: ({ Key }) => {
+        state.delete(Key!);
+        deleted.push(Key!);
+        return {};
+      },
+    };
+    const client = {
+      send: async (cmd: { constructor: { name: string }; input: Record<string, string> }) =>
+        handlers[cmd.constructor.name]!(cmd.input),
+    };
+    const ctx = { clients: { kvs: client }, log: () => {} } as unknown as EngineContext;
+    return { ctx, state, put, deleted };
+  }
+
+  const app: RouteRecord = { v: 1, app: 'shop', stage: 'prod', d: 'd1', s: 'shop/prod/d1', spa: 1 };
+
+  it('writes new and changed hosts, deletes removed ones, and leaves everything else alone', async () => {
+    const s = store({
+      'shop.example.com': app,
+      '__platform/realtime': { v: 1, o: 'rt', h: 'http', k: 'key' },
+      'example.com': { v: 1, x: 'www.example.com' },
+      'www.example.com': { v: 1, a: 'old.example.com' },
+      'gone.example.com': { v: 1, a: 'shop.example.com' },
+    });
+    const changed = await ensureHostRecords(s.ctx, 'arn:kvs', {
+      'example.com': { v: 1, x: 'www.example.com' },
+      'www.example.com': { v: 1, a: 'shop.example.com' },
+    });
+    expect(changed).toEqual(['www.example.com', 'gone.example.com']);
+    expect([s.put, s.deleted]).toEqual([['www.example.com'], ['gone.example.com']]);
+    expect(JSON.parse(s.state.get('www.example.com')!)).toEqual({ v: 1, a: 'shop.example.com' });
+    expect(s.state.has('shop.example.com') && s.state.has('__platform/realtime')).toBe(true);
+    expect(
+      await ensureHostRecords(
+        s.ctx,
+        'arn:kvs',
+        hostRecords({ 'www.example.com': { app: 'shop' } }, 'example.com'),
+      ),
+    ).toEqual(['example.com']);
+  });
+
+  it('refuses a host an app already serves under its own name', async () => {
+    const s = store({ 'shop.example.com': app });
+    await expect(
+      ensureHostRecords(s.ctx, 'arn:kvs', { 'shop.example.com': { v: 1, x: 'www.example.com' } }),
+    ).rejects.toThrow(/already route somewhere else: shop.example.com/);
+    expect(s.put).toEqual([]);
   });
 });
 

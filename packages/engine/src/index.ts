@@ -15,16 +15,18 @@
  */
 
 import { GetCallerIdentityCommand } from '@aws-sdk/client-sts';
-import type {
-  Bindings,
-  PlatformRuntimeConfig,
-  RealtimeEdgeEntry,
-  ResolvedManifest,
-  RouteRecord,
-  WebCompute,
+import {
+  type Bindings,
+  hostRecords,
+  type PlatformRuntimeConfig,
+  type RealtimeEdgeEntry,
+  type ResolvedManifest,
+  type RouteRecord,
+  type WebCompute,
 } from '@ericminassian/platform-core';
 import { createClients } from './clients.ts';
 import { ensureRealtimePlatform } from './drivers/appsync.ts';
+import { ensureHostRecords } from './drivers/kvs.ts';
 import { putObject } from './drivers/s3.ts';
 import { ensureLocal } from './local.ts';
 import { deployStage, destroyStage, expireStorage, listStageResources, rollbackStage } from './stage.ts';
@@ -173,6 +175,12 @@ export interface Engine {
    * plane runs it nightly; `plat dev` serves the entry from its local router.
    */
   ensureRealtimePlatform(platform: PlatformRuntimeConfig): Promise<RealtimeEdgeEntry | undefined>;
+  /**
+   * Make the route store's entries for platform.config.ts `hosts` match them (`hostRecords` in
+   * core), removing the entries of hosts no longer there. Returns the hosts it changed; nothing
+   * on a platform without a route store.
+   */
+  ensureHosts(platform: PlatformRuntimeConfig): Promise<string[]>;
 }
 
 export function createEngine(opts: EngineOptions): Engine {
@@ -188,6 +196,10 @@ export function createEngine(opts: EngineOptions): Engine {
     listStageResources: (app, stage) => listStageResources(ctx, app, stage),
     putArtifact: (platform, key, body) => putObject(ctx, { bucket: platform.artifactsBucket, key, body }),
     ensureRealtimePlatform: (platform) => ensureRealtimePlatform(ctx, platform),
+    ensureHosts: async (platform) =>
+      platform.kvsArn
+        ? ensureHostRecords(ctx, platform.kvsArn, hostRecords(platform.hosts, platform.domain))
+        : [],
   };
   contexts.set(engine, ctx);
   return engine;

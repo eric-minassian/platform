@@ -1,6 +1,7 @@
 import { assert, describe, it } from '@effect/vitest';
 import {
   type AppRecord,
+  type AppSummary,
   type LogLine,
   MIN_SDK_VERSION,
   parseManifest,
@@ -14,7 +15,15 @@ import { afterEach, beforeEach } from 'vitest';
 import { AwsError } from '../src/aws.ts';
 import { WorkerJobFailed } from '../src/jobs/call.ts';
 import type { DeploymentItem, StageItem } from '../src/store.ts';
-import { api, ciToken, githubApp, memoryStore, type TestServices, testServices } from './support.ts';
+import {
+  api,
+  ciToken,
+  githubApp,
+  memoryStore,
+  platform,
+  type TestServices,
+  testServices,
+} from './support.ts';
 
 // The API as Lambda runs it: the platform's server wrapper over `toFetchHandler`,
 // routing, schemas, `Authenticated` and the handlers, on in-memory services.
@@ -447,6 +456,7 @@ describe('errors', () => {
     Effect.gen(function* () {
       const { request, signIn } = yield* setup({
         store: memoryStore({ apps: [shop, { ...shop, name: 'blog', repo: 'bob/blog' }] }),
+        settings: { platform: { ...platform, hosts: { 'home.example.com': { app: 'shop' } } } },
       });
       const bob = yield* signIn('bob');
       const create = (name: string) =>
@@ -461,6 +471,10 @@ describe('errors', () => {
       const reserved = yield* create('www');
       assert.strictEqual(reserved.status, 400);
       assert.strictEqual(((yield* json(reserved)) as { error: { code: string } }).error.code, 'bad_request');
+      // `hosts` names it: its entry in the route store would shadow the app's.
+      const aHost = yield* create('home');
+      assert.strictEqual(aHost.status, 400);
+      assert.match(((yield* json(aHost)) as { error: { message: string } }).error.message, /reserved/);
 
       const third = yield* create('notes');
       assert.strictEqual(third.status, 429);
@@ -470,6 +484,7 @@ describe('errors', () => {
 
       const someoneElses = yield* request('/v1/apps/shop', { headers: yield* signIn('ada') });
       assert.strictEqual(someoneElses.status, 200, 'admins see every app');
+      assert.deepStrictEqual(((yield* json(someoneElses)) as AppSummary).hosts, ['home.example.com']);
       const hidden = yield* request('/v1/apps/missing', { headers: bob });
       assert.deepStrictEqual(yield* json(hidden), {
         error: { code: 'not_found', message: 'app missing not found' },

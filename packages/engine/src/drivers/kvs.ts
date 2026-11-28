@@ -2,9 +2,15 @@ import {
   DeleteKeyCommand,
   DescribeKeyValueStoreCommand,
   GetKeyCommand,
+  ListKeysCommand,
   PutKeyCommand,
 } from '@aws-sdk/client-cloudfront-keyvaluestore';
-import { encodeRouteRecord, type RouteRecord } from '@ericminassian/platform-core';
+import {
+  encodeRouteRecord,
+  type HostRecord,
+  isHostRecord,
+  type RouteRecord,
+} from '@ericminassian/platform-core';
 import { type EngineContext, errorName, ignoreNotFound, retry } from '../util.ts';
 
 /**
@@ -48,6 +54,65 @@ export async function putKey(ctx: EngineContext, kvsArn: string, key: string, va
     },
     { when: isConflict, attempts: 8, delayMs: 300 },
   );
+}
+
+/** Every key and value in the store. */
+export async function listKeys(
+  ctx: EngineContext,
+  kvsArn: string,
+): Promise<Array<{ key: string; value: string }>> {
+  const out: Array<{ key: string; value: string }> = [];
+  let token: string | undefined;
+  do {
+    const page = await ctx.clients.kvs.send(new ListKeysCommand({ KvsARN: kvsArn, NextToken: token }));
+    for (const item of page.Items ?? []) if (item.Key) out.push({ key: item.Key, value: item.Value ?? '' });
+    token = page.NextToken;
+  } while (token);
+  return out;
+}
+
+const parsed = (value: string): unknown => {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Make the store's host entries (`hosts` in platform.config.ts) exactly
+ * `records`: write the missing and changed ones, and delete host entries
+ * that aren't there any more. Refuses to replace anything else (an app's
+ * route, the realtime entry): a host that names a live app would shadow it.
+ * Returns the hosts it changed.
+ */
+export async function ensureHostRecords(
+  ctx: EngineContext,
+  kvsArn: string,
+  records: Readonly<Record<string, HostRecord>>,
+): Promise<string[]> {
+  const existing = new Map((await listKeys(ctx, kvsArn)).map(({ key, value }) => [key, parsed(value)]));
+  const clash = Object.keys(records).filter((h) => existing.has(h) && !isHostRecord(existing.get(h)));
+  if (clash.length)
+    throw new Error(`hosts in platform.config.ts already route somewhere else: ${clash.join(', ')}`);
+  const changed: string[] = [];
+  for (const [host, record] of Object.entries(records)) {
+    const value = JSON.stringify(record);
+    if (JSON.stringify(existing.get(host)) === value) continue;
+    await putKey(ctx, kvsArn, host, value);
+    ctx.log(
+      'info',
+      `host ${host} → ${'a' in record ? record.a : `redirect to ${record.x}`}`,
+      `route ${host}`,
+    );
+    changed.push(host);
+  }
+  for (const [host, value] of existing) {
+    if (host in records || !isHostRecord(value)) continue;
+    await deleteRoute(ctx, kvsArn, host);
+    changed.push(host);
+  }
+  return changed;
 }
 
 export async function deleteRoute(ctx: EngineContext, kvsArn: string, host: string): Promise<void> {

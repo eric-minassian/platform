@@ -6,6 +6,7 @@ export * from './constants.ts';
 export * from './cron.ts';
 export * from './email.ts';
 export * from './explore.ts';
+export * from './hosts.ts';
 export * from './ids.ts';
 export * from './jobs.ts';
 export * from './manifest.ts';

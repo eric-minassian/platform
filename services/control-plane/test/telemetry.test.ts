@@ -281,7 +281,7 @@ describe('aggregateEdge', () => {
         hit({ 'cs-uri-stem': '/docs', 'sc-status': '304', 'sc-content-type': '-' }),
         hit({ 'x-host-header': 'todo--pr-3.example.com', 'cs-uri-stem': '/nope', 'sc-status': '404' }),
       ],
-      'example.com',
+      { domain: 'example.com' },
       served,
     );
     expect(agg.events).toBe(4);
@@ -316,12 +316,38 @@ describe('aggregateEdge', () => {
         '{"message":"not a record"}',
         'not json',
       ],
-      'example.com',
+      { domain: 'example.com' },
       served,
     );
     expect(agg).toEqual({ rollups: [], errors: [], events: 0 });
     expect(parseEdgeMessage('[]')).toBeNull();
     expect(parseEdgeMessage(hit())).toMatchObject({ 'x-host-header': 'todo.example.com' });
+  });
+
+  it('counts a host from platform.config.ts `hosts` for the stage it serves or redirects to', () => {
+    const agg = aggregateEdge(
+      [
+        hit({ 'x-host-header': 'www.example.com' }),
+        hit({ 'x-host-header': 'example.com', 'sc-status': '301', 'sc-content-type': '-' }),
+        hit({ 'x-host-header': 'old.example.com', 'sc-status': '301', 'sc-content-type': '-' }),
+      ],
+      {
+        domain: 'example.com',
+        hosts: {
+          'www.example.com': { app: 'todo' },
+          'example.com': { redirect: 'www.example.com' },
+          'old.example.com': { redirect: 'todo.example.com' },
+        },
+      },
+      served,
+    );
+    expect(agg.events).toBe(3);
+    expect(agg.rollups.find((r) => r.pk === 'v#todo#prod#1m')!.add).toEqual({
+      req: 3,
+      s2xx: 1,
+      s3xx: 2,
+      pages: 1,
+    });
   });
 });
 

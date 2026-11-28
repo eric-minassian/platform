@@ -261,6 +261,7 @@ function summary(app: DemoApp): AppSummary {
     traffic,
     alerts: { total: rules.length, alarm: rules.filter((r) => r.state === 'alarm').length },
     ...(stages.some((s) => s.stage === 'prod') ? { listed: true } : {}),
+    ...(app.hosts ? { hosts: [...app.hosts] } : {}),
   };
 }
 
@@ -301,7 +302,8 @@ const PublicDemo = HttpApiBuilder.group(PlatformApi, 'public', (h) =>
             (day) => bucketTraffic(app, app.routes, day, DAY).req * EDGE_PER_SERVER_REQUEST,
           );
           const pageViews = requests.map((n) => Math.round(n * PAGE_VIEW_SHARE));
-          return [publicApp(app.record, { ...prod, up: true }, live, live, { pageViews, requests })];
+          const url = app.hosts?.[0] ? `https://${app.hosts[0]}` : prod.url;
+          return [publicApp(app.record, { ...prod, up: true }, live, live, { pageViews, requests }, url)];
         });
         return Effect.succeed({
           generatedAt: iso(T0),

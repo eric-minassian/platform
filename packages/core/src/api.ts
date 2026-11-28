@@ -211,6 +211,8 @@ export const AppSummary = Schema.Struct({
   alerts: optional(Schema.Struct({ total: Schema.Finite, alarm: Schema.Finite })),
   /** Whether the public directory lists prod: its live deployment's `listed` (absent without one). */
   listed: optional(Schema.Boolean),
+  /** Hosts in platform.config.ts `hosts` that serve prod; the first is the app's public URL's. */
+  hosts: optional(Schema.Array(Schema.String)),
 });
 export type AppSummary = typeof AppSummary.Type;
 

@@ -17,6 +17,7 @@
     ".": "./src/index.ts",
     "./auth": "./src/auth.ts",
     "./cloudfront-function": "./src/cloudfront-function.ts",
+    "./constants": "./src/constants.ts",
     "./naming": "./src/naming.ts",
     "./platform-api": "./src/platform-api.ts",
     "./realtime": "./src/realtime.ts",
@@ -36,6 +37,10 @@
       "./cloudfront-function": {
         "types": "./dist/cloudfront-function.d.ts",
         "default": "./dist/cloudfront-function.js"
+      },
+      "./constants": {
+        "types": "./dist/constants.d.ts",
+        "default": "./dist/constants.js"
       },
       "./naming": {
         "types": "./dist/naming.d.ts",

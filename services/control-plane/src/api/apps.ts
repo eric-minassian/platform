@@ -3,6 +3,8 @@ import {
   type AlertRule,
   type AppRecord,
   type AppSummary,
+  hostLabels,
+  hostsOf,
   PROD_STAGE,
   stageHost,
   validateAppName,
@@ -76,6 +78,7 @@ export const AppsLive = HttpApiBuilder.group(
           )
         : [Option.none(), Option.none(), Option.none()];
       const lastDeployment = deployments[0];
+      const hosts = hostsOf(settings.platform.hosts, app.name);
       return {
         app,
         stages: stages.filter((s) => s.status !== 'destroyed').map(publicStage),
@@ -85,6 +88,7 @@ export const AppsLive = HttpApiBuilder.group(
         ...(Option.isSome(traffic) ? { traffic: traffic.value } : {}),
         ...(Option.isSome(alertsOf) ? { alerts: alertsOf.value } : {}),
         ...(Option.isSome(live) ? { listed: live.value.manifest?.listed ?? true } : {}),
+        ...(hosts.length ? { hosts } : {}),
       } satisfies AppSummary;
     });
 
@@ -113,7 +117,11 @@ export const AppsLive = HttpApiBuilder.group(
         Effect.gen(function* () {
           const me = yield* access.member;
           const { name, repo } = payload;
-          const nameErr = validateAppName(name, settings.platform.reservedAppNames);
+          // A label in `hosts` is a host entry in the route store, which would shadow the app's.
+          const nameErr = validateAppName(name, [
+            ...settings.platform.reservedAppNames,
+            ...hostLabels(settings.platform.hosts, settings.platform.domain),
+          ]);
           if (nameErr) return yield* BadRequest.of(nameErr);
           if (Option.isSome(yield* store.getApp(name))) return yield* exists(name);
           const mine = (yield* store.listApps).filter(

@@ -6,7 +6,7 @@ import { Effect } from 'effect';
 import { afterEach, beforeEach, expect } from 'vitest';
 import { directoryDays } from '../src/api/public.ts';
 import type { DeploymentItem, StageItem } from '../src/store.ts';
-import { api, memoryStore, testServices, wallClockAt } from './support.ts';
+import { api, memoryStore, platform, testServices, wallClockAt } from './support.ts';
 
 beforeEach(() => useTestBindings({ app: 'platform', stage: 'prod' }));
 afterEach(() => resetPlatform());
@@ -156,6 +156,38 @@ describe('public directory', () => {
       ]);
       // Only what's listed is read: prod's, never a preview's.
       assert.sameMembers(read, ['notes/prod', 'shop/prod']);
+    }),
+  );
+
+  it.effect('gives an app with a host in `hosts` that host as its URL', () =>
+    Effect.gen(function* () {
+      yield* wallClockAt(NOW);
+      const request = yield* api(
+        testServices({
+          store: memoryStore({
+            apps: [app('shop')],
+            stages: [stage('shop', 'prod')],
+            deployments: [deployment('shop', 'shop-prod')],
+          }),
+          telemetry: {
+            edgeCountingSince: Effect.succeedNone,
+            edgeDays: (_name, _stage, days) =>
+              Effect.succeed({ pageViews: days.map(() => 0), requests: days.map(() => 0) }),
+          },
+          settings: {
+            platform: {
+              ...platform,
+              hosts: { 'example.com': { redirect: 'home.example.com' }, 'home.example.com': { app: 'shop' } },
+            },
+          },
+        }),
+      );
+      const res = yield* request('/v1/public/apps');
+      const body = (yield* Effect.promise(() => res.json())) as PublicAppsResponse;
+      assert.deepStrictEqual(
+        body.apps.map((a) => a.url),
+        ['https://home.example.com'],
+      );
     }),
   );
 

@@ -3,12 +3,18 @@ import { Schema } from 'effect';
 import { describe, expect, it } from 'vitest';
 import { buildRouterFunctionCode } from '../src/cloudfront-function.ts';
 import {
+  appHost,
   decide,
   definePlatformConfig,
   errorFingerprint,
   HEALTH_PATH,
   handlerFunctionName,
   handlerSettings,
+  type HostRecord,
+  hostLabels,
+  hostRecords,
+  hostsOf,
+  isHostRecord,
   latencyBucket,
   names,
   newDeploymentId,
@@ -25,6 +31,7 @@ import {
   REALTIME_TOKEN_PATH,
   type RealtimeEdgeEntry,
   ResolvedManifest,
+  resolveHost,
   type RouteRecord,
   STORAGE_CACHE_HOST,
   STORAGE_PATH,
@@ -397,9 +404,10 @@ describe('router decide', () => {
   });
 
   /** Runs the generated function with a stub `cloudfront` module serving `routes`. */
-  function edge(routes: Record<string, RouteRecord | RealtimeEdgeEntry>) {
+  function edge(routes: Record<string, RouteRecord | RealtimeEdgeEntry | HostRecord>) {
     const origins: string[] = [];
     const originConfigs: Array<Record<string, unknown>> = [];
+    const originGroups: Array<Record<string, unknown>> = [];
     const cf = {
       kvs: () => ({
         get: async (host: string) => {
@@ -410,6 +418,9 @@ describe('router decide', () => {
       updateRequestOrigin: (o: { domainName: string }) => {
         origins.push(o.domainName);
         originConfigs.push(o);
+      },
+      createRequestOriginGroup: (g: Record<string, unknown>) => {
+        originGroups.push(g);
       },
     };
     const code = buildRouterFunctionCode({ kvsId: 'kvs-123' }).replace("import cf from 'cloudfront';", '');
@@ -425,12 +436,14 @@ describe('router decide', () => {
       uri: string,
       headers: Record<string, { value: string }> = {},
       extra: {
-        querystring?: Record<string, { value: string }>;
+        method?: string;
+        querystring?: Record<string, { value: string; multiValue?: Array<{ value: string }> }>;
         cookies?: Record<string, { value: string }>;
       } = {},
     ) =>
       handler({
         request: {
+          ...(extra.method ? { method: extra.method } : {}),
           uri,
           querystring: extra.querystring ?? {},
           headers: { host: { value: host }, ...headers },
@@ -444,7 +457,7 @@ describe('router decide', () => {
         querystring?: Record<string, unknown>;
         cookies?: Record<string, unknown>;
       }>;
-    return { request, origins, originConfigs };
+    return { request, origins, originConfigs, originGroups };
   }
 
   it('answers the realtime config and passes WebSockets to AppSync', async () => {
@@ -586,6 +599,102 @@ describe('router decide', () => {
     expect((await request('shop.example.com', HEALTH_PATH)).statusCode).toBeUndefined();
     expect(origins).toEqual(['fn.example']);
   });
+
+  it('serves an alias from the app’s own route: files share its cache entries, servers see the alias', async () => {
+    const { request, origins } = edge({
+      'shop.example.com': both,
+      'www.example.com': { v: 1, a: 'shop.example.com' },
+      'old.example.com': { v: 1, a: 'gone.example.com' },
+    });
+    const file = await request('www.example.com', '/assets/app.js');
+    expect(file.uri).toBe('/a/prod/d1/assets/app.js');
+    expect(file.headers['x-platform-host']?.value).toBe('shop.example.com');
+    const api = await request('www.example.com', '/api/todos');
+    expect(api.headers['x-platform-host']?.value).toBe('www.example.com');
+    expect(origins).toEqual(['fn.example']);
+    // An alias of a host nothing serves.
+    expect((await request('old.example.com', '/')).statusCode).toBe(404);
+  });
+
+  it('redirects a host, keeping the path and the query as the viewer sent it', async () => {
+    const { request } = edge({ 'example.com': { v: 1, x: 'www.example.com' } });
+    const res = await request(
+      'example.com',
+      '/projects/',
+      {},
+      {
+        querystring: {
+          q: { value: 'a%20b' },
+          tag: { value: 'x', multiValue: [{ value: 'x' }, { value: 'y' }] },
+          flag: { value: '' },
+        },
+      },
+    );
+    expect(res.statusCode).toBe(301);
+    expect(res.headers.location?.value).toBe('https://www.example.com/projects/?q=a%20b&tag=x&tag=y&flag');
+    expect((await request('example.com', HEALTH_PATH)).headers.location?.value).toBe(
+      `https://www.example.com${HEALTH_PATH}`,
+    );
+  });
+
+  it('pairs a file with the not-found origin, for the requests CloudFront fails over', async () => {
+    const site: RouteRecord = { v: 1, app: 'docs', stage: 'prod', d: 'd7', s: 'docs/prod/d7', spa: 0 };
+    const pub: RouteRecord = { ...both, p: ['public'] };
+    const { request, originGroups } = edge({ 'docs.example.com': site, 'shop.example.com': pub });
+    await request('docs.example.com', '/missing', {}, { method: 'GET' });
+    await request('docs.example.com', '/missing.png', {}, { method: 'HEAD' });
+    expect(originGroups).toEqual([
+      { originIds: ['sites', 'not-found'], failoverCriteria: { statusCodes: [403, 404] } },
+      { originIds: ['sites', 'not-found'], failoverCriteria: { statusCodes: [403, 404] } },
+    ]);
+    await request('docs.example.com', '/form', {}, { method: 'POST' });
+    await request('shop.example.com', '/api/todos', {}, { method: 'GET' });
+    await request('shop.example.com', `${STORAGE_PATH}public/a.png`, {}, { method: 'GET' });
+    expect(originGroups).toHaveLength(2);
+  });
+});
+
+describe('hosts', () => {
+  const hosts = {
+    'www.example.com': { app: 'site' },
+    'example.com': { redirect: 'www.example.com' },
+    'old.example.com': { redirect: 'shop.example.com' },
+    'home.example.com': { app: 'site' },
+  } as const;
+
+  it('makes a route-store entry of each, which no route record looks like', () => {
+    expect(hostRecords(hosts, 'example.com')).toEqual({
+      'www.example.com': { v: 1, a: 'site.example.com' },
+      'example.com': { v: 1, x: 'www.example.com' },
+      'old.example.com': { v: 1, x: 'shop.example.com' },
+      'home.example.com': { v: 1, a: 'site.example.com' },
+    });
+    expect(isHostRecord({ v: 1, a: 'site.example.com' })).toBe(true);
+    expect(isHostRecord({ v: 1, x: 'www.example.com' })).toBe(true);
+    expect(isHostRecord({ v: 1, app: 'a', stage: 'prod', d: 'd1', s: 'a/prod/d1' })).toBe(false);
+    expect(isHostRecord({ v: 1, o: 'rt', h: 'http', k: 'key' })).toBe(false);
+    expect(hostRecords(undefined, 'example.com')).toEqual({});
+  });
+
+  it('gives an app its hosts in order, the first as what it calls itself on prod', () => {
+    expect(hostsOf(hosts, 'site')).toEqual(['www.example.com', 'home.example.com']);
+    expect(hostsOf(hosts, 'shop')).toEqual([]);
+    expect(appHost({ hosts }, 'site', 'prod', 'site.example.com')).toBe('www.example.com');
+    expect(appHost({ hosts }, 'site', 'pr-3', 'site--pr-3.example.com')).toBe('site--pr-3.example.com');
+    expect(appHost({}, 'site', 'prod', 'site.example.com')).toBe('site.example.com');
+  });
+
+  it('finds the stage a host’s traffic belongs to', () => {
+    expect(resolveHost('WWW.example.com:443', 'example.com', hosts)).toEqual({ app: 'site', stage: 'prod' });
+    expect(resolveHost('example.com', 'example.com', hosts)).toEqual({ app: 'site', stage: 'prod' });
+    expect(resolveHost('old.example.com', 'example.com', hosts)).toEqual({ app: 'shop', stage: 'prod' });
+    expect(resolveHost('shop--pr-2.example.com', 'example.com', hosts)).toEqual({
+      app: 'shop',
+      stage: 'pr-2',
+    });
+    expect(resolveHost('example.com', 'example.com', undefined)).toBeNull();
+    expect(hostLabels(hosts, 'example.com')).toEqual(['www', 'old', 'home']);
+  });
 });
 
 describe('telemetry', () => {
@@ -656,5 +765,27 @@ describe('platform config', () => {
   it('turns the floor on only with both its limit and its threshold', () => {
     expect(() => floor(1000)).toThrow(/set together/);
     expect(() => floor(undefined, 1000)).toThrow(/set together/);
+  });
+
+  it('takes hosts the edge certificate covers and the root zone leaves to the edge', () => {
+    const withHosts = (hosts: PlatformConfig['hosts'], reservedAppNames: string[] = []) =>
+      definePlatformConfig({ ...base, hosts, reservedAppNames });
+    expect(
+      withHosts({ 'www.example.com': { app: 'site' }, 'example.com': { redirect: 'www.example.com' } }).hosts,
+    ).toBeDefined();
+    expect(() => withHosts({ 'www.other.com': { app: 'site' } })).toThrow(/one lowercase label under it/);
+    expect(() => withHosts({ 'a.b.example.com': { app: 'site' } })).toThrow(/one lowercase label/);
+    expect(() => withHosts({ 'WWW.example.com': { app: 'site' } })).toThrow(/one lowercase label/);
+    expect(() => withHosts({ 'x--y.example.com': { app: 'site' } })).toThrow(/without "--"/);
+    expect(() => withHosts({ 'orbit.example.com': { app: 'site' } }, ['orbit'])).toThrow(/reservedAppNames/);
+    expect(() => withHosts({ 'www.example.com': { app: 'Site' } })).toThrow(/isn't an app name/);
+    expect(() => withHosts({ 'example.com': { redirect: 'example.com' } })).toThrow(/to itself/);
+    expect(() => withHosts({ 'example.com': { redirect: 'www.other.com' } })).toThrow(/must be example.com/);
+    expect(() =>
+      withHosts({
+        'example.com': { redirect: 'www.example.com' },
+        'www.example.com': { redirect: 'a.example.com' },
+      }),
+    ).toThrow(/redirects again/);
   });
 });

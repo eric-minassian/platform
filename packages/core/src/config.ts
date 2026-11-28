@@ -4,6 +4,8 @@
  * plus a platform deploy. No emails or account ids here (the repo is public).
  */
 import { Schema } from 'effect';
+import { type Hosts, hostsErrors } from './hosts.ts';
+
 export const MemberRole = Schema.Literals(['admin', 'member']);
 export type MemberRole = typeof MemberRole.Type;
 
@@ -32,6 +34,13 @@ export interface PlatformConfig {
   members: Member[];
   /** Names that already exist in the root zone (delegated or static records). */
   reservedAppNames: string[];
+  /**
+   * Names beyond `<app>.<domain>` the edge serves (`hosts.ts`): an app's prod
+   * stage, which then has the first such host as its public URL, or a
+   * redirect. The root zone points each at the edge (eric-minassian/aws); the
+   * apex also needs the edge certificate and distribution, which follow it.
+   */
+  hosts?: Hosts;
   /** Preview stages untouched for this long are destroyed by the reaper. */
   previewTtlDays: number;
   limits: {
@@ -67,6 +76,8 @@ export function definePlatformConfig(config: PlatformConfig): PlatformConfig {
   // One without the other is a floor that never turns on, or one with no limit to enforce.
   if ((perClient === undefined) !== (at === undefined))
     throw new Error('limits.edgeRequestsPerMinute and limits.edgeFloorAt are set together, or neither');
+  const hostErrors = hostsErrors(config.hosts ?? {}, config.domain, config.reservedAppNames);
+  if (hostErrors.length) throw new Error(hostErrors.join('\n'));
   const seen = new Set<string>();
   for (const m of config.members) {
     const key = m.github.toLowerCase();

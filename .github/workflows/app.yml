@@ -50,8 +50,12 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
+      # Node 25 and later ship without corepack (which installs the pnpm `packageManager` names), so
+      # it's installed next to that Node, not taken from whatever older one the image has on PATH.
       - name: Enable pnpm (corepack)
-        run: corepack enable
+        run: |
+          [ -x "$(dirname "$(command -v node)")/corepack" ] || npm install --global corepack
+          corepack enable
       - name: Install
         run: pnpm install --frozen-lockfile
       - name: Typecheck
@@ -103,7 +107,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
-      - run: corepack enable
+      - name: Enable pnpm (corepack)
+        run: |
+          [ -x "$(dirname "$(command -v node)")/corepack" ] || npm install --global corepack
+          corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Deploy preview
         id: deploy
@@ -146,7 +153,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
-      - run: corepack enable
+      - name: Enable pnpm (corepack)
+        run: |
+          [ -x "$(dirname "$(command -v node)")/corepack" ] || npm install --global corepack
+          corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Deploy prod
         id: deploy
@@ -176,7 +186,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
-      - run: corepack enable
+      - name: Enable pnpm (corepack)
+        run: |
+          [ -x "$(dirname "$(command -v node)")/corepack" ] || npm install --global corepack
+          corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Find Playwright
         id: playwright
@@ -247,7 +260,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
-      - run: corepack enable
+      - name: Enable pnpm (corepack)
+        run: |
+          [ -x "$(dirname "$(command -v node)")/corepack" ] || npm install --global corepack
+          corepack enable
       - run: pnpm install --frozen-lockfile
       - name: Destroy preview
         run: pnpm exec plat destroy --stage pr-${{ github.event.pull_request.number }} --yes

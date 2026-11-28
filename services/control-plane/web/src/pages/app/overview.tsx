@@ -61,7 +61,7 @@ import {
 import { Badge } from '../../components/ui/badge.tsx';
 import { Button } from '../../components/ui/button.tsx';
 import { alertRulesAtom, deploymentsAtom, family, seriesAtom } from '../../data/atoms.ts';
-import { stageOf, useAppSummary, useDeployment, useLiveManifest } from '../../data/hooks.ts';
+import { stageOf, useAppSummary, useDeployment, useLiveManifest, visitOf } from '../../data/hooks.ts';
 import { fmtMs, fmtNum, fmtPct, fmtUsd, relTime, shortId } from '../../format.ts';
 import { useAutoRefresh, useStage, useSticky, useTime } from '../../lib/hooks.ts';
 import { formatterFor } from '../../lib/series.ts';
@@ -469,6 +469,7 @@ function Recorded({ app, stage, time }: { app: string; stage: string; time: Time
 function Header({ app, stage }: { app: string; stage: string }) {
   const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));
   const current = stageOf(summary, stage);
+  const visit = current ? visitOf(summary, current) : undefined;
   const up = stage === 'prod' ? summary?.health?.up : undefined;
   return (
     <PageHeader
@@ -502,11 +503,11 @@ function Header({ app, stage }: { app: string; stage: string }) {
               Repository
             </Button>
           )}
-          {current && current.status !== 'destroyed' && (
+          {current && visit && current.status !== 'destroyed' && (
             <Button
               size="sm"
               render={
-                <a href={current.url} target="_blank" rel="noreferrer" aria-label={`Visit ${current.host}`} />
+                <a href={visit.url} target="_blank" rel="noreferrer" aria-label={`Visit ${visit.host}`} />
               }
             >
               Visit
@@ -534,6 +535,7 @@ function LiveDeployment({ app, stage }: { app: string; stage: string }) {
   );
   const { busy, rollBack } = useRollback(app);
   if (!current) return null;
+  const visit = visitOf(summary, current);
   const previous = live
     ? deployments.find((d) => d.id !== live.id && d.status === 'succeeded' && d.createdAt < live.createdAt)
     : undefined;
@@ -610,12 +612,12 @@ function LiveDeployment({ app, stage }: { app: string; stage: string }) {
           </Detail>
           <Detail label="Domain">
             <a
-              href={current.url}
+              href={visit.url}
               target="_blank"
               rel="noreferrer"
               className="inline-flex max-w-full items-center gap-1 rounded-sm outline-hidden hover:underline focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid"
             >
-              <span className="truncate">{current.host}</span>
+              <span className="truncate">{visit.host}</span>
               <ArrowUpRight className="size-3.5 shrink-0 text-subtle" />
             </a>
           </Detail>

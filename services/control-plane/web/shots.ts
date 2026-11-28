@@ -17,10 +17,14 @@ import { createServer } from 'vite';
 
 const root = resolve(import.meta.dirname, '..');
 
-/** Each page worth a picture, on the demo's apps: atlas has jobs, inbox email, notes realtime. */
+/**
+ * Each page worth a picture, on the demo's apps: atlas has jobs, inbox email, notes realtime,
+ * shortlinks a host of its own in `hosts`.
+ */
 const PAGES: Record<string, string> = {
   apps: '/',
   overview: '/apps/atlas',
+  'overview-host': '/apps/shortlinks',
   metrics: '/apps/atlas/metrics',
   logs: '/apps/atlas/logs',
   traces: '/apps/atlas/traces',

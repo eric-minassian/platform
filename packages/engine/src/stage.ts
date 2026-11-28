@@ -4,6 +4,7 @@ import { GetRoleCommand } from '@aws-sdk/client-iam';
 import { GetWebFunctionCommand } from '@aws-sdk/client-lambda-web';
 import {
   AUTH_ROUTES,
+  appHost,
   BINDINGS_ENV,
   type Bindings,
   cognitoIssuer,
@@ -164,6 +165,10 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
   const tags = stageTags(app, stage);
   const host = hostFor(platform, app, stage);
   const url = publicUrl(platform, host);
+  // What the app calls itself: prod's host in platform.config.ts `hosts`, an alias of this route,
+  // if it has one. The route, and everything checking that a deploy is served, stay on `host`.
+  const ownHost = appHost(platform, app, stage, host);
+  const ownUrl = publicUrl(platform, ownHost);
   const retention = input.logRetentionDays ?? (prod ? 30 : 7);
   const hasWeb = Boolean(m.web?.server) && webMode === 'function';
   const hasWorker = Boolean(m.worker);
@@ -262,8 +267,8 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     const clientId = await ensureUserPoolClient(ctx, {
       userPoolId: platform.userPoolId,
       name: names.userPoolClient(app, stage),
-      callbackUrls: [`${url}${AUTH_ROUTES.callback}`],
-      logoutUrls: [`${url}/`],
+      callbackUrls: [`${ownUrl}${AUTH_ROUTES.callback}`],
+      logoutUrls: [`${ownUrl}/`],
     });
     if (ctx.target === 'aws')
       await ensureLoginBranding(ctx, {
@@ -347,8 +352,8 @@ export async function deployStage(ctx: EngineContext, input: DeployStageInput): 
     v: 2,
     app,
     stage,
-    host,
-    url,
+    host: ownHost,
+    url: ownUrl,
     revision: deploymentId,
     region,
     account: acct,

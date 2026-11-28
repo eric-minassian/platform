@@ -34,6 +34,22 @@ export interface HealthResponse {
 
 /** Header the router sets so apps (and the cache key) see the public host. */
 export const HOST_HEADER = 'x-platform-host';
+/**
+ * The router distribution's origins a static request's origin group pairs:
+ * the sites bucket, then the function that answers a build's missing file
+ * with its `404.html` (`NOT_FOUND_FILE`).
+ */
+export const SITES_ORIGIN_ID = 'sites';
+export const NOT_FOUND_ORIGIN_ID = 'not-found';
+/** A static build's page for files it doesn't have, served with status 404. */
+export const NOT_FOUND_FILE = '404.html';
+/**
+ * The not-found origin's own behavior on the distribution, which only exists
+ * so the distribution holds that origin: the router runs there as everywhere
+ * else and never sends a request to it.
+ */
+export const NOT_FOUND_PATH = '/__platform/not-found';
+
 /** Trace propagation header (W3C traceparent is also honored). */
 export const TRACE_HEADER = 'x-platform-trace';
 

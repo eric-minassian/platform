@@ -21,6 +21,12 @@ export function stageOf(summary: AppSummary | undefined, stage: string): StageRe
   return summary?.stages.find((s) => s.stage === stage);
 }
 
+/** Where visitors find a stage: prod's first host in platform.config.ts `hosts`, else its own. */
+export function visitOf(summary: AppSummary | undefined, stage: StageRecord): { host: string; url: string } {
+  const host = stage.stage === 'prod' ? summary?.hosts?.[0] : undefined;
+  return host ? { host, url: `https://${host}` } : { host: stage.host, url: stage.url };
+}
+
 /** The manifest of the stage's live deployment, once both are loaded. */
 export function useLiveManifest(app: string | undefined, stage: string): ResolvedManifest | undefined {
   const summary = Option.getOrUndefined(AsyncResult.value(useAppSummary(app)));

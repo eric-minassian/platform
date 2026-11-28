@@ -27,6 +27,13 @@ export default definePlatformConfig({
     'simply-personalized',
     'simply-personalized-beta',
   ],
+  // Names beyond `<app>.ericminassian.com`: the personal site (eric-minassian/website) at www, and
+  // the apex sent there. Each needs its record in the root zone pointing at the edge (the apex an
+  // alias to the distribution, which a CNAME can't be), which github.com/eric-minassian/aws holds.
+  hosts: {
+    'www.ericminassian.com': { app: 'website' },
+    'ericminassian.com': { redirect: 'www.ericminassian.com' },
+  },
   previewTtlDays: 7,
   limits: {
     appsPerMember: 50,

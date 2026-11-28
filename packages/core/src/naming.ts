@@ -181,7 +181,14 @@ export const platformNames = {
   stateTable: 'platform',
   telemetryTable: 'platform-telemetry',
   keyValueStore: 'platform-routes',
+  /**
+   * The router CloudFront Function's name, before `-<hash of its code>`: changed code is a new
+   * function, which the distribution switches to in the same update that brings any origin the
+   * code needs, so no edge runs code ahead of its origins.
+   */
   routerFunction: 'platform-router',
+  /** The router's not-found origin: a function URL that serves a build's `404.html`. */
+  notFoundFunction: 'platform-not-found',
   userPool: 'platform-users',
   boundaryPolicy: 'platform-app-boundary',
   /** The AppSync Event API every stage's channel namespace lives in. */

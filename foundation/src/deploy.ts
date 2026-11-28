@@ -5,8 +5,9 @@
  *                    key, a generated secret CloudFormation can't hold
  *  2. control-plane  services/control-plane as the `platform` app, through
  *                    the engine like any other app; then realtime's public
- *                    subscribe key and route-store entry, and the edge
- *                    floor alarm's permission to invoke the worker
+ *                    subscribe key and route-store entry, the route-store
+ *                    entries of `hosts`, and the edge floor alarm's
+ *                    permission to invoke the worker
  *  3. telemetry      the account-level log subscription and the router access
  *                    log's, which target the control plane's worker and so
  *                    come after it
@@ -152,6 +153,9 @@ async function main(): Promise<void> {
     // control plane extends the key nightly); make sure both exist as soon as the API does.
     if (await engine.ensureRealtimePlatform(runtime))
       console.log('    realtime: key and route entry current');
+    // platform.config.ts `hosts`: each is an entry in the route store, which no app deploy writes.
+    const hosts = await engine.ensureHosts(runtime);
+    console.log(`    hosts: ${hosts.length ? `updated ${hosts.join(', ')}` : 'current'}`);
   }
 
   if (phases.includes('telemetry')) {

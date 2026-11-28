@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { HOST_HEADER, ORIGIN_HEADER } from './constants.ts';
+import { HOST_HEADER, NOT_FOUND_ORIGIN_ID, ORIGIN_HEADER, SITES_ORIGIN_ID } from './constants.ts';
 import { APPSYNC_REALTIME_PATH, REALTIME_KVS_KEY } from './realtime.ts';
 import { PUBLIC_STORAGE_ROOT, STORAGE_CACHE_HOST, STORAGE_PATH } from './storage.ts';
 
@@ -12,6 +12,10 @@ import { PUBLIC_STORAGE_ROOT, STORAGE_CACHE_HOST, STORAGE_PATH } from './storage
  * `REALTIME_PATH` is answered here (the browser's config) or passed to the
  * AppSync realtime endpoint (a WebSocket). The `STORAGE_PATH` behavior runs
  * it too: a public store's file is rewritten into that behavior's origin.
+ *
+ * A host from platform.config.ts `hosts` has a `HostRecord` instead: a
+ * redirect is answered here, and an alias reads the app's own host's record
+ * and goes on with it.
  */
 export function buildRouterFunctionCode(opts: { kvsId: string; originReadTimeoutSeconds?: number }): string {
   const decideSrc = readFileSync(new URL('./router/decide.js', import.meta.url), 'utf8')
@@ -59,6 +63,20 @@ async function realtime(req, rec) {
   return json(cfg);
 }
 
+// Query values arrive as the viewer sent them (still encoded), so they're joined as they are.
+function query(qs) {
+  var parts = [];
+  for (var key in qs) {
+    var values = qs[key].multiValue || [qs[key]];
+    for (var i = 0; i < values.length; i++) parts.push(values[i].value === '' ? key : key + '=' + values[i].value);
+  }
+  return parts.length ? '?' + parts.join('&') : '';
+}
+
+function redirect(req, host) {
+  return { statusCode: 301, statusDescription: 'Moved Permanently', headers: { location: { value: 'https://' + host + req.uri + query(req.querystring) }, 'cache-control': { value: 'public, max-age=86400' } } };
+}
+
 function notFound() {
   return { statusCode: 404, statusDescription: 'Not Found', headers: { 'content-type': { value: 'text/plain' }, 'cache-control': { value: 'no-store' } }, body: 'Nothing is deployed here.' };
 }
@@ -71,15 +89,28 @@ async function handler(event) {
   try { raw = await kvs.get(host); } catch (e) { return notFound(); }
   var rec;
   try { rec = JSON.parse(raw); } catch (e) { return notFound(); }
+  if (rec.x) return redirect(req, rec.x);
+  var own = host;
+  if (rec.a) {
+    own = rec.a;
+    try { raw = await kvs.get(own); } catch (e) { return notFound(); }
+    try { rec = JSON.parse(raw); } catch (e) { return notFound(); }
+  }
   var d = decide(rec, req.uri);
   if (d.t === 'notfound') return notFound();
   if (d.t === 'health') return health(rec);
   if (d.t === 'realtime') return await realtime(req, rec);
-  req.headers[${JSON.stringify(HOST_HEADER)}] = { value: host };
+  // A server sees the host the viewer asked for; an alias's files share the own host's cache entries.
+  req.headers[${JSON.stringify(HOST_HEADER)}] = { value: d.t === 'static' ? own : host };
   if (d.t === 'static') {
     req.uri = d.key;
     req.cookies = {};
     delete req.headers['authorization'];
+    // A file the build doesn't have (S3 answers 403 without ListBucket) goes to the not-found
+    // origin, which serves the build's 404 page. CloudFront fails over only GET and HEAD.
+    if (req.method === 'GET' || req.method === 'HEAD') {
+      cf.createRequestOriginGroup({ originIds: [${JSON.stringify(SITES_ORIGIN_ID)}, ${JSON.stringify(NOT_FOUND_ORIGIN_ID)}], failoverCriteria: { statusCodes: [403, 404] } });
+    }
     return req;
   }
   // Only on the ${STORAGE_PATH}* behavior, whose origin is the storage bucket under ${PUBLIC_STORAGE_ROOT}.

@@ -10,7 +10,8 @@ import {
   HEALTH_PATH,
   isPageView,
   latencyBucket,
-  parseStageHost,
+  type PlatformConfig,
+  resolveHost,
   RESOLUTION_TTL_DAYS,
   type Resolution,
   TelemetryEvent,
@@ -289,13 +290,14 @@ export function parseEdgeMessage(message: string): EdgeLogRecord | null {
  * The router's access log (`platformNames.edgeLogGroup`) as edge rollups
  * (`telemetryKeys.edge`) of the stages its hosts name: each request, by
  * status class, and whether it loaded a page. Health checks aren't traffic
- * (as in `aggregate`). Only stages the platform `serves` count: a host that
- * names none (a typo, a scan of made-up names, the edge host itself) gets a
- * 404 and no rows.
+ * (as in `aggregate`). A host in platform.config.ts `hosts` counts for the
+ * stage it serves or redirects to. Only stages the platform `serves` count: a
+ * host that names none (a typo, a scan of made-up names, the edge host
+ * itself) gets a 404 and no rows.
  */
 export function aggregateEdge(
   messages: readonly string[],
-  domain: string,
+  platform: Pick<PlatformConfig, 'domain' | 'hosts'>,
   serves: (app: string, stage: string) => boolean,
 ): Aggregation {
   const { rollups, bump } = rollupBatch();
@@ -308,7 +310,7 @@ export function aggregateEdge(
     if (!Number.isFinite(ts) || !Number.isFinite(status)) continue;
     const uri = r['cs-uri-stem'];
     if (uri === HEALTH_PATH) continue;
-    const target = parseStageHost(r['x-host-header'], domain);
+    const target = resolveHost(r['x-host-header'], platform.domain, platform.hosts);
     if (!target || !serves(target.app, target.stage)) continue;
     events++;
     const add: Record<string, number> = { req: 1 };

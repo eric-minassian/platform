@@ -16,6 +16,7 @@ import {
   decide,
   type HealthResponse,
   HOST_HEADER,
+  NOT_FOUND_FILE,
   PUBLIC_STORAGE_ROOT,
   type RealtimeClientConfig,
   type RealtimeEdgeEntry,
@@ -86,7 +87,8 @@ export interface LocalRouterState {
 export type LocalDecision =
   | { kind: 'server'; target: Target }
   | { kind: 'webdev'; target: Target }
-  | { kind: 'file'; path: string }
+  /** `notFound`: the build's 404 page, served with status 404 when `path` isn't a file, as the edge does. */
+  | { kind: 'file'; path: string; notFound?: string }
   | { kind: 'health'; body: HealthResponse }
   | { kind: 'realtime'; realtime: LocalRealtime }
   | { kind: 'storage'; key: string; files: PublicFiles }
@@ -128,7 +130,9 @@ export function localDecision(state: LocalRouterState, uri: string): LocalDecisi
   const prefix = `/${state.record.s ?? ''}`;
   const rel = d.key.startsWith(prefix) ? d.key.slice(prefix.length) : d.key;
   const file = safeJoin(state.staticDir, decodeURIComponent(rel));
-  return file ? { kind: 'file', path: file } : { kind: 'notfound' };
+  return file
+    ? { kind: 'file', path: file, notFound: join(state.staticDir, NOT_FOUND_FILE) }
+    : { kind: 'notfound' };
 }
 
 function decodedOrUndefined(path: string): string | undefined {
@@ -236,7 +240,7 @@ export function startLocalRouter(opts: LocalRouterOptions): Promise<Server> {
       case 'webdev':
         return proxy(req, res, d.target, false);
       case 'file':
-        return serveFile(res, d.path);
+        return serveFile(res, d.path, d.notFound);
       case 'health':
         res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
         return res.end(JSON.stringify(d.body));
@@ -368,13 +372,18 @@ function tunnel(
   socket.once('error', close);
 }
 
-function serveFile(res: ServerResponse, path: string): void {
-  if (!existsSync(path) || !statSync(path).isFile()) {
+const isFile = (path: string) => existsSync(path) && statSync(path).isFile();
+
+function serveFile(res: ServerResponse, path: string, notFound?: string): void {
+  if (isFile(path)) {
+    res.writeHead(200, { 'content-type': contentTypeFor(path), 'cache-control': 'no-cache' });
+    createReadStream(path).pipe(res);
+  } else if (notFound && isFile(notFound)) {
+    res.writeHead(404, { 'content-type': contentTypeFor(notFound), 'cache-control': 'no-cache' });
+    createReadStream(notFound).pipe(res);
+  } else {
     text(res, 404, 'Not found\n');
-    return;
   }
-  res.writeHead(200, { 'content-type': contentTypeFor(path), 'cache-control': 'no-cache' });
-  createReadStream(path).pipe(res);
 }
 
 /** A public store's file with the headers the edge sends (see core `storage.ts`). */
