@@ -8,10 +8,7 @@ import {
   ListSchedulesCommand,
   UpdateScheduleCommand,
 } from '@aws-sdk/client-scheduler';
-import { atExpression } from '@ericminassian/platform-core';
 import { type EngineContext, ignoreNotFound, retry, tagList, waitFor } from '../util.ts';
-
-export { atExpression };
 
 export async function ensureScheduleGroup(
   ctx: EngineContext,
@@ -75,63 +72,6 @@ export async function ensureSchedule(ctx: EngineContext, spec: ScheduleSpec): Pr
   if (!existing) ctx.log('info', 'created schedule', `schedule ${spec.group}/${spec.name}`);
 }
 
-export interface OneShotScheduleSpec {
-  group: string;
-  name: string;
-  /** When it fires (to the second, UTC). The schedule deletes itself afterwards. */
-  at: Date;
-  target: { arn: string; roleArn: string; input: string };
-}
-
-/** Inverse of {@link atExpression}. */
-export function parseAtExpression(expression: string | undefined): Date | undefined {
-  const m = /^at\((\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\)$/.exec(expression ?? '');
-  return m ? new Date(`${m[1]}Z`) : undefined;
-}
-
-/** Create or move a schedule that fires once, then deletes itself. */
-export async function ensureOneShotSchedule(ctx: EngineContext, spec: OneShotScheduleSpec): Promise<void> {
-  const sch = ctx.clients.scheduler;
-  const definition = {
-    Name: spec.name,
-    GroupName: spec.group,
-    ScheduleExpression: atExpression(spec.at),
-    ScheduleExpressionTimezone: 'UTC',
-    ActionAfterCompletion: 'DELETE' as const,
-    FlexibleTimeWindow: { Mode: 'OFF' as const },
-    State: 'ENABLED' as const,
-    Target: {
-      Arn: spec.target.arn,
-      RoleArn: spec.target.roleArn,
-      Input: spec.target.input,
-      RetryPolicy: { MaximumRetryAttempts: 5, MaximumEventAgeInSeconds: 3600 },
-    },
-  };
-  const existing = await ignoreNotFound(
-    sch.send(new GetScheduleCommand({ Name: spec.name, GroupName: spec.group })),
-  );
-  await retry(
-    () =>
-      existing
-        ? sch.send(new UpdateScheduleCommand(definition))
-        : sch.send(new CreateScheduleCommand(definition)),
-    { when: (e) => /assume the role|execution role/i.test((e as Error).message), attempts: 12 },
-  );
-  ctx.log('info', `fires at ${spec.at.toISOString()}`, `schedule ${spec.group}/${spec.name}`);
-}
-
-/** When a one-shot schedule fires, or undefined when there is none (or it isn't one-shot). */
-export async function getOneShotScheduleTime(
-  ctx: EngineContext,
-  group: string,
-  name: string,
-): Promise<Date | undefined> {
-  const s = await ignoreNotFound(
-    ctx.clients.scheduler.send(new GetScheduleCommand({ Name: name, GroupName: group })),
-  );
-  return parseAtExpression(s?.ScheduleExpression);
-}
-
 export async function listSchedules(ctx: EngineContext, group: string): Promise<string[]> {
   const out: string[] = [];
   let NextToken: string | undefined;
@@ -160,14 +100,5 @@ export async function deleteScheduleGroup(ctx: EngineContext, group: string): Pr
     ctx.clients.scheduler.send(new GetScheduleGroupCommand({ Name: group })),
   );
   if (!exists || exists.State === 'DELETING') return;
-  await ignoreNotFound(ctx.clients.scheduler.send(new DeleteScheduleGroupCommand({ Name: group })));
-}
-
-/** Delete the group if no schedule is left in it. */
-export async function deleteScheduleGroupIfEmpty(ctx: EngineContext, group: string): Promise<void> {
-  const exists = await ignoreNotFound(
-    ctx.clients.scheduler.send(new GetScheduleGroupCommand({ Name: group })),
-  );
-  if (!exists || exists.State === 'DELETING' || (await listSchedules(ctx, group)).length) return;
   await ignoreNotFound(ctx.clients.scheduler.send(new DeleteScheduleGroupCommand({ Name: group })));
 }

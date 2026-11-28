@@ -98,7 +98,7 @@ describe('filtered log search', () => {
               from: T0,
               to: T0 + 60_000,
               q: 'o',
-              filters: { levels: ['error'], streams: ['web', 'worker', 'service:gone'] },
+              filters: { levels: ['error'], streams: ['web', 'worker'] },
               limit: 2,
               nextToken,
             }),
@@ -157,7 +157,7 @@ describe('filtered log search', () => {
       assert.match((yield* search({ q: '{ $.status = 500 }' })).message, /filter pattern/);
       assert.strictEqual(
         (yield* search({ filters: { levels: ['warn'], streams: ['../other'] } })).message,
-        'stream must be web, worker or service:<name>',
+        'stream must be web or worker',
       );
       assert.match((yield* search({ filters: { routes: ['/a" or "'] } })).message, /path pattern/);
       assert.deepStrictEqual(logs.started(), []);
@@ -258,7 +258,8 @@ describe('Logs Insights', () => {
           { route: '/a', n: '2', '@ptr': 'p' },
           { route: '/b', n: '1', '@ptr': 'p' },
         ]),
-        ['web', 'web.local', 'services/ais'],
+        // `services/ais`: a long-running service's, left from before services were removed.
+        ['web', 'web.local', 'worker', 'services/ais'],
       );
       const res = yield* settle(
         logs.use((l) =>
@@ -283,7 +284,7 @@ describe('Logs Insights', () => {
       });
       const [start] = logs.started();
       assert.strictEqual(start?.queryLanguage, 'CWLI');
-      assert.deepStrictEqual(start?.logGroupNames, [`${PREFIX}web`, `${PREFIX}services/ais`]);
+      assert.deepStrictEqual(start?.logGroupNames, [`${PREFIX}web`, `${PREFIX}worker`]);
     }),
   );
 

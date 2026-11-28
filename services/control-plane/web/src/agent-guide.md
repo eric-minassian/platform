@@ -74,8 +74,6 @@ plat email [--since 7d]
 plat email suppressed
 plat email unsuppress <address>
 plat email resume
-plat services
-plat services restart|start|stop <name> [--minutes <n>]
 ```
 
 ## Rules

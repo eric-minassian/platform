@@ -252,6 +252,22 @@ describe('manifest', () => {
     ).toThrow(/visibilityTimeoutSeconds/);
   });
 
+  it('refuses long-running services, which went away with Fargate', () => {
+    expect(() => parseManifest({ name: 'atlas', services: { ships: { entry: 'src/ships.ts' } } })).toThrow(
+      /services: removed in 0\.5\.0/,
+    );
+  });
+
+  it('decodes deployments recorded with long-running services', () => {
+    const stored = {
+      ...parseManifest({ name: 'atlas' }),
+      services: {
+        ships: { entry: 'src/ships.ts', cpu: 0.25, memoryMb: 512, spot: true, previewMinutes: 30 },
+      },
+    };
+    expect(Schema.decodeUnknownSync(ResolvedManifest)(stored)).not.toHaveProperty('services');
+  });
+
   it('decodes deployments recorded when queues were SQS queues', () => {
     const stored = {
       ...parseManifest({ name: 'atlas', queues: { refresh: {} } }),
@@ -616,7 +632,7 @@ describe('platform config', () => {
     members: [{ github: 'ada', role: 'admin' }],
     reservedAppNames: [],
     previewTtlDays: 7,
-    limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1, servicesPerApp: 1 },
+    limits: { appsPerMember: 1, stagesPerApp: 1, emailsPerDay: 1 },
     telemetry: { logRetentionDays: { prod: 1, other: 1 } },
   };
   const floor = (edgeRequestsPerMinute?: number, edgeFloorAt?: number) =>

@@ -25,7 +25,6 @@ import { spawnWebServer } from '../src/dev/index.ts';
 import { emulatorClientConfig, type LocalStage, localEnv, startLocalStage } from '../src/dev/local-stage.ts';
 import { createInbox, localMailUrl } from '../src/dev/mail.ts';
 import { type LocalRouterState, localRouteRecord, startLocalRouter } from '../src/dev/router.ts';
-import { spawnService } from '../src/dev/services.ts';
 import { relayUpload } from '../src/dev/upload-relay.ts';
 import {
   type Dispatcher,
@@ -45,7 +44,6 @@ const { manifest } = await loadProject(root);
 describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => {
   let stage: LocalStage;
   let server: ChildProcess | undefined;
-  const services: ChildProcess[] = [];
   let worker: LocalWorker | undefined;
   let dispatcher: Dispatcher | undefined;
   let workerOutput = '';
@@ -66,25 +64,8 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
     dispatcher?.stop();
     worker?.stop();
     server?.kill('SIGTERM');
-    for (const s of services) s.kill('SIGKILL');
     await stage?.stop();
   });
-
-  /** A service process the way `plat dev` runs it, minus tsx watch; resolves with its output once it exits. */
-  const runService = (env: Record<string, string> = {}) => {
-    const { child, token } = spawnService(stage, manifest, root, 'ticker', { watch: false, env });
-    services.push(child);
-    let output = '';
-    child.stdout?.on('data', (c) => (output += c));
-    child.stderr?.on('data', (c) => (output += c));
-    const exited = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)));
-    const waitFor = async (text: string) => {
-      const deadline = Date.now() + 30_000;
-      while (!output.includes(text) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
-      if (!output.includes(text)) throw new Error(`no "${text}" in:\n${output}`);
-    };
-    return { child, token, output: () => output, exited, waitFor };
-  };
 
   it('provisions the stage and returns bindings', () => {
     expect(stage.bindings.app).toBe('basic-app');
@@ -127,26 +108,6 @@ describe.skipIf(!findEmulatorBinary())('local stage on the AWS Emulator', () => 
       await new Promise((r) => setTimeout(r, 200));
     expect(workerOutput).toContain('hello from basic-app');
     expect(dispatcher!.pending()).toBe(0);
-  });
-
-  it('runs a service with the SDK runtime and stops it on SIGTERM after its finalizers', async () => {
-    const service = runService();
-    await service.waitFor('hello from basic-app ticker on ticker');
-    expect(service.output()).toContain(`${service.token} start`);
-    expect(service.output()).toContain('service ticker start');
-    service.child.kill('SIGTERM');
-    expect(await service.exited).toBe(0);
-    expect(service.output()).toContain('ticker flushed');
-    expect(service.output()).toContain('service ticker stop (SIGTERM)');
-    expect(service.output()).not.toContain(`${service.token} exit`);
-  });
-
-  it('tells `plat dev` when a service crashes', async () => {
-    const service = runService({ TICKER_CRASH: '1' });
-    expect(await service.exited).toBe(1);
-    expect(service.output()).toContain('ticker crashed');
-    expect(service.output()).toContain('service ticker stop (crash)');
-    expect(service.output()).toContain(`${service.token} exit 1`);
   });
 
   it('serves the app through the SDK server wrapper', async () => {

@@ -1,6 +1,6 @@
 /**
  * `@ericminassian/platform`: what app code imports. Every platform resource
- * as an Effect service, the web server, worker and service entry points, and an
+ * as an Effect service, the web server and worker entry points, and an
  * in-memory platform for unit tests. Backed by AWS (DynamoDB, SQS,
  * EventBridge, S3, SSM, Cognito, AppSync Events, SES) through the bindings
  * the engine injects; under `plat dev` the same code talks to the AWS
@@ -11,9 +11,6 @@
  *
  *   // src/worker.ts
  *   export default defineWorker({ layer: Platform.layer, queues: { ... }, ... });
- *
- *   // src/ais.ts (a long-running service)
- *   export default defineService({ layer: Platform.layer, run: ingest });
  *
  * The browser-safe pieces an `HttpApi` definition needs (`Authentication`,
  * `CurrentUser`, `User`) are in `@ericminassian/platform/api`; browsers
@@ -96,6 +93,5 @@ export {
   type StoredObject,
   type StoreFor,
 } from './services.ts';
-export { defineService, type ServiceDefinition } from './service.ts';
 export { traced } from './traced.ts';
 export { defineWorker, type WorkerDefinition } from './worker.ts';

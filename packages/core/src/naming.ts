@@ -141,21 +141,6 @@ export const names = {
     fit(`${app}--${stage}--${eventType.replace(/[^A-Za-z0-9._-]/g, '_')}`, 64),
   scheduleGroup: (app: string, stage: string) => `${app}--${stage}`,
   schedule: (cronKey: string) => cronKey,
-  /**
-   * A long-running service's ECS service and task definition family (ECS
-   * names are their own namespace, so `worker` can't clash with the Lambda).
-   */
-  service: (app: string, stage: string, key: string) => `${app}--${stage}--${key}`,
-  serviceLogGroup: (app: string, stage: string, key: string) =>
-    `/platform/apps/${app}/${stage}/services/${key}`,
-  /** Tag of a service's image for one deployment in the container repository (≤ 103 of ECR's 128 chars). */
-  serviceImageTag: (app: string, stage: string, key: string, deploymentId: string) =>
-    `${app}--${stage}--${key}--${deploymentId}`,
-  /**
-   * One-shot schedule, in the stage's schedule group, that stops a preview's
-   * service. Cron keys can't contain `--`, so it never clashes with a cron.
-   */
-  serviceStopSchedule: (key: string) => `${key}--stop`,
   userPoolClient: (app: string, stage: string) => `${app}--${stage}`,
   /** SES tenant and its configuration set (≤ 64 chars each; the base is ≤ 52). */
   emailTenant: (app: string, stage: string) => `${app}--${stage}`,
@@ -203,16 +188,6 @@ export const platformNames = {
   realtimeApi: 'platform-realtime',
   /** Its Lambda authorizer (signed-in subscribe tokens). */
   realtimeAuthorizer: 'platform-realtime-authorizer',
-  /** ECS cluster every stage's containers run in (long-running services). */
-  containerCluster: 'platform',
-  /** VPC and security group containers run in: public subnets, no NAT, egress only. */
-  containerNetwork: 'platform-containers',
-  /** ECR repository of every container image the platform builds; tags name app, stage and deployment. */
-  containerRepository: 'platform-containers',
-  /** Role ECS uses to pull images and ship container logs (the app's code runs as its stage role). */
-  containerExecutionRole: 'platform-container-execution',
-  /** Role EventBridge Scheduler uses to scale containers (a preview's stop schedule). */
-  containerSchedulerRole: 'platform-container-scheduler',
   /** Description of the API's subscribe-only key for `public` stages (how the control plane finds it). */
   realtimePublicKey: 'platform-public-subscribe',
   /** The control plane's own app name (services/control-plane/plat.config.ts), stage prod. */

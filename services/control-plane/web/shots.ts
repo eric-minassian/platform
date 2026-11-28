@@ -17,7 +17,7 @@ import { createServer } from 'vite';
 
 const root = resolve(import.meta.dirname, '..');
 
-/** Each page worth a picture, on the demo's apps: atlas has jobs, inbox a service and email, notes realtime. */
+/** Each page worth a picture, on the demo's apps: atlas has jobs, inbox email, notes realtime. */
 const PAGES: Record<string, string> = {
   apps: '/',
   overview: '/apps/atlas',
@@ -27,7 +27,6 @@ const PAGES: Record<string, string> = {
   errors: '/apps/atlas/errors',
   alerts: '/apps/atlas/alerts?rule=a_jobs',
   jobs: '/apps/atlas/jobs',
-  services: '/apps/inbox/services',
   email: '/apps/inbox/email',
   realtime: '/apps/notes/realtime',
   database: '/apps/atlas/database',

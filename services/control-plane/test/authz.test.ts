@@ -26,7 +26,7 @@ const config: PlatformConfig = definePlatformConfig({
   ],
   reservedAppNames: [],
   previewTtlDays: 7,
-  limits: { appsPerMember: 2, stagesPerApp: 5, emailsPerDay: 2000, servicesPerApp: 3 },
+  limits: { appsPerMember: 2, stagesPerApp: 5, emailsPerDay: 2000 },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });
 

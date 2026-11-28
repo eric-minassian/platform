@@ -70,7 +70,7 @@ export const handlerKey = (kind: HandlerKind, name: string): string => `${kind}:
 /**
  * Name of the one-shot schedule for a retry or delayed send (≤ 64 chars of
  * Scheduler's alphabet). It leads with `_`, which no cron key (a cron's own
- * schedule) or service stop schedule (`<key>--stop`) starts with, then the
+ * schedule) starts with, then the
  * kind and queue or cron key, so the console can count what's waiting per
  * queue with a name prefix. Event types can be long and contain `:`, so they
  * are hashed.

@@ -278,7 +278,6 @@ function Limits({ limits: l }: { limits: AdminOverview['limits'] }) {
   const rows: Array<[string, string, string]> = [
     ['Apps per member', fmtNum(l.appsPerMember), 'apps a member can create'],
     ['Stages per app', fmtNum(l.stagesPerApp), 'prod and previews together'],
-    ['Services per app', fmtNum(l.servicesPerApp), 'long-running services'],
     ['Email recipients a day', l.emailsPerDay.toLocaleString('en'), 'per stage, UTC day'],
     ...(l.edgeRequestsPerMinute === undefined
       ? []

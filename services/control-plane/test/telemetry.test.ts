@@ -22,7 +22,6 @@ import {
   toLimitStats,
   toMetricsPoints,
   toRouteStats,
-  toServiceRuns,
   toUptimePoint,
 } from '../src/telemetry/query.ts';
 import { TelemetryWriter } from '../src/telemetry/write.ts';
@@ -52,6 +51,13 @@ describe('parseLogMessage', () => {
     expect(parseLogMessage(JSON.stringify({ level: 'INFO', message: line }))?.t).toBe('req');
     expect(parseLogMessage('START RequestId: abc')).toBeNull();
     expect(parseLogMessage('{"not":"platform"}')).toBeNull();
+  });
+
+  it('drops events of long-running services, which apps on older SDKs still send', () => {
+    const start = { ...base, t: 'env', ts: T, event: 'start', runtime: 'service', name: 'ais' };
+    const run = { ...base, t: 'job', ts: T, kind: 'service', name: 'ais', status: 'error', dur: 5000 };
+    expect(parseLogMessage(JSON.stringify(start))).toBeNull();
+    expect(parseLogMessage(JSON.stringify(run))).toBeNull();
   });
 
   it('reads compact lines: no path when it is the route, spans counted, no first attempt', () => {
@@ -189,24 +195,6 @@ describe('aggregate', () => {
       ['c#todo#prod#1d', { count: 3, sum: 140 }, { max: 90 }],
     ]);
   });
-  it('counts a service’s container starts on the stage and next to its runs', () => {
-    const agg = aggregate([
-      { ...base, t: 'env', ts: T, event: 'start', runtime: 'service', name: 'ais' },
-      { ...base, t: 'env', ts: T + 1, event: 'stop', runtime: 'service', name: 'ais', reason: 'SIGTERM' },
-      { ...base, t: 'job', ts: T + 2, kind: 'service', name: 'ais', status: 'error', dur: 5000 },
-      { ...base, t: 'job', ts: T + 3, kind: 'service', name: 'ais/poll', status: 'ok', dur: 20 },
-    ]);
-    expect(agg.rollups.find((r) => r.pk === 'm#todo#prod#1m')!.add).toEqual({ serviceStarts: 1 });
-    const rows = agg.rollups.filter((r) => r.pk === 'j#todo#prod#1h');
-    expect(rows.map((r) => r.sk).toSorted()).toEqual([
-      '2026-11-14T10:00:00.000Z#service:ais',
-      '2026-11-14T10:00:00.000Z#service:ais/poll',
-    ]);
-    const service = rows.find((r) => r.sk.endsWith('#service:ais'));
-    expect(service!.add).toMatchObject({ starts: 1, error: 1 });
-    expect(service!.set).toEqual({ kind: 'service', name: 'ais', lastRun: T + 2 });
-  });
-
   it('groups errors by fingerprint and keeps the latest sample', () => {
     const err = (ts: number, message: string): TelemetryEvent => ({
       ...base,
@@ -445,20 +433,16 @@ describe('query mapping', () => {
       { ts: '2026-11-14T10:00:00.000Z', allowed: 2, denied: 1 },
     ]);
   });
-  it('lists service runs as jobs, but not rows that only count container starts', () => {
+  it('leaves out job rows of long-running services, stored before they were removed', () => {
     const items = [
       { sk: 'a#service:ais', kind: 'service', name: 'ais', starts: 2 },
       { sk: 'a#service:ais/poll', kind: 'service', name: 'ais/poll', ok: 3, l1: 3, lastRun: T },
       { sk: 'b#service:ais', kind: 'service', name: 'ais', starts: 1, ok: 1, error: 2, l9: 3 },
       { sk: 'b#queue:emails', kind: 'queue', name: 'emails', ok: 1 },
     ];
-    expect(toJobStats(items.slice(0, 2)).map((j) => `${j.kind}:${j.name}`)).toEqual(['service:ais/poll']);
     expect(toJobStats(items).map((j) => [`${j.kind}:${j.name}`, j.ok, j.error])).toEqual([
-      ['service:ais', 1, 2],
-      ['service:ais/poll', 3, 0],
       ['queue:emails', 1, 0],
     ]);
-    expect(toServiceRuns(items)).toEqual(new Map([['ais', { starts: 3, failedRuns: 2 }]]));
   });
 
   it('summarizes last-hour health', () => {

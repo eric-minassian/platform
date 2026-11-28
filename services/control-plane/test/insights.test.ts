@@ -312,7 +312,7 @@ describe('stats', () => {
       ],
       streams: [
         { '@log': '000000000000:/platform/apps/shop/prod/web', n: '9' },
-        { '@log': '000000000000:/platform/apps/shop/prod/services/ais', n: '1' },
+        { '@log': '000000000000:/platform/apps/shop/prod/worker', n: '1' },
       ],
       routes: [
         { route: '/b', n: '1' },
@@ -342,7 +342,7 @@ describe('stats', () => {
     ]);
     assert.deepStrictEqual(stats.facets.stream, [
       { value: 'web', count: 9 },
-      { value: 'service:ais', count: 1 },
+      { value: 'worker', count: 1 },
     ]);
     assert.deepStrictEqual(stats.facets.route, [
       { value: '/a', count: 5 },
@@ -358,7 +358,7 @@ describe('stats', () => {
 describe('traces', () => {
   it('validates routes and jobs', () => {
     assert.strictEqual(
-      checkTraceFilters({ routes: ['GET /api/items/:id'], jobs: ['service:ais/flush'] }),
+      checkTraceFilters({ routes: ['GET /api/items/:id'], jobs: ['cron:digest'] }),
       undefined,
     );
     assert.match(checkTraceFilters({ routes: ['/api/x'] }) ?? '', /METHOD \/pattern/);
@@ -366,6 +366,7 @@ describe('traces', () => {
     assert.match(checkTraceFilters({ jobs: ['refresh'] }) ?? '', /kind:name/);
     assert.match(checkTraceFilters({ jobs: ['queue:a"b'] }) ?? '', /kind:name/);
     assert.match(checkTraceFilters({ jobs: ['nope:x'] }) ?? '', /kind:name/);
+    assert.match(checkTraceFilters({ jobs: ['service:ais'] }) ?? '', /kind:name/);
     assert.strictEqual(checkTraceFilters({ minMs: -1 }), 'minMs can’t be negative');
   });
 

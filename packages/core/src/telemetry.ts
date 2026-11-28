@@ -62,8 +62,7 @@ export type RequestEvent = typeof RequestEvent.Type;
 export const ErrorEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('err'),
-  /** `service`: a long-running service's `run` failed (it is rerun after a backoff). */
-  source: Schema.Literals(['http', 'job', 'unhandled', 'log', 'service']),
+  source: Schema.Literals(['http', 'job', 'unhandled', 'log']),
   name: Schema.String,
   message: Schema.String,
   stack: Schema.optional(Schema.String),
@@ -73,15 +72,11 @@ export const ErrorEvent = Schema.Struct({
 });
 export type ErrorEvent = typeof ErrorEvent.Type;
 
-/**
- * One unit of work. `service` jobs come from long-running services: `<service>`
- * is a run of the service that ended (it is rerun; `dur` is how long it ran),
- * `<service>/<unit>` a unit of work it marked with `traced`.
- */
+/** One unit of work. */
 export const JobEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('job'),
-  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke', 'service']),
+  kind: Schema.Literals(['queue', 'event', 'cron', 'invoke']),
   name: Schema.String,
   status: Schema.Literals(['ok', 'error']),
   dur: Schema.Finite,
@@ -141,21 +136,17 @@ export const LimitEvent = Schema.Struct({
 });
 export type LimitEvent = typeof LimitEvent.Type;
 
-/** A runtime process starting or stopping (`service`: a container of a long-running service). */
+/** A runtime process starting or stopping. */
 export const EnvEvent = Schema.Struct({
   ...base,
   t: Schema.Literal('env'),
   event: Schema.Literals(['start', 'stop']),
-  runtime: Schema.Literals(['web', 'worker', 'service']),
+  runtime: Schema.Literals(['web', 'worker']),
   /**
    * How a deployed server runs (`runtime: 'web'`): `request`, a function per
    * request, or `instance`, a Web Function environment. Absent under `plat dev`.
    */
   compute: Schema.optional(Schema.Literals(['request', 'instance'])),
-  /** The service's name (`runtime: 'service'`). */
-  name: Schema.optional(Schema.String),
-  /** Why it stopped, e.g. `SIGTERM`. */
-  reason: Schema.optional(Schema.String),
   initMs: Schema.optional(Schema.Finite),
 });
 export type EnvEvent = typeof EnvEvent.Type;
@@ -266,12 +257,11 @@ export function bucketStart(ts: number, res: Resolution): number {
  * - `m#<app>#<stage>#<res>`  sk `<iso>`           whole-stage HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[], cold,
  *                                                  dur (ms handling them, summed), and process starts:
  *                                                  webStarts (webInits of them reported webInitMs, summed),
- *                                                  workerStarts, serviceStarts
+ *                                                  workerStarts
  * - `r#<app>#<stage>#<res>`  sk `<iso>#<METHOD> <route>`  per-route HTTP: req, s2xx, s3xx, s4xx, s5xx, lat[],
  *                                                  cold, method, route. Rows from before November 2026 have no
  *                                                  s2xx, s3xx or cold: their req − s4xx − s5xx were 2xx
- * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]; `service:<name>` rows also
- *                                                  count `starts` (containers of that service starting)
+ * - `j#<app>#<stage>#<res>`  sk `<iso>#<kind>:<name>`  jobs: ok, error, lat[]
  * - `c#<app>#<stage>#<res>`  sk `<iso>#<metric>`  custom metrics: count, sum, max (and the unit); rows from
  *                                                  before November 2026 have no max
  * - `l#<app>#<stage>#<res>`  sk `<iso>#<limit>`   rate limit checks: allowed, denied

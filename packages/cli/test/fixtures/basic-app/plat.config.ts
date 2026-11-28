@@ -8,5 +8,4 @@ export default {
   db: true,
   queues: { jobs: {} },
   crons: { tick: { schedule: '*/5 * * * *', timeoutSeconds: 30 } },
-  services: { ticker: { entry: 'src/ticker.ts' } },
 } satisfies AppConfig;

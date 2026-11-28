@@ -189,9 +189,9 @@ describe('stage role policy', () => {
     expect(sids).not.toContain('InvokeWorker');
   });
 
-  it('trusts Lambda, Scheduler and ECS tasks', () => {
+  it('trusts Lambda and Scheduler', () => {
     expect(policies.stageTrustPolicy().Statement[0]?.Principal).toEqual({
-      Service: ['lambda.amazonaws.com', 'scheduler.amazonaws.com', 'ecs-tasks.amazonaws.com'],
+      Service: ['lambda.amazonaws.com', 'scheduler.amazonaws.com'],
     });
   });
 

@@ -13,6 +13,7 @@ import {
   type ErrorOccurrencesResponse,
   type FacetCount,
   fingerprint,
+  JobKind,
   type LogFilters,
   type LogLevelName,
   type LogLine,
@@ -499,7 +500,7 @@ export function pageRows<R extends SearchRow>(
 // Traces
 // ---------------------------------------------------------------------------
 
-const JOB_KINDS = new Set(['queue', 'event', 'cron', 'invoke', 'service']);
+const JOB_KINDS: ReadonlySet<string> = new Set(JobKind.literals);
 const ROUTE_KEY = /^([A-Z]{1,16}) (\/.*)$/;
 
 /** Why trace filters can't be queried, or undefined. */

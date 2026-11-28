@@ -40,14 +40,6 @@ test('jobs: dead letters can be redriven and discarded, and discarding asks a pe
   expect(refused.ok).toBe(false);
 });
 
-test('services: stopping a service asks first and names it', async () => {
-  await renderConsole('/apps/inbox/services', 'Services');
-  await screen.findByRole('button', { name: 'Stop imap-sync' });
-  expect(expectNamed(agent)).toEqual(expect.arrayContaining(['Restart imap-sync', 'Stop imap-sync']));
-  await agent.act({ steps: [{ ref: 'Stop imap-sync', action: 'press' }] });
-  expect(await screen.findByRole('alertdialog')).toBeTruthy();
-});
-
 test('email: removing a suppressed address asks first', async () => {
   await renderConsole('/apps/inbox/email', 'Email');
   await screen.findByRole('button', { name: 'Remove bounced@example.net' });

@@ -77,7 +77,7 @@ export function registerLifecycle(program: Command): void {
         ...(opts.stage ? { stage: opts.stage } : {}),
         wait: opts.wait,
       });
-      result({ deployment: r.deployment, url: r.url, services: r.services }, (v) => v.url);
+      result({ deployment: r.deployment, url: r.url }, (v) => v.url);
     }),
   );
 
@@ -90,19 +90,14 @@ export function registerLifecycle(program: Command): void {
           .default(String(PLATFORM_DEFAULTS.localPort))
           .env('PLAT_DEV_PORT'),
       )
-      .option('--spans', 'also print trace spans (db, queue, fetch calls)')
-      .option(
-        '--no-services',
-        "don't run the app's long-running services (e.g. for a source that limits connections)",
-      ),
+      .option('--spans', 'also print trace spans (db, queue, fetch calls)'),
   ).action(
-    action(async (opts: CommonOpts & { port: string; spans?: boolean; services: boolean }) => {
+    action(async (opts: CommonOpts & { port: string; spans?: boolean }) => {
       const { runDev } = await import('../dev/index.ts');
       await runDev({
         cwd: process.cwd(),
         port: parsePort(opts.port),
         ...(opts.spans ? { spans: true } : {}),
-        services: opts.services,
       });
     }),
   );

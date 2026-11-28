@@ -48,8 +48,6 @@ import {
   type SecretInfo,
   type SeriesQuery,
   type SeriesResponse,
-  type ServiceActionResponse,
-  type ServicesResponse,
   type StageRecord,
   type StoredObjectInfo,
   type SuppressedResponse,
@@ -314,8 +312,8 @@ export class ApiClient {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/errors`, { query: q }), 'errors');
   }
   /**
-   * `stream`: `web`, `worker` or `service:<name>`. Structured `filters` run
-   * the search on Logs Insights, where `filter` is plain text.
+   * `stream`: `web` or `worker`. Structured `filters` run the search on Logs
+   * Insights, where `filter` is plain text.
    */
   logs(
     app: string,
@@ -396,10 +394,6 @@ export class ApiClient {
     );
   }
 
-  services(app: string, q: { stage: string; from: number; to: number; res: Resolution }) {
-    return this.request<ServicesResponse>('GET', `/v1/apps/${enc(app)}/services`, { query: q });
-  }
-
   // ------------------------------------------------------------- data
   collections(app: string, q: { stage: string }) {
     return this.request<DataCollections>('GET', `/v1/apps/${enc(app)}/data/collections`, { query: q });
@@ -418,7 +412,7 @@ export class ApiClient {
     );
   }
 
-  // ------------------------------------------------------------- secrets, services & jobs
+  // ------------------------------------------------------------- secrets & jobs
   async listSecrets(app: string, q: { stage: string }): Promise<SecretInfo[]> {
     return list(await this.request('GET', `/v1/apps/${enc(app)}/secrets`, { query: q }), 'secrets');
   }
@@ -432,22 +426,6 @@ export class ApiClient {
     return this.request<unknown>('DELETE', `/v1/apps/${enc(app)}/secrets/${enc(name)}`, {
       query: secretScope(q),
     });
-  }
-  /** `restart`: a fresh task on the same build; `stop`: until started again or redeployed. */
-  serviceAction(
-    app: string,
-    name: string,
-    action: 'restart' | 'start' | 'stop',
-    q: { stage: string; minutes?: number },
-  ) {
-    return this.request<ServiceActionResponse>(
-      'POST',
-      `/v1/apps/${enc(app)}/services/${enc(name)}/${action}`,
-      {
-        query: { stage: q.stage },
-        body: action === 'start' && q.minutes !== undefined ? { minutes: q.minutes } : {},
-      },
-    );
   }
   runCron(app: string, name: string, stage: string) {
     return this.request<unknown>('POST', `/v1/apps/${enc(app)}/crons/${enc(name)}/run`, {

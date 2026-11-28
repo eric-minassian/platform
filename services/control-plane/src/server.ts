@@ -10,7 +10,6 @@ import { HttpLive } from './api/http.ts';
 import { Artifacts } from './artifacts.ts';
 import { Tokens } from './auth.ts';
 import { DataBrowser } from './data.ts';
-import { StageEngine } from './deploy.ts';
 import { Dns } from './dns.ts';
 import { EdgeFloor } from './edge-floor.ts';
 import { AppEmail } from './email.ts';
@@ -18,7 +17,6 @@ import { GitHub } from './github.ts';
 import { WorkerJobs } from './jobs/call.ts';
 import { AppQueues } from './jobs/queues.ts';
 import { AppRealtime } from './jobs/realtime.ts';
-import { AppServices } from './jobs/services.ts';
 import { BaseLive } from './layers.ts';
 import { Logs } from './logs.ts';
 import { AppSecrets } from './secrets.ts';
@@ -33,7 +31,6 @@ export const ServerLive = HttpLive.pipe(
       AppQueues.layer,
       AppRealtime.layer,
       AppSecrets.layer,
-      AppServices.layer.pipe(Layer.provide([StageEngine.layer, TelemetryQuery.layer])),
       Artifacts.layer,
       DataBrowser.layer,
       Dns.layer,

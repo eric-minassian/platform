@@ -9,7 +9,6 @@ import {
   ChartGantt,
   ChartSpline,
   CircleDollarSign,
-  Container,
   Database,
   HardDrive,
   KeyRound,
@@ -33,7 +32,6 @@ export type AppPage =
   | '/apps/$app/errors'
   | '/apps/$app/alerts'
   | '/apps/$app/jobs'
-  | '/apps/$app/services'
   | '/apps/$app/email'
   | '/apps/$app/realtime'
   | '/apps/$app/database'
@@ -81,12 +79,6 @@ export const APP_NAV: readonly NavGroup[] = [
         label: 'Jobs',
         icon: ListChecks,
         when: (m) => Object.keys(m.queues).length + m.events.length + Object.keys(m.crons).length > 0,
-      },
-      {
-        page: '/apps/$app/services',
-        label: 'Services',
-        icon: Container,
-        when: (m) => Object.keys(m.services).length > 0,
       },
       { page: '/apps/$app/email', label: 'Email', icon: Mail, when: (m) => m.email !== undefined },
       { page: '/apps/$app/realtime', label: 'Realtime', icon: Radio, when: (m) => m.realtime !== undefined },

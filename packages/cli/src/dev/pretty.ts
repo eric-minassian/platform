@@ -44,11 +44,6 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
       return stack ? `${head}\n${stack}` : head;
     }
     case 'job': {
-      // A service job without a unit name is a run of the service itself that ended.
-      if (e.kind === 'service' && !e.name.includes('/')) {
-        const outcome = e.status === 'ok' ? pc.yellow('returned') : pc.red('failed');
-        return `${pc.cyan('service')} ${e.name} run ${outcome} ${pc.dim(`after ${formatDuration(e.dur)}`)}${trace}`;
-      }
       const status = e.status === 'ok' ? pc.green('ok') : pc.red('error');
       return `${pc.cyan('job')} ${e.kind}:${e.name} ${status} ${pc.dim(`${Math.round(e.dur)}ms`)}${e.attempt && e.attempt > 1 ? pc.yellow(` attempt ${e.attempt}`) : ''}${trace}`;
     }
@@ -71,9 +66,8 @@ export function formatEvent(e: TelemetryEvent, opts: { spans?: boolean } = {}): 
     case 'limit':
       return e.ok ? null : pc.yellow(`rate limit ${e.name}: over`);
     case 'env': {
-      const what = e.runtime === 'service' && e.name ? `service ${e.name}` : `${e.runtime} environment`;
-      const detail = e.reason ?? (e.initMs !== undefined ? `${Math.round(e.initMs)}ms init` : undefined);
-      return pc.dim(`${what} ${e.event}${detail ? ` (${detail})` : ''}`);
+      const detail = e.initMs !== undefined ? ` (${Math.round(e.initMs)}ms init)` : '';
+      return pc.dim(`${e.runtime} environment ${e.event}${detail}`);
     }
     case 'span':
       return opts.spans
@@ -107,7 +101,7 @@ export function prefixer(label: string, write: (s: string) => void, opts: { span
   };
 }
 
-/** `850ms`, `4.2s`, `3m 05s`, `2h 10m`: a service run can last days. */
+/** `850ms`, `4.2s`, `3m 05s`, `2h 10m`. */
 export function formatDuration(ms: number): string {
   if (ms < 1_000) return `${Math.round(ms)}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;

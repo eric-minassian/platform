@@ -338,9 +338,6 @@ export function pretty(e: TelemetryEvent): string {
     case 'err':
       return `${c('dim', time)} ${c('red', `✖ ${e.name}: ${e.message}`)}${e.stack ? `\n${c('dim', e.stack.split('\n').slice(1, 6).join('\n'))}` : ''}`;
     case 'job':
-      // A service job without a unit name is a run of the service itself that ended.
-      if (e.kind === 'service' && !e.name.includes('/'))
-        return `${c('dim', time)} ${c(e.status === 'ok' ? 'yellow' : 'red', `service ${e.name} run ${e.status === 'ok' ? 'returned' : 'failed'}`)} ${c('dim', `after ${duration(e.dur)}`)}`;
       return `${c('dim', time)} ${c(e.status === 'ok' ? 'cyan' : 'red', `${e.kind}:${e.name}`)} ${e.status} ${c('dim', duration(e.dur))}`;
     case 'span':
       return c(
@@ -358,16 +355,15 @@ export function pretty(e: TelemetryEvent): string {
     case 'limit':
       return e.ok ? c('dim', `${time} limit ${e.name} ok`) : c('yellow', `${time} limit ${e.name} over`);
     case 'env': {
-      const what = e.runtime === 'service' && e.name ? `service ${e.name}` : e.runtime;
-      const detail = e.reason ?? (e.initMs !== undefined ? `${e.initMs}ms` : undefined);
-      return c('dim', `${time} ${what} ${e.event}${detail ? ` (${detail})` : ''}`);
+      const detail = e.initMs !== undefined ? ` (${e.initMs}ms)` : '';
+      return c('dim', `${time} ${e.runtime} ${e.event}${detail}`);
     }
     default:
       return e satisfies never;
   }
 }
 
-/** `12.3ms`, `4.2s`, `3m 05s`: a service run can last days. */
+/** `12.3ms`, `4.2s`, `3m 05s`. */
 function duration(ms: number): string {
   if (ms < 1_000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;

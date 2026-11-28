@@ -24,7 +24,7 @@ test("an app's sidebar names every page it has, and only those", async () => {
     'Settings',
   ];
   for (const name of pages) expect(within(nav).getByRole('link', { name })).toBeTruthy();
-  // atlas declares no services, email or realtime, and dashboards are gone.
+  // atlas declares no email or realtime, and dashboards are gone.
   expect(within(nav).getAllByRole('link')).toHaveLength(pages.length);
   expect(screen.getByRole('link', { name: 'Settings', current: 'page' })).toBeTruthy();
   expect(screen.getByRole('link', { name: 'Overview' }).getAttribute('aria-current')).toBeNull();

@@ -1,5 +1,4 @@
 import { Effect, Schema } from 'effect';
-import { FARGATE_CPUS, type FargateCpu, fargateSizeIssue } from './compute.ts';
 import { validateCron } from './cron.ts';
 import { EMAIL_DEFAULT_DAILY_LIMIT, EMAIL_NAME_MESSAGE, EMAIL_NAME_PATTERN } from './email.ts';
 import { DEFAULT_ATTEMPTS, MAX_ATTEMPTS } from './jobs.ts';
@@ -133,19 +132,6 @@ const StoreSchema = Schema.Struct({
   public: Schema.Boolean.pipe(orElse(false)),
   expireAfterDays: Schema.optional(intBetween(1, 3650)),
 });
-const ServiceSchema = Schema.Struct({
-  entry: Schema.String,
-  cpu: Schema.Literals(FARGATE_CPUS).pipe(orElse(0.25)),
-  memoryMb: Schema.Int.pipe(orElse(512)),
-  spot: Schema.Boolean.pipe(orElse(true)),
-  previewMinutes: intBetween(0, 1440).pipe(orElse(30)),
-}).check(
-  Schema.makeFilter((s) => {
-    const issue = fargateSizeIssue(s.cpu, s.memoryMb);
-    return issue ? [{ path: ['memoryMb'], issue }] : undefined;
-  }),
-);
-
 const RealtimeSubscribeSchema = Schema.Literals(['public', 'signed-in']);
 
 const EmailSchema = Schema.Union([
@@ -192,7 +178,11 @@ export const ManifestSchema = Schema.Struct({
   env: recordOf(ENV_NAME_PATTERN, Schema.String).pipe(orElse({})),
   realtime: Schema.optional(RealtimeSchema),
   email: EmailSchema.pipe(orElse(false)),
-  services: recordOf(RESOURCE_KEY_PATTERN, ServiceSchema, RESOURCE_KEY_MESSAGE).pipe(orElse({})),
+  // Long-running services ran on Fargate until 0.5.0. Each paid for its vCPU, memory and public
+  // IPv4 address all month, the only part of an app billed while idle.
+  services: removed(
+    'removed in 0.5.0: hold a connection from a cron instead, listening for a while each run',
+  ),
 }).check(
   Schema.makeFilter((m) => {
     if (!m.realtime) return undefined;
@@ -338,34 +328,6 @@ export interface StoreConfig {
 }
 
 /**
- * A long-running process: it holds connections open (WebSocket or
- * server-sent-event sources) and writes what it receives to the db, storage,
- * queues or realtime. One instance per stage, restarted when it crashes and
- * replaced on each deploy. Unlike everything else it is billed while it runs:
- * about $6 a month at the default size on Spot.
- */
-export interface ServiceConfig {
-  /** Module whose default export is `defineService(...)` from `@ericminassian/platform`. */
-  entry: string;
-  /** vCPUs: 0.25 (default), 0.5, 1, 2 or 4. */
-  cpu?: FargateCpu;
-  /**
-   * Memory in MB, one of the sizes Fargate pairs with `cpu`: 512, 1024 or
-   * 2048 for 0.25 vCPU; 1024-4096 for 0.5; 2048-8192 for 1; 4096-16384 for 2;
-   * 8192-30720 for 4 (steps of 1024). Default 512.
-   */
-  memoryMb?: number;
-  /**
-   * Run on Fargate Spot, about 70% cheaper. AWS may reclaim it with two
-   * minutes' notice (the service gets SIGTERM) and the platform starts a
-   * replacement. Default `true`.
-   */
-  spot?: boolean;
-  /** Minutes a preview stage runs it after each deploy before stopping it; 0 means never. Default 30. */
-  previewMinutes?: number;
-}
-
-/**
  * Live updates pushed to browsers. The server and worker publish; browsers
  * subscribe (they never publish). Events aren't stored: a browser that was
  * away re-reads what it shows after reconnecting.
@@ -437,8 +399,6 @@ export interface AppConfig {
   realtime?: RealtimeConfig;
   /** Send email with the SDK's `Email` service: `true`, or `{ name, dailyLimit }`. */
   email?: boolean | EmailConfig;
-  /** Long-running processes, e.g. stream ingest. Keys are 1-20 chars of a-z, 0-9 and hyphens. */
-  services?: { readonly [name: string]: ServiceConfig };
 }
 
 /**
@@ -525,8 +485,6 @@ export const ResolvedManifest = Schema.Struct({
   ),
   /** Present when the stage sends email. `dailyLimit` is the declared one (prod's). */
   email: Schema.optional(Schema.Struct({ name: Schema.optional(Schema.String), dailyLimit: Schema.Finite })),
-  /** Long-running services, with defaults applied. */
-  services: Schema.Record(Schema.String, ServiceSchema).pipe(orElse({})),
 });
 export type ResolvedManifest = typeof ResolvedManifest.Type;
 
@@ -614,7 +572,6 @@ export function resolveManifest(m: Manifest): ResolvedManifest {
       ? { realtime: { subscribe: m.realtime.subscribe, channels: Object.keys(m.realtime.channels) } }
       : {}),
     ...(email ? { email } : {}),
-    services: m.services,
   };
 }
 

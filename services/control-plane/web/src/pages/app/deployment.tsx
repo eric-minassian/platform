@@ -216,7 +216,6 @@ function EventLog({ d }: { d: DeploymentRecord }) {
 function ManifestSummary({ manifest: m }: { manifest: ResolvedManifest }) {
   const queues = Object.keys(m.queues);
   const crons = Object.entries(m.crons);
-  const services = Object.entries(m.services);
   return (
     <Panel title="Manifest" description="What this deployment declared">
       <Facts className="grid-cols-[6.5rem_1fr]">
@@ -272,22 +271,6 @@ function ManifestSummary({ manifest: m }: { manifest: ResolvedManifest }) {
         </Fact>
         <Fact label="Email">
           {m.email ? `${m.email.name ?? 'on'} · ${m.email.dailyLimit} recipients a day` : 'off'}
-        </Fact>
-        <Fact label="Services">
-          {services.length ? (
-            <span className="flex flex-col">
-              {services.map(([name, s]) => (
-                <span key={name}>
-                  <Mono>{name}</Mono>{' '}
-                  <span className="text-muted-foreground">
-                    {s.cpu} vCPU · {s.memoryMb} MB{s.spot ? ' · Spot' : ''}
-                  </span>
-                </span>
-              ))}
-            </span>
-          ) : (
-            'none'
-          )}
         </Fact>
       </Facts>
     </Panel>

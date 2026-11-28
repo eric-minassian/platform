@@ -5,7 +5,6 @@ import {
   type ConditionFailed,
   Db,
   type DocumentNotFound,
-  defineService,
   defineWorker,
   Email,
   type EmailNotSent,
@@ -169,22 +168,6 @@ export const email = Effect.gen(function* () {
     ),
   );
   return [unchecked, handled];
-});
-
-export const ingest = defineService({
-  layer: Platform.layer,
-  run: Effect.forever(
-    Effect.gen(function* () {
-      const queues = yield* Queues;
-      yield* queues.send('emails', { to: 'a@example.com' });
-    }).pipe(traced('relay')),
-  ),
-});
-
-export const unprovidedService = defineService({
-  layer: Platform.layerMemory(),
-  // @ts-expect-error the layer doesn't provide `Unknown`
-  run: Effect.asVoid(Unknown),
 });
 
 class Dropped extends Schema.TaggedError<Dropped>()('Dropped', {}) {}

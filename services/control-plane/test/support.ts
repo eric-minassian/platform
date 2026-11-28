@@ -22,7 +22,6 @@ import type { GithubOidcClaims } from '../src/authz.ts';
 import { Aws } from '../src/aws.ts';
 import { type GithubAppSettings, Settings } from '../src/config.ts';
 import { DataBrowser } from '../src/data.ts';
-import { StageEngine } from '../src/deploy.ts';
 import { Dns } from '../src/dns.ts';
 import { EdgeFloor } from '../src/edge-floor.ts';
 import { AppEmail } from '../src/email.ts';
@@ -30,7 +29,6 @@ import { GitHub } from '../src/github.ts';
 import { WorkerJobs } from '../src/jobs/call.ts';
 import { AppQueues } from '../src/jobs/queues.ts';
 import { AppRealtime } from '../src/jobs/realtime.ts';
-import { AppServices } from '../src/jobs/services.ts';
 import { Logs } from '../src/logs.ts';
 import { AppSecrets } from '../src/secrets.ts';
 import {
@@ -57,7 +55,7 @@ export const platform: PlatformConfig = definePlatformConfig({
   ],
   reservedAppNames: ['www'],
   previewTtlDays: 7,
-  limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000, servicesPerApp: 2 },
+  limits: { appsPerMember: 2, stagesPerApp: 3, emailsPerDay: 2000 },
   telemetry: { logRetentionDays: { prod: 30, other: 7 } },
 });
 
@@ -290,10 +288,6 @@ export interface TestServices {
   readonly email?: Partial<AppEmail['Service']>;
   readonly edge?: Partial<EdgeFloor['Service']>;
   readonly artifacts?: Partial<Artifacts['Service']>;
-  /** The engine behind the services endpoints (`describeServices`, `controlService`). */
-  readonly engine?: Partial<StageEngine['Service']>;
-  /** AWS clients the services endpoints call (CloudWatch). */
-  readonly aws?: Partial<Aws['Service']>;
   /** What a synchronous worker job (`call`) answers. */
   readonly call?: WorkerJobs['Service']['call'];
   /** Records the jobs the API runs on the worker. */
@@ -305,9 +299,8 @@ export interface TestServices {
  * every hostname is free, and services a test doesn't describe fail loudly
  * when called.
  */
-export const testServices = (options: TestServices = {}) => {
-  const telemetry = Layer.mock(TelemetryQuery, options.telemetry ?? {});
-  return Layer.mergeAll(
+export const testServices = (options: TestServices = {}) =>
+  Layer.mergeAll(
     options.store ?? memoryStore(),
     options.alerts ?? AlertRules.memory(),
     tokensLayer,
@@ -321,10 +314,7 @@ export const testServices = (options: TestServices = {}) => {
       resolveCname: () => Promise.reject(Object.assign(new Error('no data'), { code: 'ENODATA' })),
       resolve4: () => Promise.reject(Object.assign(new Error('no data'), { code: 'ENODATA' })),
     }),
-    telemetry,
-    AppServices.layer.pipe(
-      Layer.provide([Layer.mock(StageEngine, options.engine ?? {}), awsLayer(options.aws ?? {}), telemetry]),
-    ),
+    Layer.mock(TelemetryQuery, options.telemetry ?? {}),
     Layer.mock(Logs, options.logs ?? {}),
     Layer.mock(DataBrowser, options.data ?? {}),
     Layer.mock(AppSecrets, options.secrets ?? {}),
@@ -339,4 +329,3 @@ export const testServices = (options: TestServices = {}) => {
       ...(options.call ? { call: options.call } : {}),
     }),
   ).pipe(Layer.provideMerge(settingsLayer(options.settings)));
-};

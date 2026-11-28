@@ -8,7 +8,7 @@ import { fmtNum, shortId } from '../../format.ts';
 import { cn } from '../../lib/utils.ts';
 import { Button } from '../ui/button.tsx';
 import { Checkbox } from '../ui/checkbox.tsx';
-import { LEVEL_COLORS, streamLabel } from './log-table.tsx';
+import { LEVEL_COLORS } from './log-table.tsx';
 
 type FacetKey = 'levels' | 'streams' | 'routes' | 'status' | 'revs';
 
@@ -31,7 +31,6 @@ export function toggleFilter(filters: LogFilters, key: FacetKey, value: string):
 }
 
 function label(key: FacetKey, value: string): string {
-  if (key === 'streams') return streamLabel(value);
   if (key === 'revs') return shortId(value);
   return value;
 }

@@ -1,11 +1,10 @@
 /**
  * What an app costs: Cost Explorer's daily cost of everything tagged to it,
- * what its servers would cost a month in each compute mode (the chooser's
- * daily estimate, and how far along a switch is), and its services that
- * bill for as long as they run.
+ * and what its servers would cost a month in each compute mode (the chooser's
+ * daily estimate, and how far along a switch is).
  */
 import { useAtomValue } from '@effect/atom-react';
-import type { AlwaysOnCost, StageCompute } from '@ericminassian/platform-core';
+import type { StageCompute } from '@ericminassian/platform-core';
 import { Atom } from 'effect/reactivity';
 import type { ReactElement } from 'react';
 import { ApiClient, fresh, timeToLive } from '../../client.ts';
@@ -13,7 +12,7 @@ import { DailyCostChart } from '../../components/cost/daily-cost-chart.tsx';
 import { columns, DataTable } from '../../components/data-table.tsx';
 import { Loaded, Mono, PageHeader, Panel, Stat, Stats } from '../../components/page.tsx';
 import { Badge } from '../../components/ui/badge.tsx';
-import { fmtNum, fmtUsd, fmtUsdCents, fmtUsdEstimate, relTime } from '../../format.ts';
+import { fmtNum, fmtUsd, fmtUsdEstimate, relTime } from '../../format.ts';
 import { appRoute } from '../../router.tsx';
 
 // Cost Explorer refreshes daily and charges per request, so an hour-old answer is fresh enough.
@@ -38,7 +37,6 @@ export function CostPage(): ReactElement {
         {(c) => {
           const last7 = c.days.slice(-7).reduce((a, d) => a + d.usd, 0);
           const average = c.days.length ? c.days.reduce((a, d) => a + d.usd, 0) / c.days.length : 0;
-          const alwaysOn = (c.alwaysOn ?? []).reduce((a, s) => a + s.monthly.totalUsd, 0);
           return (
             <div className="flex flex-col gap-5">
               <Stats>
@@ -49,11 +47,6 @@ export function CostPage(): ReactElement {
                 />
                 <Stat label="Last 7 days" value={fmtUsd(last7)} note="the latest day may be partial" />
                 <Stat label="Daily average" value={fmtUsd(average)} note={`over ${c.days.length} days`} />
-                <Stat
-                  label="Always-on services"
-                  value={c.alwaysOn?.length ? `≈ ${fmtUsdCents(alwaysOn)}` : '–'}
-                  note={c.alwaysOn?.length ? 'a month, if they run all month' : 'none'}
-                />
               </Stats>
               <Panel
                 title="Cost per day"
@@ -66,7 +59,6 @@ export function CostPage(): ReactElement {
                 />
               </Panel>
               {c.compute && c.compute.length > 0 && <Compute stages={c.compute} />}
-              {c.alwaysOn && c.alwaysOn.length > 0 && <AlwaysOn services={c.alwaysOn} />}
             </div>
           );
         }}
@@ -181,49 +173,6 @@ function Compute({ stages }: { stages: readonly StageCompute[] }) {
       }
     >
       <DataTable columns={computeColumns} data={stages} getRowId={(s) => s.stage} />
-    </Panel>
-  );
-}
-
-const always = columns<AlwaysOnCost>();
-const alwaysColumns = always.columns([
-  always.accessor('stage', { header: 'Stage', cell: ({ getValue }) => <Mono>{getValue()}</Mono> }),
-  always.accessor('name', { header: 'Service', cell: ({ getValue }) => <Mono>{getValue()}</Mono> }),
-  always.accessor('detail', { header: 'Size', enableSorting: false }),
-  always.accessor((a) => a.monthly.computeUsd, {
-    id: 'compute',
-    header: 'Compute',
-    meta: { numeric: true },
-    cell: ({ getValue }) => fmtUsdCents(getValue()),
-  }),
-  always.accessor((a) => a.monthly.publicIpv4Usd, {
-    id: 'ipv4',
-    header: 'Public IPv4',
-    meta: { numeric: true },
-    cell: ({ getValue }) => fmtUsdCents(getValue()),
-  }),
-  always.accessor((a) => a.monthly.totalUsd, {
-    id: 'total',
-    header: 'Monthly',
-    meta: { numeric: true },
-    cell: ({ getValue }) => <span className="font-medium">{fmtUsdCents(getValue())}</span>,
-  }),
-]);
-
-function AlwaysOn({ services }: { services: readonly AlwaysOnCost[] }) {
-  return (
-    <Panel
-      flush
-      title="Always on"
-      description="Estimated from each service's size, running all month"
-      footer="Cost Explorer doesn't attribute a container's public IPv4 address to the app; it's counted with the shared platform resources under Platform."
-    >
-      <DataTable
-        columns={alwaysColumns}
-        data={services}
-        getRowId={(a) => `${a.stage}:${a.kind}:${a.name}`}
-        initialSorting={[{ id: 'total', desc: true }]}
-      />
     </Panel>
   );
 }

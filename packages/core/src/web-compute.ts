@@ -16,8 +16,10 @@
  * mode (and back) by `simulateWebCompute`.
  */
 import { base64url, fromBase64url } from './base64url.ts';
-import { HOURS_PER_MONTH } from './compute.ts';
 import { PROD_STAGE } from './constants.ts';
+
+/** Hours AWS bills a month of always-on capacity for. */
+const HOURS_PER_MONTH = 730;
 
 export const WEB_COMPUTE = ['request', 'instance'] as const;
 export type WebCompute = (typeof WEB_COMPUTE)[number];

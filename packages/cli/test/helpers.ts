@@ -8,7 +8,6 @@ export const FIXTURES = fileURLToPath(new URL('./fixtures/', import.meta.url));
 export const SDK_STUBS = {
   '@ericminassian/platform/server': join(FIXTURES, 'sdk-stub', 'server.mjs'),
   '@ericminassian/platform/worker': join(FIXTURES, 'sdk-stub', 'worker.mjs'),
-  '@ericminassian/platform/service': join(FIXTURES, 'sdk-stub', 'service.mjs'),
 };
 
 export function tempDir(prefix = 'plat-test-'): string {

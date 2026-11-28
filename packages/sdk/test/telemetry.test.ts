@@ -1,8 +1,9 @@
+import { stripVTControlCharacters } from 'node:util';
 import { SLOW_TRACE_MS, type TelemetryEvent, traceSampled } from '@ericminassian/platform-core';
-import { Effect, Schema } from 'effect';
+import { Effect, Exit, Layer, Schema } from 'effect';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { newContext, runWithContext, setRoute } from '../src/runtime/context.ts';
-import { emit, log, MAX_HELD_SPANS, setTraceSampler, span } from '../src/runtime/telemetry.ts';
+import { emit, log, MAX_HELD_SPANS, pretty, span } from '../src/runtime/telemetry.ts';
 import {
   captureTelemetry,
   createPlatformFetch,
@@ -11,6 +12,7 @@ import {
   useTestBindings,
 } from '../src/testing.ts';
 import { traced } from '../src/traced.ts';
+import { defineWorker } from '../src/worker.ts';
 
 class Throttled extends Schema.TaggedError<Throttled, { readonly brand: unique symbol }>()('Throttled', {
   message: Schema.String,
@@ -170,23 +172,32 @@ describe('spans of a request or job', () => {
   });
 
   it('of a unit of work follow the same rule', async () => {
-    setTraceSampler(() => false);
-    const flush = (fail: boolean) =>
-      Effect.promise(() => call('db.putMany', 'positions')).pipe(
-        Effect.andThen(fail ? Effect.fail(new Throttled({ message: 'slow down' })) : Effect.void),
-        traced('flush'),
-      );
-    await Effect.runPromise(flush(false));
-    await Effect.runPromiseExit(flush(true));
+    const worker = createWorkerHandler(
+      defineWorker({
+        layer: Layer.empty,
+        invoke: {
+          flush: (fail: boolean) =>
+            Effect.promise(() => call('db.putMany', 'positions')).pipe(
+              Effect.andThen(fail ? Effect.fail(new Throttled({ message: 'slow down' })) : Effect.void),
+              traced('flush'),
+            ),
+        },
+      }),
+    );
+    await worker({ __platform: 'invoke', name: 'flush', payload: false, trace: UNSAMPLED }, {});
+    await expect(
+      worker({ __platform: 'invoke', name: 'flush', payload: true, trace: UNSAMPLED }, {}),
+    ).rejects.toThrow('slow down');
     const jobs = ofType('job');
     expect(jobs).toMatchObject([
-      { name: 'flush', status: 'ok', calls: 1 },
-      { name: 'flush', status: 'error' },
+      { status: 'ok', calls: 2 },
+      { status: 'error', trace: UNSAMPLED },
     ]);
     expect(jobs[0]).not.toHaveProperty('span');
     expect(jobs[1]!.span).toMatch(/^[0-9a-f]{16}$/);
     expect(ofType('span')).toMatchObject([
-      { op: 'db.putMany', trace: jobs[1]!.trace, parent: jobs[1]!.span },
+      { op: 'db.putMany', parent: jobs[1]!.span },
+      { op: 'traced', name: 'flush', status: 'error', parent: jobs[1]!.span },
     ]);
   });
 
@@ -217,6 +228,26 @@ describe('lines', () => {
     expect(ofType('job')[1]).toMatchObject({ attempt: 3 });
   });
 
+  it('read as one line each under plat dev', () => {
+    const plain = (e: TelemetryEvent) => stripVTControlCharacters(pretty(e));
+    const base = {
+      _p: 1 as const,
+      ts: Date.UTC(2026, 10, 16, 9, 30),
+      app: 'todo',
+      stage: 'local',
+      rev: 'd1',
+    };
+    expect(plain({ ...base, t: 'env', event: 'start', runtime: 'worker', initMs: 40 })).toBe(
+      '09:30:00.000 worker start (40ms)',
+    );
+    expect(plain({ ...base, t: 'job', kind: 'queue', name: 'emails', status: 'ok', dur: 12.5 })).toBe(
+      '09:30:00.000 queue:emails ok 12.5ms',
+    );
+    expect(plain({ ...base, t: 'job', kind: 'cron', name: 'listen', status: 'error', dur: 185_000 })).toBe(
+      '09:30:00.000 cron:listen error 3m 05s',
+    );
+  });
+
   it('pin the bytes a typical request writes', async () => {
     // The same request (three calls, a 200) wrote four lines, 1,060 bytes, before spans were held
     // and lines compacted. CloudWatch Logs bills each byte, plus 26 bytes per line.
@@ -236,5 +267,37 @@ describe('lines', () => {
     await request(SAMPLED);
     expect(written()).toHaveLength(4);
     expect(bytes(written())).toBe(1_040);
+  });
+});
+
+describe('traced', () => {
+  it('inside a job is a span of its trace', async () => {
+    const worker = createWorkerHandler(
+      defineWorker({
+        layer: Layer.empty,
+        invoke: {
+          refresh: () =>
+            Effect.promise(() => call('db.query', 'feeds')).pipe(
+              traced('load'),
+              Effect.andThen(Effect.void.pipe(traced('store'))),
+            ),
+        },
+      }),
+    );
+    await worker({ __platform: 'invoke', name: 'refresh', payload: null, trace: SAMPLED }, {});
+    const [job] = ofType('job');
+    expect(ofType('span').map((s) => [s.op, s.name])).toEqual([
+      ['db.query', 'feeds'],
+      ['traced', 'load'],
+      ['traced', 'store'],
+    ]);
+    for (const s of ofType('span')) expect(s).toMatchObject({ trace: SAMPLED, parent: job!.span });
+  });
+
+  it('outside a request or job runs the effect as it is', async () => {
+    expect(await Effect.runPromise(Effect.succeed(7).pipe(traced('batch')))).toBe(7);
+    const error = new Throttled({ message: 'slow down' });
+    expect(await Effect.runPromiseExit(Effect.fail(error).pipe(traced('batch')))).toEqual(Exit.fail(error));
+    expect(tel.events).toEqual([]);
   });
 });

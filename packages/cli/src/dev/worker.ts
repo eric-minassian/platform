@@ -149,7 +149,7 @@ export type DispatchLog = (
 export interface Dispatcher {
   /**
    * Where the SDK hands jobs and invokes (`PLATFORM_LOCAL_WORKER_URL`): the
-   * server, services and the worker itself (retries) post here.
+   * server and the worker itself (retries) post here.
    */
   url: string;
   runCron(name: string): Promise<InvokeResult>;
